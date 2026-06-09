@@ -14,6 +14,8 @@
 
 #include <yaml-cpp/yaml.h>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <opencv2/opencv.hpp>
 
 namespace lightning {
@@ -197,6 +199,18 @@ void SlamSystem::SaveMap(const std::string& path) {
     tm.ConvertFromFullPCD(global_map, start_pose, save_path);
 
     pcl::io::savePCDFileBinaryCompressed(save_path + "/global.pcd", *global_map);
+    std::ofstream pose_file(save_path + "/pose.txt");
+    pose_file << "# id timestamp tx ty tz qx qy qz qw\n";
+    const bool use_lio_pose_for_map = use_lio_sam_ || !options_.with_loop_closing_;
+    for (const auto& kf : keyframes) {
+        SE3 pose = use_lio_pose_for_map ? kf->GetLIOPose() : kf->GetOptPose();
+        NavState state = kf->GetState();
+        Vec3d t = pose.translation();
+        Quatd q = pose.unit_quaternion();
+        pose_file << std::setprecision(18) << kf->GetID() << " " << state.timestamp_ << " " << t.x() << " "
+                  << t.y() << " " << t.z() << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w()
+                  << "\n";
+    }
     // pcl::io::savePCDFileBinaryCompressed(save_path + "/global_no_loop.pcd", *global_map_no_loop);
     // pcl::io::savePCDFileBinaryCompressed(save_path + "/global_raw.pcd", *global_map_raw);
 
