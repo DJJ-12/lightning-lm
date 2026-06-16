@@ -150,6 +150,11 @@ void LocSystem::SetInitPose(const SE3 &pose) {
     loc_started_ = true;
 }
 
+void LocSystem::Start() {
+    loc_started_ = true;
+    LOG(INFO) << "localization started";
+}
+
 void LocSystem::ProcessIMU(const IMUPtr &imu) {
     if (loc_started_) {
         loc_->ProcessIMUMsg(imu);

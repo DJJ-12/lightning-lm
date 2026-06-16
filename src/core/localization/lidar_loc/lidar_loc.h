@@ -63,6 +63,7 @@ class LidarLoc {
 
         double max_update_cache_dis_ = 30.0;  // 更新动态图层的缓冲距离
         std::string recover_pose_path_ = "./data/recover_pose.txt";
+
     };
 
     explicit LidarLoc(Options options = Options());
@@ -122,6 +123,8 @@ class LidarLoc {
 
     /// 设置init pose
     void SetInitialPose(SE3 init_pose);
+
+    void SetMapOdomPose(const SE3& map_odom_pose);
 
     /// 获取定位结果
     LocalizationResult GetLocalizationResult() {
@@ -201,6 +204,9 @@ class LidarLoc {
     bool initial_pose_set_ = false;  // 定位是否被手动设置
     SE3 initial_pose_;               // 手动设置的初始位姿
     bool loc_inited_ = false;        // 定位是否初始化成功
+
+    std::mutex map_odom_mutex_;
+    SE3 map_odom_pose_;
 
     double current_timestamp_ = 0;  // 本次输入的时间戳
     double last_timestamp_ = 0;     // 上次输入的时间戳

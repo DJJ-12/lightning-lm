@@ -84,10 +84,12 @@ class SlamSystem {
     Options options_;
     std::atomic_bool running_ = false;
     bool use_lio_sam_ = false;
+    SE3 T_base_lidar_ = SE3();
 
     rclcpp::Service<SaveMapService>::SharedPtr savemap_service_ = nullptr;
 
     std::string map_name_;  // 地图名
+    std::string base_link_frame_ = "base_link";
 
     std::shared_ptr<PointCloudPreprocess> preprocess_ = nullptr;
     std::shared_ptr<LioSamMapping> lio_sam_ = nullptr;

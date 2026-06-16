@@ -9,9 +9,9 @@
 #include "ui/pangolin_window.h"
 #include "wrapper/ros_utils.h"
 
-DEFINE_string(config, "./config/default.yaml", "配置文件");
+DEFINE_string(config, "./config/default.yaml", "config file");
 
-/// 运行定位的测试
+/// Run online localization.
 int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
     FLAGS_colorlogtostderr = true;
@@ -29,8 +29,7 @@ int main(int argc, char** argv) {
         LOG(ERROR) << "failed to init loc";
     }
 
-    /// 默认起点开始定位
-    loc.SetInitPose(SE3());
+    loc.Start();
     loc.Spin();
 
     rclcpp::shutdown();

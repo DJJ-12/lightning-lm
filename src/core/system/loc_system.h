@@ -39,6 +39,8 @@ class LocSystem {
     /// 设置初始化位姿
     void SetInitPose(const SE3& pose);
 
+    void Start();
+
     /// 处理IMU
     void ProcessIMU(const lightning::IMUPtr& imu);
 

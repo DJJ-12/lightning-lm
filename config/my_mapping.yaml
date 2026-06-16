@@ -10,6 +10,15 @@ common:
   odometry_frame: "odom"
   map_frame: "map"
 
+  extrinsicBaseLidarTrans: [4.230, -0.745, 0.0]
+  extrinsicBaseLidarRot: [0.0, -1.0, 0.0,
+                          1.0,  0.0, 0.0,
+                          0.0,  0.0, 1.0]
+  # 后雷达参数
+  #[0.745, 4.230, 0.0]
+  #[-1.0,  0.0, 0.0,
+  #0.0, -1.0, 0.0,
+  #0.0,  0.0, 1.0]
 fasterlio:
   # 输入预处理：2 表示 Velodyne 格式，使用点云中每个点的相对时间戳
   lidar_type: 4
@@ -154,13 +163,18 @@ lio_sam:
   imuGyrBiasN: 3.5640318696367613e-05
   imuGravity: 9.80511
   imuRPYWeight: 0.01
-  extrinsicTrans: [-0.200, 0.745, 0.409]
-  extrinsicRot: [0.0, 1.0, 0.0,
-               -1.0,  0.0, 0.0,
-               0.0,  0.0, 1.0]
-  extrinsicRPY: [0.0, -1.0, 0.0,
-               1.0,  0.0, 0.0,
-               0.0,  0.0, 1.0]
+  # base_link 原点在 IMU 坐标系下的位置
+  # 当前 offline LIO-SAM 主链路中 extrinsicTrans 基本不参与 deskew，
+  # 但为了语义一致，仍然建议这样填写。
+  extrinsicTrans: [4.030, 0.0, 0.409]
+   # IMU 数据旋转到 base_link 坐标系。
+  # 因为 IMU 和 base_link 方向一致，所以是单位阵。
+  extrinsicRot: [1.0, 0.0, 0.0,
+                 0.0, 1.0, 0.0,
+                 0.0, 0.0, 1.0]
+  extrinsicRPY: [1.0, 0.0, 0.0,
+                 0.0, 1.0, 0.0,
+                 0.0, 0.0, 1.0]
 
   # LOAM feature threshold
   edgeThreshold: 1.0
@@ -204,3 +218,10 @@ lio_sam:
   mappingMotionMaxCurvature: 2.0
   mappingMotionMaxRollPitchDeg: 20.0
   mappingFallbackIcpSkipOnBadLmMotion: true
+
+relocalization:
+  initialMapOdomTrans: [0.0, 0.0, 0.0]
+
+  initialMapOdomRot: [1.0, 0.0, 0.0,
+                      0.0, 1.0, 0.0,
+                      0.0, 0.0, 1.0]

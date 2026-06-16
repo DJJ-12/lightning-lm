@@ -1,9 +1,13 @@
 #pragma once
 
+#include <deque>
+#include <mutex>
+
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "std_msgs/msg/int32.hpp"
 
 #include "common/imu.h"
+#include "common/nav_state.h"
 #include "core/lio/laser_mapping.h"
 #include "core/lio/lio_sam/lio_sam_mapping.h"
 #include "core/lio/pointcloud_preprocess.h"
@@ -33,7 +37,7 @@ class Localization {
         bool with_ui_ = false;      // 是否带ui
 
         /// 参数
-        SE3 T_body_lidar_;
+        SE3 T_base_lidar_ = SE3();
 
         bool enable_lidar_odom_skip_ = false;  // 是否允许激光里程计跳帧
         int lidar_odom_skip_num_ = 1;          // 如果允许跳帧，跳多少帧
@@ -93,6 +97,8 @@ class Localization {
     // void SetHealthDiagNormalCallback(interface::health_diag_normal_callback&& callback);
 
    private:
+    void UpdateMapOdomByPGOResult(const LocalizationResult& pgo_result);
+
     /// 模块  ========================================================================================================
     std::mutex global_mutex_;  // 防止处理过程中被重复init
     Options options_;
@@ -121,6 +127,10 @@ class Localization {
 
     /// 结果数据 =====================================================================================================
     LocalizationResult loc_result_;
+    std::mutex map_odom_mutex_;
+    SE3 map_odom_pose_;
+    std::mutex lo_pose_mutex_;
+    std::deque<NavState> lo_pose_queue_;
 
     /// 框架相关
     TFCallback tf_callback_;
@@ -132,6 +142,7 @@ class Localization {
     double last_imu_time_ = 0;
     double last_odom_time_ = 0;
     double last_cloud_time_ = 0;
+    std::string base_link_frame_ = "base_link";
 };
 }  // namespace loc
 

@@ -12,6 +12,7 @@
 #include "ui/pangolin_window.h"
 #include "wrapper/ros_utils.h"
 
+#include <pcl/common/transforms.h>
 #include <yaml-cpp/yaml.h>
 #include <filesystem>
 #include <fstream>
@@ -32,6 +33,34 @@ bool SlamSystem::Init(const std::string& yaml_path) {
         frontend = yaml["system"]["frontend"].as<std::string>();
     }
     use_lio_sam_ = frontend == "lio_sam" || frontend == "liosam";
+    if (yaml["common"] && yaml["common"]["base_link_frame"]) {
+        base_link_frame_ = yaml["common"]["base_link_frame"].as<std::string>();
+    }
+
+    std::vector<double> base_lidar_t{0.0, 0.0, 0.0};
+    std::vector<double> base_lidar_R{1.0, 0.0, 0.0,
+                                     0.0, 1.0, 0.0,
+                                     0.0, 0.0, 1.0};
+    if (yaml["extrinsicBaseLidarTrans"]) {
+        base_lidar_t = yaml["extrinsicBaseLidarTrans"].as<std::vector<double>>();
+    } else if (yaml["common"] && yaml["common"]["extrinsicBaseLidarTrans"]) {
+        base_lidar_t = yaml["common"]["extrinsicBaseLidarTrans"].as<std::vector<double>>();
+    }
+    if (yaml["extrinsicBaseLidarRot"]) {
+        base_lidar_R = yaml["extrinsicBaseLidarRot"].as<std::vector<double>>();
+    } else if (yaml["common"] && yaml["common"]["extrinsicBaseLidarRot"]) {
+        base_lidar_R = yaml["common"]["extrinsicBaseLidarRot"].as<std::vector<double>>();
+    }
+    CHECK_EQ(base_lidar_t.size(), 3);
+    CHECK_EQ(base_lidar_R.size(), 9);
+    Mat3d R_base_lidar;
+    R_base_lidar << base_lidar_R[0], base_lidar_R[1], base_lidar_R[2],
+        base_lidar_R[3], base_lidar_R[4], base_lidar_R[5],
+        base_lidar_R[6], base_lidar_R[7], base_lidar_R[8];
+    Quatd q_base_lidar(R_base_lidar);
+    q_base_lidar.normalize();
+    T_base_lidar_ = SE3(q_base_lidar, Vec3d(base_lidar_t[0], base_lidar_t[1], base_lidar_t[2]));
+    LOG(INFO) << "[BASE_LIDAR] T_base_lidar trans=" << T_base_lidar_.translation().transpose();
 
     preprocess_ = std::make_shared<PointCloudPreprocess>();
     if (!preprocess_->Init(yaml_path)) {
@@ -308,6 +337,11 @@ void SlamSystem::ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr& cl
     }
     CloudPtr input(new PointCloudType);
     preprocess_->Process(cloud, input);
+    CloudPtr input_base(new PointCloudType);
+    pcl::transformPointCloud(*input, *input_base, T_base_lidar_.matrix().cast<float>());
+    input_base->header = input->header;
+    input_base->header.frame_id = base_link_frame_;
+    input = input_base;
 
     Keyframe::Ptr kf;
     if (use_lio_sam_) {
@@ -353,6 +387,11 @@ void SlamSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr
 
     CloudPtr input(new PointCloudType);
     preprocess_->Process(cloud, input);
+    CloudPtr input_base(new PointCloudType);
+    pcl::transformPointCloud(*input, *input_base, T_base_lidar_.matrix().cast<float>());
+    input_base->header = input->header;
+    input_base->header.frame_id = base_link_frame_;
+    input = input_base;
 
     Keyframe::Ptr kf;
     if (use_lio_sam_) {

@@ -438,6 +438,11 @@ void LidarLoc::SetInitialPose(SE3 init_pose) {
     LOG(INFO) << "Set initial pose is: " << initial_pose_.translation().transpose();
 }
 
+void LidarLoc::SetMapOdomPose(const SE3& map_odom_pose) {
+    UL lock(map_odom_mutex_);
+    map_odom_pose_ = map_odom_pose;
+}
+
 void LidarLoc::Align(const CloudPtr& input) {
     // 输入必须非空
     assert(input != nullptr);
@@ -484,9 +489,27 @@ void LidarLoc::Align(const CloudPtr& input) {
 
         if (initial_pose_set_) {
             /// 尝试在给定点初始化
+            map_->LoadOnPose(initial_pose_);
+            UpdateGlobalMap();
             if (InitWithFP(input, initial_pose_)) {
                 LOG(INFO) << "init with external pose: " << initial_pose_.translation().transpose();
                 initial_pose_set_ = false;
+                return;
+            }
+        }
+
+        if (current_lo_pose_set_) {
+            SE3 guess_from_map_odom;
+            {
+                UL lock_map_odom(map_odom_mutex_);
+                guess_from_map_odom = map_odom_pose_ * current_lo_pose_;
+            }
+            LOG(INFO) << "[MAP_ODOM_INIT] guess map->base = "
+                      << guess_from_map_odom.translation().transpose();
+            map_->LoadOnPose(guess_from_map_odom);
+            UpdateGlobalMap();
+            if (InitWithFP(input, guess_from_map_odom)) {
+                LOG(INFO) << "[MAP_ODOM_INIT] success";
                 return;
             }
         }
@@ -513,6 +536,8 @@ void LidarLoc::Align(const CloudPtr& input) {
             bool fp_init_success = false;
             for (const auto& fp : all_fps) {
                 map_->LoadOnPose(fp.pose_);
+                //map_->LoadOnPose(fp.pose_) 只是加载地图块，UpdateGlobalMap() 才会把当前地图同步给 NDT target
+                UpdateGlobalMap();
                 if (InitWithFP(input, fp.pose_)) {
                     LOG(INFO) << "init with fp: " << fp.name_;
                     fp_init_success = true;
@@ -542,17 +567,13 @@ void LidarLoc::Align(const CloudPtr& input) {
     /// NOTE: LO设置预测的位置和LidarLoc自身递推设置预测的方法并不完全一致，自身外推容易受噪声影响
 
     SE3 guess_from_lo = last_abs_pose_;
-    if (last_lo_pose_set_ && current_lo_pose_set_) {
-        // 如果有里程计，则用两个时刻的相对定位来递推，估计一个当前pose的初值
-        const SE3 delta = last_lo_pose_.inverse() * current_lo_pose_;
-        guess_from_lo = last_abs_pose_ * delta;
-
-        LOG(INFO) << "current lo pose: " << current_lo_pose_.translation().transpose();
-        LOG(INFO) << "last lo pose: " << last_lo_pose_.translation().transpose();
-        LOG(INFO) << "lo motion: " << delta.translation().transpose();
-        LOG(INFO) << "last abs pose: " << last_abs_pose_.translation().transpose();
-        // guess_from_lo.translation()[2] = 0;
-        LOG(INFO) << "loc using lo guess: " << guess_from_lo.translation().transpose();
+    if (current_lo_pose_set_) {
+        {
+            UL lock_map_odom(map_odom_mutex_);
+            guess_from_lo = map_odom_pose_ * current_lo_pose_;
+        }
+        LOG(INFO) << "[MAP_ODOM_PRIOR] NDT prior map->base = "
+                  << guess_from_lo.translation().transpose();
     }
 
     SE3 guess_from_self = guess_from_lo;
@@ -713,6 +734,18 @@ void LidarLoc::Align(const CloudPtr& input) {
         UL lock(result_mutex_);
         localization_result_.timestamp_ = current_timestamp_;
         localization_result_.confidence_ = fitness_score;
+        if (loc_success) {
+            localization_result_.lidar_loc_valid_ = true;
+            localization_result_.status_ = LocalizationStatus::GOOD;
+        } else if (match_fail_count_ < 100) {
+            localization_result_.lidar_loc_valid_ = false;
+            localization_result_.status_ = LocalizationStatus::FOLLOWING_DR;
+        } else {
+            match_fail_count_ = 300;
+            localization_result_.lidar_loc_valid_ = false;
+            localization_result_.status_ = LocalizationStatus::FAIL;
+        }
+        /*
         if (match_fail_count_ < 100) {
             localization_result_.lidar_loc_valid_ = true;
             localization_result_.status_ = LocalizationStatus::GOOD;
@@ -724,7 +757,7 @@ void LidarLoc::Align(const CloudPtr& input) {
             localization_result_.lidar_loc_valid_ = false;
             localization_result_.status_ = LocalizationStatus::FAIL;
         }
-
+        */
         localization_result_.lidar_loc_odom_delta_ = delta_rel_abs_pose;
         localization_result_.lidar_loc_odom_error_normal_ = lidar_loc_odom_valid;
         localization_result_.pose_ = current_pose_esti;
@@ -845,14 +878,25 @@ bool LidarLoc::Localize(SE3& pose, double& confidence, CloudPtr input, CloudPtr 
     ndt->align(*output, guess_pose);
     trans = ndt->getFinalTransformation();
     confidence = ndt->getTransformationProbability();
-    /* 0530
+    /* 0615
     auto tgt = ndt->getInputTarget();
     if (!tgt->empty()) {
         pcl::io::savePCDFile("./data/tgt.pcd", *tgt);
     }
-    */
+    
     if (loc_inited_ == false && confidence > options_.min_init_confidence_) {
         loc_success = true;
+    } else {
+        loc_success = true;
+    }
+    */
+    if (!ndt->hasConverged()) {
+        LOG(WARNING) << "NDT has not converged";
+        return false;
+    }
+
+    if (!loc_inited_) {
+        loc_success = confidence > options_.min_init_confidence_;
     } else {
         loc_success = true;
     }

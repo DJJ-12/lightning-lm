@@ -6,6 +6,7 @@
 
 #include <opencv2/highgui.hpp>
 
+#include "core/lightning_math.hpp"
 #include "core/localization/pose_graph/pgo.h"
 #include "io/yaml_io.h"
 #include "ui/pangolin_window.h"
@@ -29,6 +30,66 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     std::string frontend = yaml.GetValue<std::string>("system", "frontend");
     
     use_lio_sam_ = frontend == "lio_sam" || frontend == "liosam";
+
+    YAML::Node yaml_node = YAML::LoadFile(yaml_path);
+    if (yaml_node["common"] && yaml_node["common"]["base_link_frame"]) {
+        base_link_frame_ = yaml_node["common"]["base_link_frame"].as<std::string>();
+    }
+    std::vector<double> base_lidar_t{0.0, 0.0, 0.0};
+    std::vector<double> base_lidar_R{1.0, 0.0, 0.0,
+                                     0.0, 1.0, 0.0,
+                                     0.0, 0.0, 1.0};
+    if (yaml_node["extrinsicBaseLidarTrans"]) {
+        base_lidar_t = yaml_node["extrinsicBaseLidarTrans"].as<std::vector<double>>();
+    } else if (yaml_node["common"] && yaml_node["common"]["extrinsicBaseLidarTrans"]) {
+        base_lidar_t = yaml_node["common"]["extrinsicBaseLidarTrans"].as<std::vector<double>>();
+    }
+    if (yaml_node["extrinsicBaseLidarRot"]) {
+        base_lidar_R = yaml_node["extrinsicBaseLidarRot"].as<std::vector<double>>();
+    } else if (yaml_node["common"] && yaml_node["common"]["extrinsicBaseLidarRot"]) {
+        base_lidar_R = yaml_node["common"]["extrinsicBaseLidarRot"].as<std::vector<double>>();
+    }
+    CHECK_EQ(base_lidar_t.size(), 3);
+    CHECK_EQ(base_lidar_R.size(), 9);
+    Mat3d R_base_lidar;
+    R_base_lidar << base_lidar_R[0], base_lidar_R[1], base_lidar_R[2],
+        base_lidar_R[3], base_lidar_R[4], base_lidar_R[5],
+        base_lidar_R[6], base_lidar_R[7], base_lidar_R[8];
+    Quatd q_base_lidar(R_base_lidar);
+    q_base_lidar.normalize();
+    options_.T_base_lidar_ = SE3(q_base_lidar, Vec3d(base_lidar_t[0], base_lidar_t[1], base_lidar_t[2]));
+    LOG(INFO) << "[BASE_LIDAR] T_base_lidar trans=" << options_.T_base_lidar_.translation().transpose();
+
+    std::vector<double> initial_map_odom_t{0.0, 0.0, 0.0};
+    std::vector<double> initial_map_odom_R{1.0, 0.0, 0.0,
+                                           0.0, 1.0, 0.0,
+                                           0.0, 0.0, 1.0};
+    if (yaml_node["relocalization"]) {
+        if (yaml_node["relocalization"]["initialMapOdomTrans"]) {
+            initial_map_odom_t = yaml_node["relocalization"]["initialMapOdomTrans"].as<std::vector<double>>();
+        }
+        if (yaml_node["relocalization"]["initialMapOdomRot"]) {
+            initial_map_odom_R = yaml_node["relocalization"]["initialMapOdomRot"].as<std::vector<double>>();
+        }
+    }
+    CHECK_EQ(initial_map_odom_t.size(), 3);
+    CHECK_EQ(initial_map_odom_R.size(), 9);
+    Mat3d R_map_odom;
+    R_map_odom << initial_map_odom_R[0], initial_map_odom_R[1], initial_map_odom_R[2],
+        initial_map_odom_R[3], initial_map_odom_R[4], initial_map_odom_R[5],
+        initial_map_odom_R[6], initial_map_odom_R[7], initial_map_odom_R[8];
+    Quatd q_map_odom(R_map_odom);
+    q_map_odom.normalize();
+    {
+        UL lock_map_odom(map_odom_mutex_);
+        map_odom_pose_ = SE3(q_map_odom,
+                             Vec3d(initial_map_odom_t[0], initial_map_odom_t[1], initial_map_odom_t[2]));
+    }
+    {
+        UL lock_lo(lo_pose_mutex_);
+        lo_pose_queue_.clear();
+    }
+    LOG(INFO) << "[MAP_ODOM_INIT] map_odom_pose trans=" << map_odom_pose_.translation().transpose();
 
     preprocess_ = std::make_shared<PointCloudPreprocess>();
     if (!preprocess_->Init(yaml_path)) {
@@ -78,10 +139,22 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
         LOG(ERROR) << "failed to initialize localization map";
         return false;
     }
+    {
+        UL lock_map_odom(map_odom_mutex_);
+        lidar_loc_->SetMapOdomPose(map_odom_pose_);
+    }
 
     /// pose graph
     pgo_ = std::make_shared<PGO>();
     pgo_->SetDebug(false);
+    pgo_->SetGlobalOutputHandleFunction([this](const LocalizationResult& res) {
+        UpdateMapOdomByPGOResult(res);
+
+        LOG(INFO) << "[PGO_RAW_OUTPUT] t=" << std::setprecision(14) << res.timestamp_
+                  << ", valid=" << int(res.valid_)
+                  << ", lidar_loc_valid=" << int(res.lidar_loc_valid_)
+                  << ", pose=" << res.pose_.translation().transpose();
+    });
 
     ///  各模块的异步调用
     options_.enable_lidar_loc_skip_ = yaml.GetValue<bool>("system", "enable_lidar_loc_skip");
@@ -146,6 +219,38 @@ void Localization::PublishLatestResult() {
     pgo->PublishLatestResult();
 }
 
+void Localization::UpdateMapOdomByPGOResult(const LocalizationResult& pgo_result) {
+    if (!pgo_result.valid_ || !pgo_result.lidar_loc_valid_) {
+        return;
+    }
+
+    SE3 odom_base_pose;
+    NavState best_match;
+    {
+        UL lock_lo(lo_pose_mutex_);
+        bool interp_success = math::PoseInterp<NavState>(
+            pgo_result.timestamp_, lo_pose_queue_, [](const NavState& s) { return s.timestamp_; },
+            [](const NavState& s) { return s.GetPose(); }, odom_base_pose, best_match, 5.0);
+        if (!interp_success) {
+            LOG(WARNING) << "[MAP_ODOM_UPDATE_FROM_PGO] failed to get odom->base pose";
+            return;
+        }
+    }
+
+    SE3 new_map_odom = pgo_result.pose_ * odom_base_pose.inverse();
+    {
+        UL lock_map_odom(map_odom_mutex_);
+        map_odom_pose_ = new_map_odom;
+    }
+
+    if (lidar_loc_) {
+        lidar_loc_->SetMapOdomPose(new_map_odom);
+    }
+
+    LOG(INFO) << "[MAP_ODOM_UPDATE_FROM_PGO] map_odom_pose trans = "
+              << new_map_odom.translation().transpose();
+}
+
 void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPtr cloud) {
     UL lock(global_mutex_);
     if (lidar_loc_ == nullptr || (!use_lio_sam_ && lio_ == nullptr) ||
@@ -156,6 +261,11 @@ void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPt
     // 串行模式
     CloudPtr laser_cloud(new PointCloudType);
     preprocess_->Process(cloud, laser_cloud);
+    CloudPtr cloud_base(new PointCloudType);
+    pcl::transformPointCloud(*laser_cloud, *cloud_base, options_.T_base_lidar_.matrix().cast<float>());
+    cloud_base->header = laser_cloud->header;
+    cloud_base->header.frame_id = base_link_frame_;
+    laser_cloud = cloud_base;
 
     if (options_.online_mode_) {
         lidar_odom_proc_cloud_.AddMessage(laser_cloud);
@@ -174,6 +284,11 @@ void Localization::ProcessLivoxLidarMsg(const livox_ros_driver2::msg::CustomMsg:
     // 串行模式
     CloudPtr laser_cloud(new PointCloudType);
     preprocess_->Process(cloud, laser_cloud);
+    CloudPtr cloud_base(new PointCloudType);
+    pcl::transformPointCloud(*laser_cloud, *cloud_base, options_.T_base_lidar_.matrix().cast<float>());
+    cloud_base->header = laser_cloud->header;
+    cloud_base->header.frame_id = base_link_frame_;
+    laser_cloud = cloud_base;
 
     if (options_.online_mode_) {
         lidar_odom_proc_cloud_.AddMessage(laser_cloud);
@@ -204,6 +319,19 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
         }
         lo_state = lio_->GetState();
         scan = lio_->GetProjCloud();
+    }
+
+    {
+        UL lock_lo(lo_pose_mutex_);
+        if (lo_pose_queue_.empty() || lo_state.timestamp_ >= lo_pose_queue_.back().timestamp_) {
+            lo_pose_queue_.emplace_back(lo_state);
+            while (lo_pose_queue_.size() > 1000) {
+                lo_pose_queue_.pop_front();
+            }
+        } else {
+            LOG(WARNING) << "[MAP_ODOM_LO_QUEUE] LO timestamp went backward: "
+                         << lo_state.timestamp_ - lo_pose_queue_.back().timestamp_;
+        }
     }
 
     lidar_loc_->ProcessLO(lo_state);
