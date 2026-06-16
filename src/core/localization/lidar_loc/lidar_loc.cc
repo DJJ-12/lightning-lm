@@ -448,10 +448,15 @@ void LidarLoc::Align(const CloudPtr& input) {
     assert(input != nullptr);
 
     // 点云去畸变定到了结束时间，所以该点云的定位也是到结束时间的
-    double current_time = math::ToSec(input->header.stamp) + lo::lidar_time_interval;
-    current_timestamp_ = current_time;
+    //double current_time = math::ToSec(input->header.stamp) + lo::lidar_time_interval;
+    double current_time = math::ToSec(input->header.stamp);
+    current_timestamp_ = math::ToSec(input->header.stamp);
 
-    LOG(INFO) << "current time: " << std::fixed << std::setprecision(12) << current_timestamp_;
+    LOG(INFO) << "[LIDAR_LOC_TIME] scan_stamp="
+          << std::fixed << std::setprecision(12)
+          << math::ToSec(input->header.stamp)
+          << ", current_time=" << current_timestamp_
+          << ", lidar_interval=" << lo::lidar_time_interval;
 
     /// 设置当前帧对应的rel_pose
     if (!AssignLOPose(current_time)) {
@@ -498,65 +503,36 @@ void LidarLoc::Align(const CloudPtr& input) {
             }
         }
 
-        if (current_lo_pose_set_) {
+        {
             SE3 guess_from_map_odom;
             {
                 UL lock_map_odom(map_odom_mutex_);
-                guess_from_map_odom = map_odom_pose_ * current_lo_pose_;
+
+                if (current_lo_pose_set_) {
+                    guess_from_map_odom = map_odom_pose_ * current_lo_pose_;
+                } else {
+                    // 在线定位刚启动时，LO 队列可能还不足以插值。
+                    // 此时认为 T_odom_base 近似为单位阵，
+                    // 直接用 initialMapOdom 作为第一次 map->base 初值。
+                    guess_from_map_odom = map_odom_pose_;
+                }
             }
-            LOG(INFO) << "[MAP_ODOM_INIT] guess map->base = "
-                      << guess_from_map_odom.translation().transpose();
+
+            LOG(INFO) << "[MAP_ODOM_INIT] current_lo_pose_set="
+                    << int(current_lo_pose_set_)
+                    << ", guess map->base = "
+                    << guess_from_map_odom.translation().transpose();
+
             map_->LoadOnPose(guess_from_map_odom);
             UpdateGlobalMap();
+
             if (InitWithFP(input, guess_from_map_odom)) {
-                LOG(INFO) << "[MAP_ODOM_INIT] success";
+                LOG(INFO) << "[MAP_ODOM_INIT] success with initial map_odom prior";
                 return;
             }
-        }
 
-        if (options_.init_with_fp_) {
-            /// 从功能点初始化
-            /// 如果之前尝试过，那么需要间隔一段时间再进行搜索
-            if (!fp_init_fail_pose_vec_.empty() && current_dr_pose_set_) {
-                SE3 last_tried_pose = fp_init_fail_pose_vec_.back();
-                bool should_try =
-                    (current_time - fp_last_tried_time_) > 2.0 ||
-                    (current_dr_pose_.translation() - last_tried_pose.translation()).norm() > 0.3 ||
-                    (current_dr_pose_.so3().inverse() * last_tried_pose.so3()).log().norm() > 10 * M_PI / 180.0;
-                if (!should_try) {
-                    LOG(INFO) << "skip trying init, please move to another place.";
-                    return;
-                }
-            } else {
-                LOG(INFO) << "fp tried pose: " << fp_init_fail_pose_vec_.size()
-                          << ", dr pose set: " << current_dr_pose_set_;
-            }
-
-            auto all_fps = map_->GetAllFP();
-            bool fp_init_success = false;
-            for (const auto& fp : all_fps) {
-                map_->LoadOnPose(fp.pose_);
-                //map_->LoadOnPose(fp.pose_) 只是加载地图块，UpdateGlobalMap() 才会把当前地图同步给 NDT target
-                UpdateGlobalMap();
-                if (InitWithFP(input, fp.pose_)) {
-                    LOG(INFO) << "init with fp: " << fp.name_;
-                    fp_init_success = true;
-                    break;
-                }
-            }
-
-            if (!fp_init_success) {
-                LOG(INFO) << "FP init failed.";
-                if (current_dr_pose_set_) {
-                    LOG(INFO) << "record fp failed time: " << std::setprecision(12) << current_time
-                              << ", pose: " << current_dr_pose_.translation().transpose();
-                    fp_last_tried_time_ = current_time;
-                    fp_init_fail_pose_vec_.emplace_back(current_dr_pose_);
-                }
-            } else {
-                fp_last_tried_time_ = 0;
-                fp_init_fail_pose_vec_.clear();
-            }
+            LOG(WARNING) << "[MAP_ODOM_INIT] failed with initial map_odom prior, wait next frame";
+            return;
         }
 
         /// 初始化未成功时，不往下走流程

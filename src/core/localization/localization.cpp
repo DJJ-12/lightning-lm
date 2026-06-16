@@ -438,6 +438,16 @@ void Localization::ProcessIMUMsg(IMUPtr imu) {
         return;
     }
 
+    if (!dr_state.pos_.allFinite() ||
+        !dr_state.vel_.allFinite() ||
+        !dr_state.bg_.allFinite() ||
+        !dr_state.grav_.allFinite() ||
+        !dr_state.rot_.unit_quaternion().coeffs().allFinite()) {
+        LOG(WARNING) << "[DR_STATE] invalid DR state, skip. t="
+                    << std::setprecision(14) << dr_state.timestamp_;
+        return;
+    }
+
     // /// 停车判定
     // constexpr auto kThVbrbStill = 0.05;  // 0.08;
     // constexpr auto kThOmegaStill = 0.05;

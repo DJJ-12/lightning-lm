@@ -540,6 +540,7 @@ bool LioSamMapping::Run() {
         x.lidar_odom_reliable_ = state_.lidar_odom_reliable_;
 
         kf_imu_.ChangeX(x);
+        kf_imu_.ChangeP(ESKF::CovType::Identity()); // 0616 日志出现eskf.cc:27 find nan or inf in P: inf
         kf_imu_.SetTime(state_.timestamp_);
 
         imu_dr_inited_ = true;

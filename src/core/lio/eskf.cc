@@ -36,6 +36,20 @@ void SymmetrizeAndFloorCovariance(CovType& P, double min_cov_diag) {
 namespace lightning {
 
 void ESKF::Predict(const double& dt, const ESKF::ProcessNoiseType& Q, const Vec3d& gyro, const Vec3d& acce) {
+    //0616 日志出现 find nan or inf in P: inf
+    if (!std::isfinite(dt) || dt <= 0.0 || dt > 0.15 ||
+        !gyro.allFinite() || !acce.allFinite() || !Q.allFinite()) {
+        LOG(WARNING) << "[ESKF_PREDICT] invalid input, skip. dt=" << dt
+                     << ", gyro=" << gyro.transpose()
+                     << ", acc=" << acce.transpose();
+        return;
+    }
+
+    if (!P_.allFinite()) {
+        LOG(WARNING) << "[ESKF_PREDICT] invalid P before predict, reset";
+        P_.setIdentity();
+    }
+    //0616 end
     Eigen::Matrix<double, NavState::full_dim, 1> f_ = x_.get_f(gyro, acce);  // 调用get_f 获取 速度 角速度 加速度
     Eigen::Matrix<double, NavState::full_dim, state_dim_> f_x_ = x_.df_dx(acce);
     Eigen::Matrix<double, NavState::full_dim, process_noise_dim_> f_w_ = x_.df_dw();
@@ -44,6 +58,18 @@ void ESKF::Predict(const double& dt, const ESKF::ProcessNoiseType& Q, const Vec3
 
     NavState x_before = x_;
     x_.oplus(f_, dt);
+    // 0616 日志出现 find nan or inf in P: inf
+    if (!x_.pos_.allFinite() ||
+        !x_.vel_.allFinite() ||
+        !x_.bg_.allFinite() ||
+        !x_.grav_.allFinite() ||
+        !x_.rot_.unit_quaternion().coeffs().allFinite()) {
+        LOG(WARNING) << "[ESKF_PREDICT] invalid state after predict, rollback";
+        x_ = x_before;
+        P_.setIdentity();
+        return;
+    }
+    // 0616 end
 
     F_x1_ = CovType::Identity();
 
@@ -92,6 +118,12 @@ void ESKF::Predict(const double& dt, const ESKF::ProcessNoiseType& Q, const Vec3
     P_ = (F_x1_)*P_ * (F_x1_).transpose() + (dt * f_w_final) * Q * (dt * f_w_final).transpose();
     P_ *= options_.predict_cov_inflation_;
     SymmetrizeAndFloorCovariance(P_, options_.min_cov_diag_);
+    // 0616 日志出现 find nan or inf in P: inf
+    if (!P_.allFinite()) {
+        LOG(WARNING) << "[ESKF_PREDICT] invalid P after predict, reset";
+        P_.setIdentity();
+    }
+    // 0616 end
 }
 
 /**

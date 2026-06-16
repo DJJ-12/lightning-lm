@@ -160,7 +160,7 @@ public:
 
     mapOptimization(const rclcpp::NodeOptions & options) : ParamServer("lio_sam_mapOptimization", options)
     {
-        cout << "------------build version - 20260514-1431 -------------------\n" << endl;
+        cout << "------------build version - 20260516-1739 -------------------\n" << endl;
         ISAM2Params parameters;
         parameters.relinearizeThreshold = 0.1;
         parameters.relinearizeSkip = 1;
