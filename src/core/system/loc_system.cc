@@ -76,7 +76,7 @@ bool LocSystem::Init(const std::string &yaml_path) {
 
             static int imu_count = 0;
             if (++imu_count % 200 == 0) {
-                LOG(INFO) << "[IMU_RECV] t=" << std::setprecision(14) << imu->timestamp;
+                //LOG(INFO) << "[IMU_RECV] t=" << std::setprecision(14) << imu->timestamp;
             }
 
             ProcessIMU(imu);
@@ -86,14 +86,14 @@ bool LocSystem::Init(const std::string &yaml_path) {
     cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
         cloud_topic_, lidar_qos,
         [this](sensor_msgs::msg::PointCloud2::SharedPtr cloud) {
-            Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", true);
+            Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", false);
         },
         lidar_sub_options);
 
     livox_sub_ = node_->create_subscription<livox_ros_driver2::msg::CustomMsg>(
         livox_topic_, lidar_qos,
         [this](livox_ros_driver2::msg::CustomMsg::SharedPtr cloud) {
-            Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", true);
+            Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", false);
         },
         lidar_sub_options);
         

@@ -89,6 +89,10 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
         UL lock_lo(lo_pose_mutex_);
         lo_pose_queue_.clear();
     }
+    {
+        UL lock_result(loc_result_mutex_);
+        loc_result_ = LocalizationResult();
+    }
     LOG(INFO) << "[MAP_ODOM_INIT] map_odom_pose trans=" << map_odom_pose_.translation().transpose();
 
     preprocess_ = std::make_shared<PointCloudPreprocess>();
@@ -147,15 +151,6 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     /// pose graph
     pgo_ = std::make_shared<PGO>();
     pgo_->SetDebug(false);
-    pgo_->SetGlobalOutputHandleFunction([this](const LocalizationResult& res) {
-        UpdateMapOdomByPGOResult(res);
-
-        LOG(INFO) << "[PGO_RAW_OUTPUT] t=" << std::setprecision(14) << res.timestamp_
-                  << ", valid=" << int(res.valid_)
-                  << ", lidar_loc_valid=" << int(res.lidar_loc_valid_)
-                  << ", pose=" << res.pose_.translation().transpose();
-    });
-
     ///  各模块的异步调用
     options_.enable_lidar_loc_skip_ = yaml.GetValue<bool>("system", "enable_lidar_loc_skip");
     options_.enable_lidar_loc_rviz_ = yaml.GetValue<bool>("system", "enable_lidar_loc_rviz");
@@ -183,40 +178,19 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     }
 
     /// TODO: 发布
-    pgo_->SetHighFrequencyGlobalOutputHandleFunction([this](const LocalizationResult& res) {
-        // if (loc_result_.timestamp_ > 0) {
-        //             double loc_fps = 1.0 / (res.timestamp_ - loc_result_.timestamp_);
-        //             // LOG_EVERY_N(INFO, 10) << "loc fps: " << loc_fps;
-        //         }
-        LOG(INFO) << "[TF_SOURCE] PGO_HF_OUTPUT "
-              << "t=" << std::setprecision(14) << res.timestamp_
-              << " valid=" << int(res.valid_)
-              << " lidar_loc_valid=" << int(res.lidar_loc_valid_)
-              << " confidence=" << res.confidence_
-              << " pose=" << res.pose_.translation().transpose();
-
-        loc_result_ = res;
-
-        if (tf_callback_ && loc_result_.valid_) {
-            tf_callback_(loc_result_.ToGeoMsg());
-        }
-
-        if (ui_) {
-            ui_->UpdateNavState(loc_result_.ToNavState());
-            ui_->UpdateRecentPose(loc_result_.pose_);
-        }
-    });
-
     return true;
 }
 
 void Localization::PublishLatestResult() {
-    auto pgo = pgo_;
-    if (!pgo) {
-        return;
+    LocalizationResult latest;
+    {
+        UL lock_result(loc_result_mutex_);
+        latest = loc_result_;
     }
 
-    pgo->PublishLatestResult();
+    if (tf_callback_ && latest.valid_) {
+        tf_callback_(latest.ToGeoMsg());
+    }
 }
 
 void Localization::UpdateMapOdomByPGOResult(const LocalizationResult& pgo_result) {
@@ -232,7 +206,6 @@ void Localization::UpdateMapOdomByPGOResult(const LocalizationResult& pgo_result
             pgo_result.timestamp_, lo_pose_queue_, [](const NavState& s) { return s.timestamp_; },
             [](const NavState& s) { return s.GetPose(); }, odom_base_pose, best_match, 5.0);
         if (!interp_success) {
-            LOG(WARNING) << "[MAP_ODOM_UPDATE_FROM_PGO] failed to get odom->base pose";
             return;
         }
     }
@@ -247,14 +220,74 @@ void Localization::UpdateMapOdomByPGOResult(const LocalizationResult& pgo_result
         lidar_loc_->SetMapOdomPose(new_map_odom);
     }
 
-    LOG(INFO) << "[MAP_ODOM_UPDATE_FROM_PGO] map_odom_pose trans = "
-              << new_map_odom.translation().transpose();
+}
+
+void Localization::UpdateMapOdomByLidarLocResult(const LocalizationResult& loc_result) {
+    if (!loc_result.valid_ || !loc_result.lidar_loc_valid_) {
+        return;
+    }
+
+    SE3 odom_base_pose;
+    NavState best_match;
+    {
+        UL lock_lo(lo_pose_mutex_);
+        bool interp_success = math::PoseInterp<NavState>(
+            loc_result.timestamp_, lo_pose_queue_, [](const NavState& s) { return s.timestamp_; },
+            [](const NavState& s) { return s.GetPose(); }, odom_base_pose, best_match, 1.0);
+        if (!interp_success) {
+            LOG(WARNING) << "[MAP_ODOM_UPDATE_FROM_NDT] failed to get odom->base pose at t="
+                         << std::setprecision(14) << loc_result.timestamp_;
+            return;
+        }
+    }
+
+    SE3 new_map_odom = loc_result.pose_ * odom_base_pose.inverse();
+    {
+        UL lock_map_odom(map_odom_mutex_);
+        map_odom_pose_ = new_map_odom;
+    }
+
+    if (lidar_loc_) {
+        lidar_loc_->SetMapOdomPose(new_map_odom);
+    }
+}
+
+void Localization::PublishHighFrequencyResultByLO(const NavState& lo_state) {
+    if (!lo_state.pose_is_ok_) {
+        return;
+    }
+
+    LocalizationResult result;
+    result.timestamp_ = lo_state.timestamp_;
+    result.valid_ = true;
+    result.lidar_loc_valid_ = true;
+    result.status_ = LocalizationStatus::GOOD;
+    result.confidence_ = 1.0;
+
+    {
+        UL lock_map_odom(map_odom_mutex_);
+        result.pose_ = map_odom_pose_ * lo_state.GetPose();
+    }
+
+    {
+        UL lock_result(loc_result_mutex_);
+        loc_result_ = result;
+    }
+
+    if (tf_callback_ && result.valid_) {
+        tf_callback_(result.ToGeoMsg());
+    }
+
+    if (ui_) {
+        ui_->UpdateNavState(result.ToNavState());
+        ui_->UpdateRecentPose(result.pose_);
+    }
 }
 
 void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPtr cloud) {
     UL lock(global_mutex_);
     if (lidar_loc_ == nullptr || (!use_lio_sam_ && lio_ == nullptr) ||
-        (use_lio_sam_ && lio_sam_ == nullptr) || pgo_ == nullptr) {
+        (use_lio_sam_ && lio_sam_ == nullptr)) {
         return;
     }
 
@@ -277,7 +310,7 @@ void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPt
 void Localization::ProcessLivoxLidarMsg(const livox_ros_driver2::msg::CustomMsg::SharedPtr cloud) {
     UL lock(global_mutex_);
     if (lidar_loc_ == nullptr || (!use_lio_sam_ && lio_ == nullptr) ||
-        (use_lio_sam_ && lio_sam_ == nullptr) || pgo_ == nullptr) {
+        (use_lio_sam_ && lio_sam_ == nullptr)) {
         return;
     }
 
@@ -322,7 +355,7 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
     }
     
     if (scan == nullptr || scan->empty()) {
-        LOG(WARNING) << "[LIDAR_LOC_INPUT] empty scan from LIO-SAM, skip";
+        LOG(WARNING) << "[LIDAR_LOC_INPUT] empty scan from frontend, skip";
         return;
     }
 
@@ -340,7 +373,8 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
     }
 
     lidar_loc_->ProcessLO(lo_state);
-    pgo_->ProcessLidarOdom(lo_state);
+    // pgo_->ProcessLidarOdom(lo_state);
+    PublishHighFrequencyResultByLO(lo_state);
 
     // LOG(INFO) << "LO pose: " << std::setprecision(12) << lo_state.timestamp_ << " "
     //           << lo_state.GetPose().translation().transpose();
@@ -354,7 +388,7 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
            kf = lio_->GetKeyframe();
         }
       
-        if (kf == lio_kf_) {
+        if (!kf || kf == lio_kf_) {
             /// 关键帧未更新，那就只更新IMU状态
 
             // auto dr_state = lio_->GetState();
@@ -391,7 +425,8 @@ void Localization::LidarLocProcCloud(CloudPtr scan_undist) {
     lidar_loc_->ProcessCloud(scan_undist);
 
     auto res = lidar_loc_->GetLocalizationResult();
-    pgo_->ProcessLidarLoc(res);
+    UpdateMapOdomByLidarLocResult(res);
+    // pgo_->ProcessLidarLoc(res);
     // UI 显示什么定位结果，RViz TF 就发布什么定位结果。
     /* 注释掉TF 直发
     if (tf_callback_ && res.lidar_loc_valid_) {
@@ -406,7 +441,7 @@ void Localization::LidarLocProcCloud(CloudPtr scan_undist) {
     if (loc_state_callback_) {
         auto loc_state = std::make_shared<std_msgs::msg::Int32>();
         loc_state->data = static_cast<int>(res.status_);
-        LOG(INFO) << "loc_state: " << loc_state->data;
+        // LOG(INFO) << "loc_state: " << loc_state->data;
         loc_state_callback_(*loc_state);
     }
 
@@ -419,7 +454,7 @@ void Localization::ProcessIMUMsg(IMUPtr imu) {
     UL lock(global_mutex_);
 
     if (lidar_loc_ == nullptr || (!use_lio_sam_ && lio_ == nullptr) ||
-        (use_lio_sam_ && lio_sam_ == nullptr) || pgo_ == nullptr) {
+        (use_lio_sam_ && lio_sam_ == nullptr)) {
         return;
     }
 
@@ -436,7 +471,10 @@ void Localization::ProcessIMUMsg(IMUPtr imu) {
         lio_->ProcessIMU(imu);
     }
 
+    return;
+
     /// 这里需要 IMU predict，否则没法process DR了
+    #if 0
     auto dr_state = use_lio_sam_ ? lio_sam_->GetIMUState() : lio_->GetIMUState();
 
     if (!dr_state.pose_is_ok_) {
@@ -469,7 +507,7 @@ void Localization::ProcessIMUMsg(IMUPtr imu) {
     //           << ", q=" << dr_state.GetPose().unit_quaternion().coeffs().transpose();
 
     lidar_loc_->ProcessDR(dr_state);
-    pgo_->ProcessDR(dr_state);
+    #endif
 }
 
 // void Localization::ProcessOdomMsg(const nav_msgs::msg::Odometry::SharedPtr odom_msg) {

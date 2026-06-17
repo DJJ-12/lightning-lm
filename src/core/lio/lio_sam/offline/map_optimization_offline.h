@@ -258,7 +258,7 @@ public:
             updateOdometryState();
 
             int keyframeAllowed =int(mappingPoseReliable  && transformIsFinite(transformTobeMapped));
-            
+            /* 0617 测试频率 故此注释掉
             RCLCPP_WARN(get_logger(),
                 "[T2M] time=%.6f roll=%.3f pitch=%.3f yaw=%.3f "
                 "x=%.3f y=%.3f z=%.3f degenerate=%d reliable=%d keyframeAllowed=%d "
@@ -278,7 +278,7 @@ public:
                 cloudKeyPoses3D->size(),
                 laserCloudCornerLastDS->size(),
                 laserCloudSurfLastDS->size());
-
+            */
             return true;
         }
 
@@ -575,7 +575,7 @@ public:
     {
         if (!motion.initialized && !motion.badFinite)
             return;
-
+        /*0617 测试频率 故此注释掉
         RCLCPP_WARN(get_logger(),
             "[MOTION_GATE][%s] ok=%d state=%s ref=LAST_ACCEPTED_TRACKING dt=%.3f ds=%.3f "
             "drp=(%.2f %.2f)deg dyaw=%.2fdeg v=%.3f omega=%.2f kappa=%.3f "
@@ -596,6 +596,7 @@ public:
             int(motion.badCurvature),
             int(motion.badRollPitch),
             int(motion.badFinite));
+        */
     }
     void commitLastAcceptedTrackingTransform(const float acceptedTransform[6],
                                          const std::string& source)
@@ -625,7 +626,7 @@ public:
         {
             lastAcceptedImuTransformAvailable = false;
         }
-
+        /* 0617 测试频率 故此注释掉
         RCLCPP_WARN(get_logger(),
             "[TRACKING_ACCEPTED_UPDATE] source=%s time=%.6f "
             "roll=%.3f pitch=%.3f yaw=%.3f x=%.3f y=%.3f z=%.3f",
@@ -637,6 +638,7 @@ public:
             acceptedTransform[3],
             acceptedTransform[4],
             acceptedTransform[5]);
+        */
     }
 
     void commitLowSpeedTrustedPose(const float acceptedTransform[6])

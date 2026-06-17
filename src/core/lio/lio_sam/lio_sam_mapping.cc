@@ -184,14 +184,14 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
         imu_Q_.block<3, 3>(3, 3).diagonal() = Vec3d(acc_cov, acc_cov, acc_cov);
         imu_Q_.block<3, 3>(6, 6).diagonal() = Vec3d(b_gyr_cov, b_gyr_cov, b_gyr_cov);
         imu_Q_.block<3, 3>(9, 9).diagonal() = Vec3d(b_acc_cov, b_acc_cov, b_acc_cov);
-
+        /* 0617 测试频率 故此注释掉
         LOG(INFO) << "[LIO_SAM_DR] imu_Q loaded from fasterlio: "
                   << "gyr_cov=" << gyr_cov
                   << ", acc_cov=" << acc_cov
                   << ", b_gyr_cov=" << b_gyr_cov
                   << ", b_acc_cov=" << b_acc_cov
                   << ", Q_diag=" << imu_Q_.diagonal().transpose();
-
+        */
         node_options_ = rclcpp::NodeOptions();
         node_options_.use_intra_process_comms(true);
         node_options_.parameter_overrides(overrides);
@@ -259,10 +259,11 @@ void LioSamMapping::ProcessIMU(const IMUPtr& input) {
 
         if (imu_init_count_ >= imu_init_min_count_) {
             imu_mean_ready_ = true;
-
+            /* 0617 测试频率 故此注释掉
             LOG(INFO) << "[LIO_SAM_DR] imu mean ready, acc="
                       << imu_mean_acc_.transpose()
                       << ", gyr=" << imu_mean_gyr_.transpose();
+            */
         }
     }
 
@@ -278,8 +279,10 @@ void LioSamMapping::ProcessIMU(const IMUPtr& input) {
     }
 
     if (dt > 0.1) {
+        /* 0617 测试频率 故此注释掉
         LOG(WARNING) << "[LIO_SAM_DR] abnormal imu dt=" << dt
                      << ", skip predict";
+        */
         imu_dr_inited_ = false;
         last_dr_imu_time_ = -1.0;
         return;
@@ -359,8 +362,7 @@ void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
     lidar_buffer_.push_back(msg);
     time_buffer_.push_back(timestamp);
 
-    LOG(INFO) << "lio-sam enqueue cloud at " << std::setprecision(14) << timestamp
-              << ", latest imu: " << last_timestamp_imu_;
+    //LOG(INFO) << "lio-sam enqueue cloud at " << std::setprecision(14) << timestamp << ", latest imu: " << last_timestamp_imu_;
 }
 
 bool LioSamMapping::SyncPackages() {
@@ -460,11 +462,12 @@ bool LioSamMapping::SyncPackages() {
     lidar_buffer_.pop_front();
     time_buffer_.pop_front();
     lidar_pushed_ = false;
+    /*0617 测试频率 故此注释掉
     LOG(INFO) << "LIO-SAM sync: begin=" << std::setprecision(14) << measures_.lidar_begin_time
               << ", end=" << measures_.lidar_end_time
               << ", duration=" << (measures_.lidar_end_time - measures_.lidar_begin_time)
               << " s, imu=" << measures_.imus.size();
-
+    */
     return true;
 }
 
@@ -560,8 +563,10 @@ bool LioSamMapping::Run() {
                 continue;
             }
             if (dt > 0.1) {
+                /* 0617 测试频率 故此注释掉
                 LOG(WARNING) << "[LIO_SAM_DR] replay abnormal imu dt=" << dt
                             << ", stop replay at t=" << std::setprecision(14) << t;
+                */
                 break;
             }
 
@@ -575,12 +580,14 @@ bool LioSamMapping::Run() {
         static int dr_anchor_count = 0;
         if (++dr_anchor_count % 20 == 0) {
             const auto& dr = kf_imu_.GetX();
+            /* 0617 测试频率 故此注释掉
             LOG(INFO) << "[LIO_SAM_DR_ANCHOR] lidar_t=" << std::setprecision(14) << state_.timestamp_
                     << ", dr_t=" << dr.timestamp_
                     << ", pos=" << dr.pos_.transpose()
                     << ", vel=" << dr.vel_.transpose()
                     << ", grav=" << dr.grav_.transpose()
                     << ", bg=" << dr.bg_.transpose();
+            */
         }
     }
 
@@ -613,6 +620,7 @@ bool LioSamMapping::Run() {
 
     MakeLightningKeyframeIfNeeded();
     //SyncLightningKeyframePoses();
+    /* 0617 测试频率 故此注释掉
     LOG(INFO) << "[LIO_SAM_OUTPUT] scan_header="
           << std::setprecision(14)
           <<  math::ToSec(scan_undistort_->header.stamp)
@@ -623,6 +631,7 @@ bool LioSamMapping::Run() {
           << ", end=" << measures_.lidar_end_time
           << ", scan_size=" << scan_undistort_->size()
           << ", reliable=" << state_.lidar_odom_reliable_;    
+    */
     return true;
 }
 
@@ -662,9 +671,10 @@ bool LioSamMapping::MakeLightningKeyframeIfNeeded() {
     last_kf_ = kf;
     native_keyframe_count_ = map_optimization_->KeyPoseSize();
     map_optimization_->ClearCreatedNewKeyframe();
-
+    /*0617 测试频率 故此注释掉
     LOG(INFO) << "LIO-SAM: create lightning keyframe " << kf->GetID() << ", pose: "
               << state_.pos_.transpose() << ", time: " << std::setprecision(14) << state_.timestamp_;
+    */
     return true;
 }
 

@@ -98,6 +98,8 @@ class Localization {
 
    private:
     void UpdateMapOdomByPGOResult(const LocalizationResult& pgo_result);
+    void UpdateMapOdomByLidarLocResult(const LocalizationResult& loc_result);
+    void PublishHighFrequencyResultByLO(const NavState& lo_state);
 
     /// 模块  ========================================================================================================
     std::mutex global_mutex_;  // 防止处理过程中被重复init
@@ -127,6 +129,7 @@ class Localization {
 
     /// 结果数据 =====================================================================================================
     LocalizationResult loc_result_;
+    std::mutex loc_result_mutex_;
     std::mutex map_odom_mutex_;
     SE3 map_odom_pose_;
     std::mutex lo_pose_mutex_;

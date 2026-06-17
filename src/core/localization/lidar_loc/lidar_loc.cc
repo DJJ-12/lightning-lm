@@ -451,20 +451,20 @@ void LidarLoc::Align(const CloudPtr& input) {
     //double current_time = math::ToSec(input->header.stamp) + lo::lidar_time_interval;
     double current_time = math::ToSec(input->header.stamp);
     current_timestamp_ = math::ToSec(input->header.stamp);
-
+    /* 0617 测试频率 故此注释掉
     LOG(INFO) << "[LIDAR_LOC_TIME] scan_stamp="
           << std::fixed << std::setprecision(12)
           << math::ToSec(input->header.stamp)
           << ", current_time=" << current_timestamp_
           << ", lidar_interval=" << lo::lidar_time_interval;
-
+    */
     /// 设置当前帧对应的rel_pose
     if (!AssignLOPose(current_time)) {
         LOG(WARNING) << "assign LO pose failed";
     }
 
     if (!AssignDRPose(current_time)) {
-        LOG(WARNING) << "assign DR pose failed";
+        //LOG(WARNING) << "assign DR pose failed";
     }
 
     /// 1. 车辆静止处理
@@ -547,9 +547,11 @@ void LidarLoc::Align(const CloudPtr& input) {
         {
             UL lock_map_odom(map_odom_mutex_);
             guess_from_lo = map_odom_pose_ * current_lo_pose_;
-        }
+        } 
+        /*0617 测试频率 故此注释掉
         LOG(INFO) << "[MAP_ODOM_PRIOR] NDT prior map->base = "
                   << guess_from_lo.translation().transpose();
+        */
     }
 
     SE3 guess_from_self = guess_from_lo;
@@ -625,9 +627,9 @@ void LidarLoc::Align(const CloudPtr& input) {
     // }
 
     // 用纯激光定位有点太抖了，加一些权重
-    Vec6d delta = (guess_from_lo.inverse() * current_pose_esti).log();
-    SE3 esti_balanced = guess_from_lo * SE3::exp(delta * 0.1);
-    current_pose_esti = esti_balanced;
+    //Vec6d delta = (guess_from_lo.inverse() * current_pose_esti).log();
+    //SE3 esti_balanced = guess_from_lo * SE3::exp(delta * 0.1);
+    //current_pose_esti = esti_balanced;
 
     // double score_self = 0;
     // if (try_self) {
@@ -834,7 +836,7 @@ bool LidarLoc::Localize(SE3& pose, double& confidence, CloudPtr input, CloudPtr 
     bool loc_success = false;
     Eigen::Matrix4f guess_pose = pose.matrix().cast<float>();
 
-    LOG(INFO) << "loc from: " << pose.translation().transpose();
+    //LOG(INFO) << "loc from: " << pose.translation().transpose();
 
     if (pcl_ndt_->getInputTarget() == nullptr) {
         LOG(INFO) << "lidar loc target is null, skip";
@@ -908,7 +910,7 @@ bool LidarLoc::Localize(SE3& pose, double& confidence, CloudPtr input, CloudPtr 
     q_3d.normalize();
     pose = SE3(q_3d, t_3d);
 
-    LOG(INFO) << "confidence: " << confidence << ", t: " << t_3d.transpose() << ", succ: " << loc_success;
+    //LOG(INFO) << "confidence: " << confidence << ", t: " << t_3d.transpose() << ", succ: " << loc_success;
 
     return loc_success;
 }
