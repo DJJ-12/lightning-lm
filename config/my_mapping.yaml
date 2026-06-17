@@ -75,7 +75,7 @@ system:
   with_g2p5: false # 是否需要栅格地图
   step_on_kf: false # 是否在关键帧处暂停
 
-  enable_lidar_loc_skip: false
+  enable_lidar_loc_skip: true
   enable_lidar_loc_rviz: false
   enable_lidar_odom_skip: false
   lidar_loc_skip_num: 4

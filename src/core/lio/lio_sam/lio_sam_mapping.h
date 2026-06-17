@@ -71,9 +71,27 @@ class LioSamMapping {
         return s;
     }
 
-    CloudPtr GetScanUndist() const { return scan_undistort_; }
-    CloudPtr GetProjCloud() const { return scan_undistort_; }
-    CloudPtr GetRecentCloud() const { return recent_cloud_; }
+    CloudPtr GetScanUndist() const {
+        if (!recent_cloud_) {
+            return nullptr;
+        }
+        return CloudPtr(new PointCloudType(*recent_cloud_));
+    }
+
+    CloudPtr GetProjCloud() const {
+        if (!recent_cloud_) {
+            return nullptr;
+        }
+        return CloudPtr(new PointCloudType(*recent_cloud_));
+    }
+
+    CloudPtr GetRecentCloud() const {
+        if (!recent_cloud_) {
+            return nullptr;
+        }
+        return CloudPtr(new PointCloudType(*recent_cloud_));
+    }
+    
     CloudPtr GetGlobalMap(bool use_lio_pose, bool use_voxel = true, float res = 0.1);
 
    private:

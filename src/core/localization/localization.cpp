@@ -320,6 +320,11 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
         lo_state = lio_->GetState();
         scan = lio_->GetProjCloud();
     }
+    
+    if (scan == nullptr || scan->empty()) {
+        LOG(WARNING) << "[LIDAR_LOC_INPUT] empty scan from LIO-SAM, skip";
+        return;
+    }
 
     {
         UL lock_lo(lo_pose_mutex_);
