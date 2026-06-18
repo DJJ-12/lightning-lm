@@ -318,6 +318,7 @@ public:
 
         static int pointTimeDebugCount = 0;
         pointTimeDebugCount++;
+        /* 0617 测试频率 故此注释掉
         if (pointTimeDebugCount == 1 || pointTimeLast < 0.0 || pointTimeLast > 0.2)
         {
             RCLCPP_WARN(get_logger(),
@@ -328,7 +329,7 @@ public:
                 laserCloudIn->points.size(),
                 int(sensor));
         }
-    
+        */
         // remove Nan
         vector<int> indices;
         pcl::removeNaNFromPointCloud(*laserCloudIn, *laserCloudIn, indices);

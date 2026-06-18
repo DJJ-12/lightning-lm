@@ -308,6 +308,7 @@ public:
                     if (imuAccel2rosRollPitch(&thisImuMsg, &accRoll, &accPitch))
                     {
                         static int accelInitDebugCount = 0;
+                        /* 0617 测试频率 故此注释掉
                         if (accelInitDebugCount < 5)
                         {
                             RCLCPP_WARN(get_logger(),
@@ -321,6 +322,7 @@ public:
                                 thisImuMsg.linear_acceleration.z);
                             accelInitDebugCount++;
                         }
+                        */
                         cloudInfo.imu_roll_init = accRoll;
                         cloudInfo.imu_pitch_init = accPitch;
                     }

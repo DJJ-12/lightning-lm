@@ -253,6 +253,33 @@ void Localization::UpdateMapOdomByLidarLocResult(const LocalizationResult& loc_r
 }
 
 void Localization::PublishHighFrequencyResultByLO(const NavState& lo_state) {
+    {
+        static int lo_count = 0;
+        static double last_report_wall = -1.0;
+        static double last_lo_stamp = -1.0;
+
+        const double now_wall =
+            std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+
+        if (last_report_wall < 0.0) {
+            last_report_wall = now_wall;
+        }
+
+        if (last_lo_stamp < 0.0 || std::abs(lo_state.timestamp_ - last_lo_stamp) > 1e-6) {
+            lo_count++;
+            last_lo_stamp = lo_state.timestamp_;
+        }
+
+        const double dt = now_wall - last_report_wall;
+        if (dt >= 5.0) {
+            LOG(INFO) << "[LO_TRUE_FREQ] freq=" << lo_count / dt
+                    << " Hz, latest_lo_stamp="
+                    << std::setprecision(14) << lo_state.timestamp_;
+            lo_count = 0;
+            last_report_wall = now_wall;
+        }
+    }
     if (!lo_state.pose_is_ok_) {
         return;
     }

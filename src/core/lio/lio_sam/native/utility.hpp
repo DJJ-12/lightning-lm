@@ -447,7 +447,7 @@ public:
             tf2::fromMsg(imu_out.orientation, outOrientation);
             tf2::Matrix3x3(rawOrientation).getRPY(rawRoll, rawPitch, rawYaw);
             tf2::Matrix3x3(outOrientation).getRPY(outRoll, outPitch, outYaw);
-
+            /* 0617 测试频率 故此注释掉
             RCLCPP_WARN(get_logger(),
                 "[IMU_CONVERTER] raw_rpy=(%.2f %.2f %.2f) out_rpy=(%.2f %.2f %.2f) "
                 "raw_acc=(%.3f %.3f %.3f) out_acc=(%.3f %.3f %.3f)",
@@ -463,6 +463,7 @@ public:
                 imu_out.linear_acceleration.x,
                 imu_out.linear_acceleration.y,
                 imu_out.linear_acceleration.z);
+            */
             imuConverterDebugCount++;
         }
 
