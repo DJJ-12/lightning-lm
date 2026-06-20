@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 
@@ -136,6 +138,42 @@ class Localization {
     std::mutex lo_pose_mutex_;
     std::deque<NavState> lo_pose_queue_;
     int lidar_loc_frame_count_ = 0;
+
+    std::uint64_t stat_ros_cloud_in_ = 0;
+    std::uint64_t stat_preprocess_ok_ = 0;
+    std::uint64_t stat_preprocess_fail_ = 0;
+    std::uint64_t stat_base_transform_ok_ = 0;
+    std::uint64_t stat_odom_queue_push_ = 0;
+    double stat_preprocess_total_ms_ = 0.0;
+    double stat_base_transform_total_ms_ = 0.0;
+    double stat_add_odom_queue_total_ms_ = 0.0;
+    double stat_process_lidar_total_ms_ = 0.0;
+    std::uint64_t stat_window_ros_cloud_in_ = 0;
+    std::uint64_t stat_window_preprocess_ok_ = 0;
+    std::uint64_t stat_window_preprocess_fail_ = 0;
+    std::uint64_t stat_window_base_transform_ok_ = 0;
+    std::uint64_t stat_window_odom_queue_push_ = 0;
+    double stat_window_preprocess_ms_ = 0.0;
+    double stat_window_base_transform_ms_ = 0.0;
+    double stat_window_add_odom_queue_ms_ = 0.0;
+    double stat_window_process_lidar_ms_ = 0.0;
+    std::chrono::steady_clock::time_point stat_input_last_log_time_ = std::chrono::steady_clock::now();
+
+    std::uint64_t stat_odom_proc_called_ = 0;
+    std::uint64_t stat_lio_process_cloud_called_ = 0;
+    std::uint64_t stat_lio_run_called_ = 0;
+    std::uint64_t stat_lio_run_success_ = 0;
+    std::uint64_t stat_lio_run_fail_ = 0;
+    std::uint64_t stat_lo_pose_published_ = 0;
+    std::uint64_t stat_lo_pose_not_ok_ = 0;
+    std::uint64_t stat_window_lo_run_ = 0;
+    std::uint64_t stat_window_lo_publish_ = 0;
+    double stat_latest_lo_timestamp_ = -1.0;
+    double stat_latest_publish_timestamp_ = -1.0;
+    std::chrono::steady_clock::time_point stat_odom_last_log_time_ = std::chrono::steady_clock::now();
+    std::uint64_t stat_need_loc_scan_true_ = 0;
+    std::uint64_t stat_need_loc_scan_false_ = 0;
+    std::uint64_t stat_ndt_scan_sent_ = 0;
 
     /// 框架相关
     TFCallback tf_callback_;

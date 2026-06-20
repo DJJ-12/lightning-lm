@@ -195,6 +195,11 @@ lio_sam:
   numberOfCores: 4
   mappingProcessInterval: 0.1
   mappingLowSpeedMaxTranslationSpeed: 0.8
+  maxOptimizationIterations: 30
+  onlineMaxOptimizationIterations: 10
+  onlineLimitOptimizationPoints: true
+  onlineMaxSurfOptimizationPoints: 4000
+  onlineMaxCornerOptimizationPoints: 900
 
   # Surrounding map
   surroundingkeyframeAddingDistThreshold: 2.0

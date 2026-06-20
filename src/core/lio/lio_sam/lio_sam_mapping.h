@@ -3,6 +3,7 @@
 
 #include <deque>
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -170,6 +171,18 @@ class LioSamMapping {
     int imu_count_ = 0;
     int scan_num_for_mean_ = 0;
     std::string sensor_type_ = "ouster";
+
+    std::uint64_t stat_native_in_ = 0;
+    std::uint64_t stat_native_valid_ = 0;
+    std::uint64_t stat_native_too_few_ = 0;
+    std::uint64_t stat_invalid_duration_ = 0;
+    std::uint64_t stat_sync_calls_ = 0;
+    std::uint64_t stat_sync_success_ = 0;
+    std::uint64_t stat_sync_no_cloud_ = 0;
+    std::uint64_t stat_sync_no_imu_ = 0;
+    std::uint64_t stat_imu_not_cover_begin_ = 0;
+    std::uint64_t stat_imu_not_cover_end_ = 0;
+    std::uint64_t stat_lidar_dropped_by_sync_ = 0;
 
     std::vector<Keyframe::Ptr> all_keyframes_;
     Keyframe::Ptr last_kf_ = nullptr;

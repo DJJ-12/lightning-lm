@@ -1,4 +1,4 @@
-﻿#include "utility_offline.hpp"
+#include "utility_offline.hpp"
 #pragma once
 
 #include <gtsam/geometry/Rot3.h>
@@ -18,9 +18,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <unordered_set>
 #include <utility>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 using namespace gtsam;
 
@@ -61,10 +67,10 @@ public:
 
     std::vector<PointType> laserCloudOriCornerVec; // corner point holder for parallel computation
     std::vector<PointType> coeffSelCornerVec;
-    std::vector<bool> laserCloudOriCornerFlag;
+    std::vector<std::uint8_t> laserCloudOriCornerFlag;
     std::vector<PointType> laserCloudOriSurfVec; // surf point holder for parallel computation
     std::vector<PointType> coeffSelSurfVec;
-    std::vector<bool> laserCloudOriSurfFlag;
+    std::vector<std::uint8_t> laserCloudOriSurfFlag;
 
     map<int, pair<pcl::PointCloud<PointType>, pcl::PointCloud<PointType>>> laserCloudMapContainer;
     std::vector<int> surroundingKeyFrameIndices;
@@ -173,6 +179,15 @@ public:
         downSizeFilterSurf.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
         downSizeFilterSurroundingKeyPoses.setLeafSize(surroundingKeyframeDensity, surroundingKeyframeDensity, surroundingKeyframeDensity); // for surrounding key poses of scan-to-map optimization
         downSizeFilterICP.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
+
+#ifdef _OPENMP
+        RCLCPP_INFO(get_logger(),
+            "[OPENMP] enabled, omp_get_max_threads=%d, numberOfCores=%d",
+            omp_get_max_threads(),
+            numberOfCores);
+#else
+        RCLCPP_WARN(get_logger(), "[OPENMP] disabled at compile time");
+#endif
 
         allocateMemory();
     }
@@ -1054,29 +1069,57 @@ public:
 
         downSizeFilterSurroundingKeyPoses.setInputCloud(surroundingKeyPoses);
         downSizeFilterSurroundingKeyPoses.filter(*surroundingKeyPosesDS);
-        for(auto& pt : surroundingKeyPosesDS->points)
+        std::unordered_set<int> uniqueKeyframeIds;
+        std::vector<int> keyframeIndices;
+        keyframeIndices.reserve(surroundingKeyPosesDS->size() + 5);
+        for (const auto& pose : surroundingKeyPosesDS->points)
         {
-            kdtreeSurroundingKeyPoses->nearestKSearch(pt, 1, pointSearchInd, pointSearchSqDis);
-            pt.intensity = cloudKeyPoses3D->points[pointSearchInd[0]].intensity;
+            if (kdtreeSurroundingKeyPoses->nearestKSearch(pose, 1, pointSearchInd, pointSearchSqDis) > 0)
+            {
+                const int id = pointSearchInd[0];
+                if (uniqueKeyframeIds.insert(id).second)
+                    keyframeIndices.push_back(id);
+            }
         }
 
-        // also extract some latest key frames in case the robot rotates in one position
-        int numPoses = cloudKeyPoses3D->size();
-        for (int i = numPoses-1; i >= 0; --i)
+        // Keep only the five latest keyframes for in-place rotation coverage.
+        const int numPoses = cloudKeyPoses3D->size();
+        const int firstLatestId = std::max(0, numPoses - 5);
+        for (int id = numPoses - 1; id >= firstLatestId; --id)
         {
-            if (timeLaserInfoCur - cloudKeyPoses6D->points[i].time < 10.0)
-                surroundingKeyPosesDS->push_back(cloudKeyPoses3D->points[i]);
-            else
-                break;
+            if (uniqueKeyframeIds.insert(id).second)
+                keyframeIndices.push_back(id);
+        }
+
+        const PointType currentPose = cloudKeyPoses3D->back();
+        auto squaredDistanceToCurrent = [&](int id) {
+            const PointType& pose = cloudKeyPoses3D->points[id];
+            const double dx = static_cast<double>(pose.x) - currentPose.x;
+            const double dy = static_cast<double>(pose.y) - currentPose.y;
+            const double dz = static_cast<double>(pose.z) - currentPose.z;
+            return dx * dx + dy * dy + dz * dz;
+        };
+        std::sort(keyframeIndices.begin(), keyframeIndices.end(), [&](int lhs, int rhs) {
+            const double lhsDistance = squaredDistanceToCurrent(lhs);
+            const double rhsDistance = squaredDistanceToCurrent(rhs);
+            return lhsDistance == rhsDistance ? lhs < rhs : lhsDistance < rhsDistance;
+        });
+
+        const size_t candidateCount = keyframeIndices.size();
+        if (surroundingKeyframeSize > 0 &&
+            keyframeIndices.size() > static_cast<size_t>(surroundingKeyframeSize))
+        {
+            keyframeIndices.resize(static_cast<size_t>(surroundingKeyframeSize));
         }
         const auto t_search = std::chrono::steady_clock::now();
 
         const double keyframe_search_ms =
             std::chrono::duration<double, std::milli>(t_search - t0).count();
-        extractCloud(surroundingKeyPosesDS, keyframe_search_ms);
+        extractCloud(keyframeIndices, candidateCount, keyframe_search_ms);
     }
 
-    void extractCloud(pcl::PointCloud<PointType>::Ptr cloudToExtract,
+    void extractCloud(const std::vector<int>& keyframeIndices,
+                      size_t candidateCount,
                       double keyframe_search_ms)
     {
         const auto t_build0 = std::chrono::steady_clock::now();
@@ -1084,16 +1127,15 @@ public:
         laserCloudCornerFromMap->clear();
         laserCloudSurfFromMap->clear(); 
         surroundingKeyFrameIndices.clear();
-        for (int i = 0; i < (int)cloudToExtract->size(); ++i)
+        for (const int thisKeyInd : keyframeIndices)
         {
-            if (pointDistance(cloudToExtract->points[i], cloudKeyPoses3D->back()) > surroundingKeyframeSearchRadius)
-                continue;
-
-            int thisKeyInd = (int)cloudToExtract->points[i].intensity;
             if (thisKeyInd < 0 ||
                 thisKeyInd >= (int)cornerCloudKeyFrames.size() ||
                 thisKeyInd >= (int)surfCloudKeyFrames.size() ||
                 thisKeyInd >= (int)rawCloudKeyFrames.size())
+                continue;
+
+            if (pointDistance(cloudKeyPoses3D->points[thisKeyInd], cloudKeyPoses3D->back()) > surroundingKeyframeSearchRadius)
                 continue;
 
             surroundingKeyFrameIndices.push_back(thisKeyInd);
@@ -1156,7 +1198,7 @@ public:
                 "corner_raw=%zu, surf_raw=%zu, corner_ds=%d, surf_ds=%d, "
                 "search_ms=%.3f, build_ms=%.3f, voxel_ms=%.3f, kdtree_ms=%.3f, cache=%zu",
                 cloudKeyPoses6D->size(),
-                cloudToExtract->size(),
+                candidateCount,
                 surroundingKeyFrameIndices.size(),
                 laserCloudCornerFromMap->size(),
                 laserCloudSurfFromMap->size(),
@@ -1182,6 +1224,25 @@ public:
         extractNearby();
     }
 
+    void limitPointCloudUniform(pcl::PointCloud<PointType>::Ptr cloud, int maxNum)
+    {
+        if (!cloud || maxNum <= 0 || static_cast<int>(cloud->size()) <= maxNum)
+            return;
+
+        pcl::PointCloud<PointType> limited;
+        limited.reserve(maxNum);
+        const double step = static_cast<double>(cloud->size()) / static_cast<double>(maxNum);
+        for (int i = 0; i < maxNum; ++i)
+        {
+            const int index = static_cast<int>(i * step);
+            limited.push_back(cloud->points[index]);
+        }
+        limited.height = 1;
+        limited.width = limited.size();
+        limited.is_dense = cloud->is_dense;
+        cloud->swap(limited);
+    }
+
     void downsampleCurrentScan()
     {
         // Downsample cloud from current scan
@@ -1204,6 +1265,14 @@ public:
         {
             pcl::copyPointCloud(*laserCloudSurfLast, *laserCloudSurfLastDS);
             laserCloudSurfLastDSNum = laserCloudSurfLastDS->size();
+        }
+
+        if (!isInSlamMode && onlineLimitOptimizationPoints)
+        {
+            limitPointCloudUniform(laserCloudSurfLastDS, onlineMaxSurfOptimizationPoints);
+            laserCloudSurfLastDSNum = laserCloudSurfLastDS->size();
+            limitPointCloudUniform(laserCloudCornerLastDS, onlineMaxCornerOptimizationPoints);
+            laserCloudCornerLastDSNum = laserCloudCornerLastDS->size();
         }
     }
 
@@ -1581,6 +1650,8 @@ public:
         bool lmFinite = false;
         bool lmMotionOk = false;
         std::string lmFailReason = "UNKNOWN";
+        const int maxIterations =
+            isInSlamMode ? maxOptimizationIterations : onlineMaxOptimizationIterations;
 
         // 3. 尝试 LM
         if (laserCloudCornerLastDSNum > edgeFeatureMinValidNum &&
@@ -1589,7 +1660,7 @@ public:
             lmRan = true;
             lastLMRan = true;
 
-            for (int iterCount = 0; iterCount < 30; iterCount++)
+            for (int iterCount = 0; iterCount < maxIterations; iterCount++)
             {
                 ++iter_count;
                 laserCloudOri->clear();
@@ -1675,7 +1746,7 @@ public:
 
         RCLCPP_WARN(get_logger(),
             "[LM][FAIL] reason=%s ran=%d converged=%d finite=%d motionOK=%d "
-            "coeff=%d iter=%d icpFallbackEnable=%d. Restore frameInitialGuess.",
+            "coeff=%d iter=%d maxIter=%d icpFallbackEnable=%d. Restore frameInitialGuess.",
             lmFailReason.c_str(),
             int(lmRan),
             int(lmConverged),
@@ -1683,7 +1754,15 @@ public:
             int(lmMotionOk),
             lastLMCloudSelNum,
             lastLMIterationCount,
+            maxIterations,
             int(mappingIcpFallbackEnable));
+
+        if (!isInSlamMode && !lmConverged && lastLMIterationCount >= maxIterations)
+        {
+            rejectMappingPose("FAIL_LM_ONLINE_MAX_ITERATIONS");
+            maybeLogScan2MapTiming("LM_ONLINE_MAX_ITER_REJECT");
+            return;
+        }
 
         // 5. 如果没有显式开启 ICP fallback，直接判定坏帧。
         if (!mappingIcpFallbackEnable)

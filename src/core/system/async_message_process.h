@@ -5,10 +5,15 @@
 #ifndef ASYNC_MESSAGE_PROCESS_H
 #define ASYNC_MESSAGE_PROCESS_H
 
+#include <algorithm>
 #include <condition_variable>
+#include <chrono>
+#include <cstdint>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <queue>
+#include <string>
 #include <thread>
 #include <utility>
 
@@ -51,17 +56,24 @@ class AsyncMessageProcess {
 
     void SetName(std::string name) { name_ = std::move(name); }
     void SetSkipParam(bool enable_skip, int skip_num) { enable_skip_ = enable_skip, skip_num_ = skip_num; }
+    void SetStatsEnabled(bool enabled) { stats_enabled_ = enabled; }
 
     AsyncMessageProcess(const AsyncMessageProcess&) = delete;
     void operator=(const AsyncMessageProcess&) = delete;
 
    private:
     void ProcLoop();
+    void MaybeLogStatsLocked(const std::chrono::steady_clock::time_point& now);
+
+    struct QueuedMessage {
+        T message;
+        std::chrono::steady_clock::time_point enqueue_time;
+    };
 
     std::thread proc_;
     std::mutex mutex_;
     std::condition_variable cv_msg_;
-    std::deque<T> msg_buffer_;
+    std::deque<QueuedMessage> msg_buffer_;
     bool update_flag_ = false;
     bool exit_flag_ = false;
     size_t max_size_ = 100;  // 40
@@ -71,6 +83,14 @@ class AsyncMessageProcess {
     bool enable_skip_ = false;
     int skip_num_ = 0;
     int skip_cnt_ = 0;
+
+    std::uint64_t add_count_ = 0;
+    std::uint64_t drop_count_ = 0;
+    std::uint64_t pop_count_ = 0;
+    size_t peak_size_ = 0;
+    double total_wait_ms_ = 0.0;
+    bool stats_enabled_ = false;
+    std::chrono::steady_clock::time_point last_stat_time_ = std::chrono::steady_clock::now();
 
     ProcFunc custom_func_;
 };
@@ -91,6 +111,12 @@ template <typename T>
 void AsyncMessageProcess<T>::Start() {
     exit_flag_ = false;
     update_flag_ = false;
+    add_count_ = 0;
+    drop_count_ = 0;
+    pop_count_ = 0;
+    peak_size_ = 0;
+    total_wait_ms_ = 0.0;
+    last_stat_time_ = std::chrono::steady_clock::now();
     proc_ = std::thread([this]() { ProcLoop(); });
 }
 
@@ -101,14 +127,21 @@ void AsyncMessageProcess<T>::ProcLoop() {
         cv_msg_.wait(lock, [this]() { return update_flag_; });
 
         // take the message and process it
-        auto buffer = msg_buffer_;
-        msg_buffer_.clear();
+        std::deque<QueuedMessage> buffer;
+        buffer.swap(msg_buffer_);
         update_flag_ = false;
+        const auto pop_time = std::chrono::steady_clock::now();
+        for (const auto& queued : buffer) {
+            total_wait_ms_ +=
+                std::chrono::duration<double, std::milli>(pop_time - queued.enqueue_time).count();
+        }
+        pop_count_ += buffer.size();
+        MaybeLogStatsLocked(pop_time);
         lock.unlock();
 
         // 处理之
-        for (const auto& msg : buffer) {
-            custom_func_(msg);
+        for (const auto& queued : buffer) {
+            custom_func_(queued.message);
         }
     }
 }
@@ -116,10 +149,14 @@ void AsyncMessageProcess<T>::ProcLoop() {
 template <typename T>
 void AsyncMessageProcess<T>::AddMessage(const T& msg) {
     UL lock(mutex_);
+    const auto now = std::chrono::steady_clock::now();
+    ++add_count_;
     if (enable_skip_) {
         if (skip_cnt_ != 0) {
             skip_cnt_++;
             skip_cnt_ = skip_cnt_ % skip_num_;
+            ++drop_count_;
+            MaybeLogStatsLocked(now);
             return;
         }
 
@@ -127,14 +164,40 @@ void AsyncMessageProcess<T>::AddMessage(const T& msg) {
         skip_cnt_ = skip_cnt_ % skip_num_;
     }
 
-    msg_buffer_.push_back(msg);
+    msg_buffer_.push_back(QueuedMessage{msg, now});
+    peak_size_ = std::max(peak_size_, msg_buffer_.size());
     while (msg_buffer_.size() > max_size_) {
-        LOG(INFO) << name_ << " exceeds largest size: " << max_size_;
         msg_buffer_.pop_front();
+        ++drop_count_;
     }
 
+    MaybeLogStatsLocked(now);
     update_flag_ = true;
     cv_msg_.notify_one();
+}
+
+template <typename T>
+void AsyncMessageProcess<T>::MaybeLogStatsLocked(const std::chrono::steady_clock::time_point& now) {
+    if (!stats_enabled_) {
+        return;
+    }
+    const double report_interval =
+        std::chrono::duration<double>(now - last_stat_time_).count();
+    if (report_interval < 5.0) {
+        return;
+    }
+
+    const double wait_ms_avg =
+        pop_count_ > 0 ? total_wait_ms_ / static_cast<double>(pop_count_) : 0.0;
+    LOG(INFO) << "[LIO_QUEUE_STAT] name=" << name_
+              << ", add=" << add_count_
+              << ", drop=" << drop_count_
+              << ", pop=" << pop_count_
+              << ", current_size=" << msg_buffer_.size()
+              << ", max_size=" << max_size_
+              << ", peak_size=" << peak_size_
+              << ", wait_ms_avg=" << wait_ms_avg;
+    last_stat_time_ = now;
 }
 
 template <typename T>

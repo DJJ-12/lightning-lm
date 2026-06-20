@@ -1,4 +1,4 @@
-﻿#include "core/lio/lio_sam/lio_sam_mapping.h"
+#include "core/lio/lio_sam/lio_sam_mapping.h"
 
 #include <algorithm>
 #include <cctype>
@@ -92,6 +92,25 @@ bool LioSamMapping::Init(const std::string& config_yaml) {
     feature_extraction_ = std::make_unique<::FeatureExtraction>(node_options_);
     map_optimization_ = std::make_unique<::mapOptimization>(node_options_);
 
+    LOG(INFO) << "[LIO_SAM_PARAM_EFFECTIVE] "
+              << "is_in_slam_mode=" << options_.is_in_slam_mode_
+              << ", mappingProcessInterval=" << map_optimization_->mappingProcessInterval
+              << ", loopClosureEnableFlag=" << map_optimization_->loopClosureEnableFlag
+              << ", downsampleRate=" << map_optimization_->downsampleRate
+              << ", odometrySurfLeafSize=" << map_optimization_->odometrySurfLeafSize
+              << ", mappingCornerLeafSize=" << map_optimization_->mappingCornerLeafSize
+              << ", mappingSurfLeafSize=" << map_optimization_->mappingSurfLeafSize
+              << ", numberOfCores=" << map_optimization_->numberOfCores
+              << ", maxOptimizationIterations=" << map_optimization_->maxOptimizationIterations
+              << ", onlineMaxOptimizationIterations="
+              << map_optimization_->onlineMaxOptimizationIterations
+              << ", onlineLimitOptimizationPoints="
+              << map_optimization_->onlineLimitOptimizationPoints
+              << ", onlineMaxSurfOptimizationPoints="
+              << map_optimization_->onlineMaxSurfOptimizationPoints
+              << ", onlineMaxCornerOptimizationPoints="
+              << map_optimization_->onlineMaxCornerOptimizationPoints;
+
     return true;
 }
 
@@ -149,6 +168,27 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
         if (!options_.is_in_slam_mode_) {
             SetParamOverride(overrides, "mappingProcessInterval", 0.0);
         }
+        SetParamOverride(overrides, "isInSlamMode", options_.is_in_slam_mode_);
+        SetParamOverride(overrides, "maxOptimizationIterations",
+                         params["maxOptimizationIterations"]
+                             ? params["maxOptimizationIterations"].as<int>()
+                             : 30);
+        SetParamOverride(overrides, "onlineMaxOptimizationIterations",
+                         params["onlineMaxOptimizationIterations"]
+                             ? params["onlineMaxOptimizationIterations"].as<int>()
+                             : 10);
+        SetParamOverride(overrides, "onlineLimitOptimizationPoints",
+                         params["onlineLimitOptimizationPoints"]
+                             ? params["onlineLimitOptimizationPoints"].as<bool>()
+                             : true);
+        SetParamOverride(overrides, "onlineMaxSurfOptimizationPoints",
+                         params["onlineMaxSurfOptimizationPoints"]
+                             ? params["onlineMaxSurfOptimizationPoints"].as<int>()
+                             : 4000);
+        SetParamOverride(overrides, "onlineMaxCornerOptimizationPoints",
+                         params["onlineMaxCornerOptimizationPoints"]
+                             ? params["onlineMaxCornerOptimizationPoints"].as<int>()
+                             : 900);
         SetParamOverride(overrides, "mappingLowSpeedMaxTranslationSpeed",
                          params["mappingLowSpeedMaxTranslationSpeed"].as<double>());
         SetParamOverride(overrides, "surroundingkeyframeAddingDistThreshold",
@@ -305,6 +345,16 @@ void LioSamMapping::ProcessIMU(const IMUPtr& input) {
 
 void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
     const double timestamp = math::ToSec(cloud->header.stamp);
+    ++stat_native_in_;
+    auto log_native_stats = [this]() {
+        if (stat_native_in_ % 50 != 0) {
+            return;
+        }
+        LOG(INFO) << "[LIO_NATIVE_INPUT_STAT] in=" << stat_native_in_
+                  << ", valid=" << stat_native_valid_
+                  << ", too_few=" << stat_native_too_few_
+                  << ", invalid_duration=" << stat_invalid_duration_;
+    };
 
     NativeCloudPtr native_cloud(new NativeCloud());
     native_cloud->header.frame_id = cloud->header.frame_id;
@@ -335,15 +385,20 @@ void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
     native_cloud->is_dense = true;
 
     if (native_cloud->size() <= 1) {
+        ++stat_native_too_few_;
         LOG(WARNING) << "LIO-SAM input point cloud has too few points, drop scan";
+        log_native_stats();
         return;
     }
 
     const double scan_duration = static_cast<double>(max_point_time);
     if (!std::isfinite(scan_duration) || scan_duration <= 0.0 || scan_duration > 0.5) {
+        ++stat_invalid_duration_;
         LOG(ERROR) << "invalid LIO-SAM scan duration: " << scan_duration;
+        log_native_stats();
         return;
     }
+    ++stat_native_valid_;
 
     std::lock_guard<std::mutex> lock(mtx_buffer_);
     if (timestamp < last_timestamp_lidar_) {
@@ -361,6 +416,7 @@ void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
     // run_slam_offline 建图也不能丢。
     if (options_.online_mode_ && !options_.is_in_slam_mode_) {
         if (!native_lidar_buffer_.empty()) {
+            stat_lidar_dropped_by_sync_ += native_lidar_buffer_.size();
             LOG_EVERY_N(WARNING, 20)
                 << "[LIO_SAM_ONLINE_DROP] drop stale lidar in internal buffer, size="
                 << native_lidar_buffer_.size()
@@ -381,13 +437,34 @@ void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
     time_buffer_.push_back(timestamp);
     scan_duration_buffer_.push_back(scan_duration);
     frame_id_buffer_.push_back(cloud->header.frame_id);
+    log_native_stats();
 
     //LOG(INFO) << "lio-sam enqueue cloud at " << std::setprecision(14) << timestamp << ", latest imu: " << last_timestamp_imu_;
 }
 
 bool LioSamMapping::SyncPackages() {
     std::lock_guard<std::mutex> lock(mtx_buffer_);
-    if (native_lidar_buffer_.empty() || imu_buffer_.empty()) {
+    ++stat_sync_calls_;
+    auto log_sync_stats = [this]() {
+        if (stat_sync_calls_ % 50 != 0) {
+            return;
+        }
+        LOG(INFO) << "[LIO_SYNC_STAT] success=" << stat_sync_success_
+                  << ", no_cloud=" << stat_sync_no_cloud_
+                  << ", no_imu=" << stat_sync_no_imu_
+                  << ", imu_not_cover_begin=" << stat_imu_not_cover_begin_
+                  << ", imu_not_cover_end=" << stat_imu_not_cover_end_
+                  << ", lidar_dropped=" << stat_lidar_dropped_by_sync_;
+    };
+
+    if (native_lidar_buffer_.empty()) {
+        ++stat_sync_no_cloud_;
+        log_sync_stats();
+        return false;
+    }
+    if (imu_buffer_.empty()) {
+        ++stat_sync_no_imu_;
+        log_sync_stats();
         return false;
     }
 
@@ -411,6 +488,8 @@ bool LioSamMapping::SyncPackages() {
     }
 
     if (last_timestamp_imu_ < lidar_end_time_) {
+        ++stat_imu_not_cover_end_;
+        log_sync_stats();
         return false;
     }
 
@@ -420,6 +499,8 @@ bool LioSamMapping::SyncPackages() {
     }
 
     if (ToSec(imu_buffer_.front().header.stamp) > lidar_begin_time_) {
+        ++stat_imu_not_cover_begin_;
+        ++stat_lidar_dropped_by_sync_;
         LOG(WARNING) << "LIO-SAM IMU does not cover scan begin, drop lidar scan. scan="
                      << std::setprecision(14) << lidar_begin_time_
                      << ", first imu=" << ToSec(imu_buffer_.front().header.stamp);
@@ -428,6 +509,7 @@ bool LioSamMapping::SyncPackages() {
         scan_duration_buffer_.pop_front();
         frame_id_buffer_.pop_front();
         lidar_pushed_ = false;
+        log_sync_stats();
         return false;
     }
 
@@ -446,6 +528,8 @@ bool LioSamMapping::SyncPackages() {
     }
 
     if (measures_.imus.empty() || !imu_covers_scan_end) {
+        ++stat_imu_not_cover_end_;
+        log_sync_stats();
         return false;
     }
 
@@ -458,6 +542,8 @@ bool LioSamMapping::SyncPackages() {
     scan_duration_buffer_.pop_front();
     frame_id_buffer_.pop_front();
     lidar_pushed_ = false;
+    ++stat_sync_success_;
+    log_sync_stats();
     /*0617 测试频率 故此注释掉
     LOG(INFO) << "LIO-SAM sync: begin=" << std::setprecision(14) << measures_.lidar_begin_time
               << ", end=" << measures_.lidar_end_time

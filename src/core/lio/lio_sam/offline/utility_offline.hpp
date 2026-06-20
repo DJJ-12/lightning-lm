@@ -210,6 +210,12 @@ public:
     int numberOfCores;
     double mappingProcessInterval;
     float mappingLowSpeedMaxTranslationSpeed;
+    bool isInSlamMode;
+    int maxOptimizationIterations;
+    int onlineMaxOptimizationIterations;
+    bool onlineLimitOptimizationPoints;
+    int onlineMaxSurfOptimizationPoints;
+    int onlineMaxCornerOptimizationPoints;
 
 
     // Surrounding map
@@ -356,6 +362,18 @@ public:
         get_parameter("mappingProcessInterval", mappingProcessInterval);
         declare_parameter("mappingLowSpeedMaxTranslationSpeed", 0.8);
         get_parameter("mappingLowSpeedMaxTranslationSpeed", mappingLowSpeedMaxTranslationSpeed);
+        declare_parameter("isInSlamMode", true);
+        get_parameter("isInSlamMode", isInSlamMode);
+        declare_parameter("maxOptimizationIterations", 30);
+        get_parameter("maxOptimizationIterations", maxOptimizationIterations);
+        declare_parameter("onlineMaxOptimizationIterations", 10);
+        get_parameter("onlineMaxOptimizationIterations", onlineMaxOptimizationIterations);
+        declare_parameter("onlineLimitOptimizationPoints", true);
+        get_parameter("onlineLimitOptimizationPoints", onlineLimitOptimizationPoints);
+        declare_parameter("onlineMaxSurfOptimizationPoints", 4000);
+        get_parameter("onlineMaxSurfOptimizationPoints", onlineMaxSurfOptimizationPoints);
+        declare_parameter("onlineMaxCornerOptimizationPoints", 900);
+        get_parameter("onlineMaxCornerOptimizationPoints", onlineMaxCornerOptimizationPoints);
 
         declare_parameter("surroundingkeyframeAddingDistThreshold", 1.0);
         get_parameter("surroundingkeyframeAddingDistThreshold", surroundingkeyframeAddingDistThreshold);
