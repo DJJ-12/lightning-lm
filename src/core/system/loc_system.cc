@@ -53,7 +53,7 @@ bool LocSystem::Init(const std::string &yaml_path) {
     lidar_sub_options.callback_group = lidar_cb_group_;
 
     using namespace std::chrono_literals;
-
+    /*
     loc_pub_timer_ = node_->create_wall_timer(
         100ms,
         [this]() {
@@ -62,7 +62,7 @@ bool LocSystem::Init(const std::string &yaml_path) {
             }
         },
         pub_timer_cb_group_);
-
+    */
     imu_sub_ = node_->create_subscription<sensor_msgs::msg::Imu>(
         imu_topic_, imu_qos, [this](sensor_msgs::msg::Imu::SharedPtr msg) {
             IMUPtr imu = std::make_shared<IMU>();

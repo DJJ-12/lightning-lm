@@ -145,6 +145,7 @@ struct LioSamCloudInfo
     std::vector<float> point_range;
 
     pcl::PointCloud<PointType>::Ptr cloud_deskewed{new pcl::PointCloud<PointType>()};
+    pcl::PointCloud<PointType>::Ptr cloud_raw_deskewed{new pcl::PointCloud<PointType>()};
     pcl::PointCloud<PointType>::Ptr cloud_corner{new pcl::PointCloud<PointType>()};
     pcl::PointCloud<PointType>::Ptr cloud_surface{new pcl::PointCloud<PointType>()};
 };
@@ -351,7 +352,7 @@ public:
 
         declare_parameter("numberOfCores", 4);
         get_parameter("numberOfCores", numberOfCores);
-        declare_parameter("mappingProcessInterval", 0.15);
+        declare_parameter("mappingProcessInterval", 0.1);
         get_parameter("mappingProcessInterval", mappingProcessInterval);
         declare_parameter("mappingLowSpeedMaxTranslationSpeed", 0.8);
         get_parameter("mappingLowSpeedMaxTranslationSpeed", mappingLowSpeedMaxTranslationSpeed);
@@ -440,35 +441,36 @@ public:
         imu_out.orientation.z = q_final.z();
         imu_out.orientation.w = q_final.w();
 
-        static int imuConverterDebugCount = 0;
-        if (imuConverterDebugCount < 5)
-        {
-            double rawRoll, rawPitch, rawYaw;
-            double outRoll, outPitch, outYaw;
-            tf2::Quaternion rawOrientation;
-            tf2::Quaternion outOrientation;
-            tf2::fromMsg(imu_in.orientation, rawOrientation);
-            tf2::fromMsg(imu_out.orientation, outOrientation);
-            tf2::Matrix3x3(rawOrientation).getRPY(rawRoll, rawPitch, rawYaw);
-            tf2::Matrix3x3(outOrientation).getRPY(outRoll, outPitch, outYaw);
-
-            RCLCPP_WARN(get_logger(),
-                "[IMU_CONVERTER] raw_rpy=(%.2f %.2f %.2f) out_rpy=(%.2f %.2f %.2f) "
-                "raw_acc=(%.3f %.3f %.3f) out_acc=(%.3f %.3f %.3f)",
-                rawRoll * 180.0 / M_PI,
-                rawPitch * 180.0 / M_PI,
-                rawYaw * 180.0 / M_PI,
-                outRoll * 180.0 / M_PI,
-                outPitch * 180.0 / M_PI,
-                outYaw * 180.0 / M_PI,
-                imu_in.linear_acceleration.x,
-                imu_in.linear_acceleration.y,
-                imu_in.linear_acceleration.z,
-                imu_out.linear_acceleration.x,
-                imu_out.linear_acceleration.y,
-                imu_out.linear_acceleration.z);
-            imuConverterDebugCount++;
-        }
+        // Per-frame IMU converter debug logging is disabled for performance testing.
+        // static int imuConverterDebugCount = 0;
+        // if (imuConverterDebugCount < 5)
+        // {
+        //     double rawRoll, rawPitch, rawYaw;
+        //     double outRoll, outPitch, outYaw;
+        //     tf2::Quaternion rawOrientation;
+        //     tf2::Quaternion outOrientation;
+        //     tf2::fromMsg(imu_in.orientation, rawOrientation);
+        //     tf2::fromMsg(imu_out.orientation, outOrientation);
+        //     tf2::Matrix3x3(rawOrientation).getRPY(rawRoll, rawPitch, rawYaw);
+        //     tf2::Matrix3x3(outOrientation).getRPY(outRoll, outPitch, outYaw);
+        //
+        //     RCLCPP_WARN(get_logger(),
+        //         "[IMU_CONVERTER] raw_rpy=(%.2f %.2f %.2f) out_rpy=(%.2f %.2f %.2f) "
+        //         "raw_acc=(%.3f %.3f %.3f) out_acc=(%.3f %.3f %.3f)",
+        //         rawRoll * 180.0 / M_PI,
+        //         rawPitch * 180.0 / M_PI,
+        //         rawYaw * 180.0 / M_PI,
+        //         outRoll * 180.0 / M_PI,
+        //         outPitch * 180.0 / M_PI,
+        //         outYaw * 180.0 / M_PI,
+        //         imu_in.linear_acceleration.x,
+        //         imu_in.linear_acceleration.y,
+        //         imu_in.linear_acceleration.z,
+        //         imu_out.linear_acceleration.x,
+        //         imu_out.linear_acceleration.y,
+        //         imu_out.linear_acceleration.z);
+        //     imuConverterDebugCount++;
+        // }
 
         if (sqrt(q_final.x()*q_final.x() + q_final.y()*q_final.y() + q_final.z()*q_final.z() + q_final.w()*q_final.w()) < 0.1)
         {

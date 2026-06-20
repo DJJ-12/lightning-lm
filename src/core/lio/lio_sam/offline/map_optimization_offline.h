@@ -16,9 +16,11 @@
 #include <gtsam/nonlinear/ISAM2.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <utility>
 
 using namespace gtsam;
 
@@ -39,7 +41,7 @@ public:
     Values isamCurrentEstimate;
     Eigen::MatrixXd poseCovariance;
 
-    LioSamCloudInfo cloudInfo;
+    const LioSamCloudInfo* cloudInfoPtr = nullptr;
     bool createdNewKeyframe = false;
 
     vector<pcl::PointCloud<PointType>::Ptr> cornerCloudKeyFrames;
@@ -150,6 +152,7 @@ public:
     int laserCloudSurfFromMapDSNum = 0;
     int laserCloudCornerLastDSNum = 0;
     int laserCloudSurfLastDSNum = 0;
+    double lastLocalMapKdtreeMs = 0.0;
     bool aLoopIsClosed = false;
     map<int, int> loopIndexContainer; // from new to old
     vector<pair<int, int>> loopIndexQueue;
@@ -228,7 +231,7 @@ public:
         timeLaserInfoCur = msgIn.timestamp;
 
         // extract info and feature cloud
-        cloudInfo = msgIn;
+        cloudInfoPtr = &msgIn;
         laserCloudCornerLast = msgIn.cloud_corner;
         laserCloudSurfLast = msgIn.cloud_surface;
 
@@ -239,25 +242,76 @@ public:
         {
             timeLastProcessing = timeLaserInfoCur;
 
+            const auto t0 = std::chrono::steady_clock::now();
             resetFrameQuality();
+            const auto t_reset = std::chrono::steady_clock::now();
 
             updateInitialGuess();
+            const auto t_guess = std::chrono::steady_clock::now();
 
             extractSurroundingKeyFrames();
+            const auto t_extract = std::chrono::steady_clock::now();
 
             downsampleCurrentScan();
+            const auto t_downsample = std::chrono::steady_clock::now();
 
             scan2MapOptimization();
-            performLoopClosure();
+            const auto t_scan2map = std::chrono::steady_clock::now();
+
+            // Loop closure checking is expensive.
+            // Do not run it every frame. Keep LIO-SAM backend unchanged,
+            // but check loop closure every 10 frames to reduce overhead.
+            static int loop_closure_frame_count = 0;
+            if (loopClosureEnableFlag && (++loop_closure_frame_count % 10 == 0))
+            {
+                performLoopClosure();
+            }
+            const auto t_loop = std::chrono::steady_clock::now();
+
             const size_t keyframeCountBefore = cloudKeyPoses6D->size();
             saveKeyFramesAndFactor();
             createdNewKeyframe = cloudKeyPoses6D->size() > keyframeCountBefore;
+            const auto t_save = std::chrono::steady_clock::now();
 
             correctPoses();
+            const auto t_correct = std::chrono::steady_clock::now();
 
             updateOdometryState();
+            const auto t_state = std::chrono::steady_clock::now();
 
-            int keyframeAllowed =int(mappingPoseReliable  && transformIsFinite(transformTobeMapped));
+            static int map_timing_count = 0;
+            static double map_timing_total_ms = 0.0;
+            auto ms = [](const auto& a, const auto& b) {
+                return std::chrono::duration<double, std::milli>(b - a).count();
+            };
+            const double total_ms = ms(t0, t_state);
+            map_timing_total_ms += total_ms;
+            if (++map_timing_count % 20 == 0)
+            {
+                RCLCPP_INFO(get_logger(),
+                    "[MAP_OPT_TIMING] reset=%.3f ms, guess=%.3f ms, extract=%.3f ms, "
+                    "downsample=%.3f ms, scan2map=%.3f ms, loop=%.3f ms, save=%.3f ms, "
+                    "correct=%.3f ms, state=%.3f ms, total=%.3f ms, avg_total=%.3f ms, "
+                    "keyframes=%zu, corner_last_ds=%d, surf_last_ds=%d, corner_map=%d, surf_map=%d",
+                    ms(t0, t_reset),
+                    ms(t_reset, t_guess),
+                    ms(t_guess, t_extract),
+                    ms(t_extract, t_downsample),
+                    ms(t_downsample, t_scan2map),
+                    ms(t_scan2map, t_loop),
+                    ms(t_loop, t_save),
+                    ms(t_save, t_correct),
+                    ms(t_correct, t_state),
+                    total_ms,
+                    map_timing_total_ms / static_cast<double>(map_timing_count),
+                    cloudKeyPoses6D->size(),
+                    laserCloudCornerLastDSNum,
+                    laserCloudSurfLastDSNum,
+                    laserCloudCornerFromMapDSNum,
+                    laserCloudSurfFromMapDSNum);
+            }
+
+            // int keyframeAllowed = int(mappingPoseReliable && transformIsFinite(transformTobeMapped));
             /* 0617 测试频率 故此注释掉
             RCLCPP_WARN(get_logger(),
                 "[T2M] time=%.6f roll=%.3f pitch=%.3f yaw=%.3f "
@@ -279,9 +333,11 @@ public:
                 laserCloudCornerLastDS->size(),
                 laserCloudSurfLastDS->size());
             */
+            cloudInfoPtr = nullptr;
             return true;
         }
 
+        cloudInfoPtr = nullptr;
         return true;
     }
 
@@ -308,6 +364,15 @@ public:
         if (rawCloudKeyFrames.empty())
             return nullptr;
         return rawCloudKeyFrames.back();
+    }
+
+    void SetLatestRawCloudKeyFrame(pcl::PointCloud<PointType>::Ptr raw_cloud)
+    {
+        if (!raw_cloud)
+            return;
+        if (rawCloudKeyFrames.empty())
+            return;
+        rawCloudKeyFrames.back() = std::move(raw_cloud);
     }
 
     void pointAssociateToMap(PointType const * const pi, PointType * const po)
@@ -573,6 +638,7 @@ public:
 
     void logMotionGate(const std::string& source, const MotionGateResult& motion)
     {
+        (void)source;
         if (!motion.initialized && !motion.badFinite)
             return;
         /*0617 测试频率 故此注释掉
@@ -601,6 +667,7 @@ public:
     void commitLastAcceptedTrackingTransform(const float acceptedTransform[6],
                                          const std::string& source)
     {
+        (void)source;
         if (!transformIsFinite(acceptedTransform))
             return;
 
@@ -611,11 +678,11 @@ public:
         // 低速模型也应该基于最新 accepted tracking pose 更新
         commitLowSpeedTrustedPose(lastAcceptedTrackingTransform);
 
-        if (cloudInfo.imu_available)
+        if (cloudInfoPtr->imu_available)
         {
-            lastAcceptedImuTransform[0] = cloudInfo.imu_roll_init;
-            lastAcceptedImuTransform[1] = cloudInfo.imu_pitch_init;
-            lastAcceptedImuTransform[2] = cloudInfo.imu_yaw_init;
+            lastAcceptedImuTransform[0] = cloudInfoPtr->imu_roll_init;
+            lastAcceptedImuTransform[1] = cloudInfoPtr->imu_pitch_init;
+            lastAcceptedImuTransform[2] = cloudInfoPtr->imu_yaw_init;
             lastAcceptedImuTransform[3] = 0.0f;
             lastAcceptedImuTransform[4] = 0.0f;
             lastAcceptedImuTransform[5] = 0.0f;
@@ -667,8 +734,8 @@ public:
 
         pcl::PointCloud<PointType>::Ptr sourceCloud(new pcl::PointCloud<PointType>());
         pcl::PointCloud<PointType>::Ptr targetCloud(new pcl::PointCloud<PointType>());
-        if (cloudInfo.cloud_deskewed)
-            pcl::copyPointCloud(*cloudInfo.cloud_deskewed, *sourceCloud);
+        if (cloudInfoPtr->cloud_deskewed)
+            pcl::copyPointCloud(*cloudInfoPtr->cloud_deskewed, *sourceCloud);
 
         laserCloudRawFromMap->clear();
         laserCloudRawFromMapDS->clear();
@@ -916,9 +983,9 @@ public:
     {
         if (cloudKeyPoses3D->points.empty())
         {
-            transformTobeMapped[0] = cloudInfo.imu_roll_init;
-            transformTobeMapped[1] = cloudInfo.imu_pitch_init;
-            transformTobeMapped[2] = cloudInfo.imu_yaw_init;
+            transformTobeMapped[0] = cloudInfoPtr->imu_roll_init;
+            transformTobeMapped[1] = cloudInfoPtr->imu_pitch_init;
+            transformTobeMapped[2] = cloudInfoPtr->imu_yaw_init;
 
             if (!useImuHeadingInitialization)
                 transformTobeMapped[2] = 0;
@@ -931,12 +998,12 @@ public:
         {
             Eigen::Affine3f initialGuessAffine = trans2Affine3f(lastAcceptedTrackingTransform);
 
-            if (cloudInfo.imu_available && lastAcceptedImuTransformAvailable)
+            if (cloudInfoPtr->imu_available && lastAcceptedImuTransformAvailable)
             {
                 Eigen::Affine3f acceptedImuAffine  = trans2Affine3f(lastAcceptedImuTransform);
                 Eigen::Affine3f currentImuAffine = pcl::getTransformation(
                     0.0f, 0.0f, 0.0f,
-                    cloudInfo.imu_roll_init, cloudInfo.imu_pitch_init, cloudInfo.imu_yaw_init);
+                    cloudInfoPtr->imu_roll_init, cloudInfoPtr->imu_pitch_init, cloudInfoPtr->imu_yaw_init);
                 initialGuessAffine = initialGuessAffine * acceptedImuAffine .inverse() * currentImuAffine;
             }
 
@@ -970,6 +1037,7 @@ public:
 
     void extractNearby()
     {
+        const auto t0 = std::chrono::steady_clock::now();
         pcl::PointCloud<PointType>::Ptr surroundingKeyPoses(new pcl::PointCloud<PointType>());
         pcl::PointCloud<PointType>::Ptr surroundingKeyPosesDS(new pcl::PointCloud<PointType>());
         std::vector<int> pointSearchInd;
@@ -1001,12 +1069,17 @@ public:
             else
                 break;
         }
+        const auto t_search = std::chrono::steady_clock::now();
 
-        extractCloud(surroundingKeyPosesDS);
+        const double keyframe_search_ms =
+            std::chrono::duration<double, std::milli>(t_search - t0).count();
+        extractCloud(surroundingKeyPosesDS, keyframe_search_ms);
     }
 
-    void extractCloud(pcl::PointCloud<PointType>::Ptr cloudToExtract)
+    void extractCloud(pcl::PointCloud<PointType>::Ptr cloudToExtract,
+                      double keyframe_search_ms)
     {
+        const auto t_build0 = std::chrono::steady_clock::now();
         // fuse the map
         laserCloudCornerFromMap->clear();
         laserCloudSurfFromMap->clear(); 
@@ -1039,6 +1112,7 @@ public:
             }
             
         }
+        const auto t_build = std::chrono::steady_clock::now();
 
         // Downsample the surrounding corner key frames (or map)
         downSizeFilterCorner.setInputCloud(laserCloudCornerFromMap);
@@ -1063,6 +1137,37 @@ public:
 
         }
         //0428 end
+        const auto t_voxel = std::chrono::steady_clock::now();
+
+        kdtreeCornerFromMap->setInputCloud(laserCloudCornerFromMapDS);
+        kdtreeSurfFromMap->setInputCloud(laserCloudSurfFromMapDS);
+        const auto t_kdtree = std::chrono::steady_clock::now();
+        lastLocalMapKdtreeMs =
+            std::chrono::duration<double, std::milli>(t_kdtree - t_voxel).count();
+
+        static int local_map_timing_count = 0;
+        if (++local_map_timing_count % 20 == 0)
+        {
+            auto ms = [](const auto& a, const auto& b) {
+                return std::chrono::duration<double, std::milli>(b - a).count();
+            };
+            RCLCPP_INFO(get_logger(),
+                "[LOCAL_MAP_TIMING] keyframes=%zu, candidates=%zu, selected=%zu, "
+                "corner_raw=%zu, surf_raw=%zu, corner_ds=%d, surf_ds=%d, "
+                "search_ms=%.3f, build_ms=%.3f, voxel_ms=%.3f, kdtree_ms=%.3f, cache=%zu",
+                cloudKeyPoses6D->size(),
+                cloudToExtract->size(),
+                surroundingKeyFrameIndices.size(),
+                laserCloudCornerFromMap->size(),
+                laserCloudSurfFromMap->size(),
+                laserCloudCornerFromMapDSNum,
+                laserCloudSurfFromMapDSNum,
+                keyframe_search_ms,
+                ms(t_build0, t_build),
+                ms(t_build, t_voxel),
+                lastLocalMapKdtreeMs,
+                laserCloudMapContainer.size());
+        }
 
         // clear map cache if too large
         if (laserCloudMapContainer.size() > 1000)
@@ -1419,6 +1524,47 @@ public:
 
     void scan2MapOptimization()
     {
+        const auto t_scan_start = std::chrono::steady_clock::now();
+        double kdtree_ms = lastLocalMapKdtreeMs;
+        double corner_ms = 0.0;
+        double surf_ms = 0.0;
+        double combine_ms = 0.0;
+        double lm_ms = 0.0;
+        double transform_update_ms = 0.0;
+        double motion_gate_ms = 0.0;
+        double icp_ms = 0.0;
+        int iter_count = 0;
+        auto maybeLogScan2MapTiming = [&](const char* result) {
+            static int scan2map_timing_count = 0;
+            if (++scan2map_timing_count % 20 != 0)
+                return;
+
+            const auto t_scan_end = std::chrono::steady_clock::now();
+            const double total_ms =
+                std::chrono::duration<double, std::milli>(t_scan_end - t_scan_start).count();
+            RCLCPP_INFO(get_logger(),
+                "[SCAN2MAP_TIMING] result=%s, iter=%d, kdtree_ms=%.3f, corner_ms=%.3f, "
+                "surf_ms=%.3f, combine_ms=%.3f, lm_ms=%.3f, transform_update_ms=%.3f, "
+                "motion_gate_ms=%.3f, icp_ms=%.3f, total_ms=%.3f, corner_ds=%d, surf_ds=%d, "
+                "corner_map=%d, surf_map=%d, coeff=%d",
+                result,
+                iter_count,
+                kdtree_ms,
+                corner_ms,
+                surf_ms,
+                combine_ms,
+                lm_ms,
+                transform_update_ms,
+                motion_gate_ms,
+                icp_ms,
+                total_ms,
+                laserCloudCornerLastDSNum,
+                laserCloudSurfLastDSNum,
+                laserCloudCornerFromMapDSNum,
+                laserCloudSurfFromMapDSNum,
+                lastLMCloudSelNum);
+        };
+
         // 1. 冻结当前帧初值
         copyTransform(transformTobeMapped, frameInitialGuessTransform);
 
@@ -1426,6 +1572,7 @@ public:
         if (cloudKeyPoses3D->points.empty())
         {
             acceptMappingPose("INIT");
+            maybeLogScan2MapTiming("INIT");
             return;
         }
 
@@ -1439,47 +1586,66 @@ public:
         if (laserCloudCornerLastDSNum > edgeFeatureMinValidNum &&
             laserCloudSurfLastDSNum > surfFeatureMinValidNum)
         {
-            kdtreeCornerFromMap->setInputCloud(laserCloudCornerFromMapDS);
-            kdtreeSurfFromMap->setInputCloud(laserCloudSurfFromMapDS);
-
             lmRan = true;
             lastLMRan = true;
 
             for (int iterCount = 0; iterCount < 30; iterCount++)
             {
+                ++iter_count;
                 laserCloudOri->clear();
                 coeffSel->clear();
 
+                auto t_corner0 = std::chrono::steady_clock::now();
                 cornerOptimization();
+                auto t_corner = std::chrono::steady_clock::now();
                 surfOptimization();
+                auto t_surf = std::chrono::steady_clock::now();
                 combineOptimizationCoeffs();
+                auto t_combine = std::chrono::steady_clock::now();
 
                 if (LMOptimization(iterCount) == true)
                 {
+                    auto t_lm = std::chrono::steady_clock::now();
+                    corner_ms += std::chrono::duration<double, std::milli>(t_corner - t_corner0).count();
+                    surf_ms += std::chrono::duration<double, std::milli>(t_surf - t_corner).count();
+                    combine_ms += std::chrono::duration<double, std::milli>(t_combine - t_surf).count();
+                    lm_ms += std::chrono::duration<double, std::milli>(t_lm - t_combine).count();
                     lmConverged = true;
                     lastLMConverged = true;
                     lastLMIterationCount = iterCount + 1;
                     break;
                 }
 
+                auto t_lm = std::chrono::steady_clock::now();
+                corner_ms += std::chrono::duration<double, std::milli>(t_corner - t_corner0).count();
+                surf_ms += std::chrono::duration<double, std::milli>(t_surf - t_corner).count();
+                combine_ms += std::chrono::duration<double, std::milli>(t_combine - t_surf).count();
+                lm_ms += std::chrono::duration<double, std::milli>(t_lm - t_combine).count();
                 lastLMIterationCount = iterCount + 1;
             }
 
+            auto t_update0 = std::chrono::steady_clock::now();
             transformUpdate();
+            auto t_update = std::chrono::steady_clock::now();
+            transform_update_ms += std::chrono::duration<double, std::milli>(t_update - t_update0).count();
 
             lmFinite = transformIsFinite(transformTobeMapped);
 
             MotionGateResult lmMotion;
             if (lmFinite)
             {
+                auto t_motion0 = std::chrono::steady_clock::now();
                 lmMotion = evaluateMotionGate(transformTobeMapped);
                 logMotionGate("LM", lmMotion);
                 lmMotionOk = lmMotion.continuous;
+                auto t_motion = std::chrono::steady_clock::now();
+                motion_gate_ms += std::chrono::duration<double, std::milli>(t_motion - t_motion0).count();
             }
 
             if (lmConverged && lmFinite && lmMotionOk)
             {
                 acceptMappingPose("LM");
+                maybeLogScan2MapTiming("LM_OK");
                 return;
             }
 
@@ -1523,6 +1689,7 @@ public:
         if (!mappingIcpFallbackEnable)
         {
             rejectMappingPose(lmFailReason);
+            maybeLogScan2MapTiming("LM_REJECT");
             return;
         }
 
@@ -1532,12 +1699,15 @@ public:
         int icpSourceSize = 0;
         int icpTargetSize = 0;
 
+        auto t_icp0 = std::chrono::steady_clock::now();
         bool icpRan = runIcpFallback(
             frameInitialGuessTransform,
             icpTransform,
             icpFitness,
             icpSourceSize,
             icpTargetSize);
+        auto t_icp = std::chrono::steady_clock::now();
+        icp_ms += std::chrono::duration<double, std::milli>(t_icp - t_icp0).count();
 
         if (!icpRan)
         {
@@ -1548,6 +1718,7 @@ public:
                 icpTargetSize);
 
             rejectMappingPose("FAIL_LM_ICP_NOT_RUN_OR_NOT_CONVERGED");
+            maybeLogScan2MapTiming("ICP_NOT_RUN");
             return;
         }
 
@@ -1558,9 +1729,12 @@ public:
 
         if (icpFinite)
         {
+            auto t_motion0 = std::chrono::steady_clock::now();
             icpMotion = evaluateMotionGate(icpTransform);
             logMotionGate("ICP", icpMotion);
             icpMotionOk = icpMotion.continuous;
+            auto t_motion = std::chrono::steady_clock::now();
+            motion_gate_ms += std::chrono::duration<double, std::milli>(t_motion - t_motion0).count();
         }
 
         bool icpFitnessOk = icpFitness < mappingFallbackIcpFitnessScore;
@@ -1573,12 +1747,16 @@ public:
         if (icpUsable)
         {
             copyTransform(icpTransform, transformTobeMapped);
+            auto t_update0 = std::chrono::steady_clock::now();
             transformUpdate();
+            auto t_update = std::chrono::steady_clock::now();
+            transform_update_ms += std::chrono::duration<double, std::milli>(t_update - t_update0).count();
 
             // 可选：transformUpdate 后再做一次 finite 检查
             if (!transformIsFinite(transformTobeMapped))
             {
                 rejectMappingPose("FAIL_ICP_NOT_FINITE_AFTER_UPDATE");
+                maybeLogScan2MapTiming("ICP_NOT_FINITE_AFTER_UPDATE");
                 return;
             }
 
@@ -1591,6 +1769,7 @@ public:
                 icpSourceSize,
                 icpTargetSize);
 
+            maybeLogScan2MapTiming("ICP_OK");
             return;
         }
 
@@ -1606,12 +1785,13 @@ public:
             icpTargetSize);
 
         rejectMappingPose("FAIL_LM_ICP");
+        maybeLogScan2MapTiming("ICP_REJECT");
     }
     void transformUpdate()
     {
-        if (cloudInfo.imu_available == true)
+        if (cloudInfoPtr->imu_available == true)
         {
-            if (std::abs(cloudInfo.imu_pitch_init) < 1.4)
+            if (std::abs(cloudInfoPtr->imu_pitch_init) < 1.4)
             {
                 double imuWeight = imuRPYWeight;
                 tf2::Quaternion imuQuaternion;
@@ -1620,13 +1800,13 @@ public:
 
                 // slerp roll
                 transformQuaternion.setRPY(transformTobeMapped[0], 0, 0);
-                imuQuaternion.setRPY(cloudInfo.imu_roll_init, 0, 0);
+                imuQuaternion.setRPY(cloudInfoPtr->imu_roll_init, 0, 0);
                 tf2::Matrix3x3(transformQuaternion.slerp(imuQuaternion, imuWeight)).getRPY(rollMid, pitchMid, yawMid);
                 transformTobeMapped[0] = rollMid;
 
                 // slerp pitch
                 transformQuaternion.setRPY(0, transformTobeMapped[1], 0);
-                imuQuaternion.setRPY(0, cloudInfo.imu_pitch_init, 0);
+                imuQuaternion.setRPY(0, cloudInfoPtr->imu_pitch_init, 0);
                 tf2::Matrix3x3(transformQuaternion.slerp(imuQuaternion, imuWeight)).getRPY(rollMid, pitchMid, yawMid);
                 transformTobeMapped[1] = pitchMid;
             }
@@ -1714,6 +1894,39 @@ public:
 
     void saveKeyFramesAndFactor()
     {
+        const auto t0 = std::chrono::steady_clock::now();
+        auto t_save_frame = t0;
+        auto t_odom = t0;
+        auto t_loop = t0;
+        auto t_isam = t0;
+        auto t_estimate = t0;
+        auto t_copy = t0;
+        bool saved_keyframe = false;
+        auto maybeLogIsamTiming = [&](const char* result) {
+            static int isam_timing_count = 0;
+            if (++isam_timing_count % 20 != 0)
+                return;
+
+            const auto t_end = std::chrono::steady_clock::now();
+            auto ms = [](const auto& a, const auto& b) {
+                return std::chrono::duration<double, std::milli>(b - a).count();
+            };
+            RCLCPP_INFO(get_logger(),
+                "[ISAM_TIMING] result=%s, saveFrame_ms=%.3f, addOdom_ms=%.3f, "
+                "addLoop_ms=%.3f, isam_update_ms=%.3f, estimate_ms=%.3f, "
+                "copy_keyframe_ms=%.3f, total_ms=%.3f, saved=%d, keyframes=%zu",
+                result,
+                ms(t0, t_save_frame),
+                ms(t_save_frame, t_odom),
+                ms(t_odom, t_loop),
+                ms(t_loop, t_isam),
+                ms(t_isam, t_estimate),
+                ms(t_estimate, t_copy),
+                ms(t0, t_end),
+                int(saved_keyframe),
+                cloudKeyPoses6D->size());
+        };
+
         if (!mappingPoseReliable  || !transformIsFinite(transformTobeMapped)) //  || isDegenerate
         {
             RCLCPP_WARN(get_logger(),
@@ -1723,17 +1936,36 @@ public:
                 mappingPoseSource.c_str(),
                 int(isDegenerate),
                 int(transformIsFinite(transformTobeMapped)));
+            t_save_frame = std::chrono::steady_clock::now();
+            t_odom = t_save_frame;
+            t_loop = t_save_frame;
+            t_isam = t_save_frame;
+            t_estimate = t_save_frame;
+            t_copy = t_save_frame;
+            maybeLogIsamTiming("POSE_NOT_RELIABLE");
             return;
         }
 
-        if (saveFrame() == false)
+        const bool should_save_frame = saveFrame();
+        t_save_frame = std::chrono::steady_clock::now();
+        if (should_save_frame == false)
+        {
+            t_odom = t_save_frame;
+            t_loop = t_save_frame;
+            t_isam = t_save_frame;
+            t_estimate = t_save_frame;
+            t_copy = t_save_frame;
+            maybeLogIsamTiming("SAVE_FRAME_FALSE");
             return;
+        }
 
         // odom factor
         addOdomFactor();
+        t_odom = std::chrono::steady_clock::now();
 
         // loop factor
         addLoopFactor();
+        t_loop = std::chrono::steady_clock::now();
 
         // cout << "****************************************************" << endl;
         // gtSAMgraph.print("GTSAM Graph:\n");
@@ -1750,6 +1982,7 @@ public:
             isam->update();
             isam->update();
         }
+        t_isam = std::chrono::steady_clock::now();
 
         gtSAMgraph.resize(0);
         initialEstimate.clear();
@@ -1761,6 +1994,7 @@ public:
 
         isamCurrentEstimate = isam->calculateEstimate();
         latestEstimate = isamCurrentEstimate.at<Pose3>(isamCurrentEstimate.size()-1);
+        t_estimate = std::chrono::steady_clock::now();
         // cout << "****************************************************" << endl;
         // isamCurrentEstimate.print("Current estimate: ");
 
@@ -1783,7 +2017,8 @@ public:
         // cout << "****************************************************" << endl;
         // cout << "Pose covariance:" << endl;
         // cout << isam->marginalCovariance(isamCurrentEstimate.size()-1) << endl << endl;
-        poseCovariance = isam->marginalCovariance(isamCurrentEstimate.size()-1);
+        // Temporarily disabled for speed. Keep this line for future re-enable if covariance is needed.
+        // poseCovariance = isam->marginalCovariance(isamCurrentEstimate.size()-1);
 
         // save updated transform
         transformTobeMapped[0] = latestEstimate.rotation().roll();
@@ -1796,19 +2031,21 @@ public:
         // save all the received edge and surf points
         pcl::PointCloud<PointType>::Ptr thisCornerKeyFrame(new pcl::PointCloud<PointType>());
         pcl::PointCloud<PointType>::Ptr thisSurfKeyFrame(new pcl::PointCloud<PointType>());
-        pcl::PointCloud<PointType>::Ptr thisRawKeyFrameRaw(new pcl::PointCloud<PointType>());
         pcl::PointCloud<PointType>::Ptr thisRawKeyFrame(new pcl::PointCloud<PointType>());
         pcl::copyPointCloud(*laserCloudCornerLastDS,  *thisCornerKeyFrame);
         pcl::copyPointCloud(*laserCloudSurfLastDS,    *thisSurfKeyFrame);
-        if (cloudInfo.cloud_deskewed)
-            pcl::copyPointCloud(*cloudInfo.cloud_deskewed, *thisRawKeyFrameRaw);
-        std::vector<int> rawCloudIndices;
-        pcl::removeNaNFromPointCloud(*thisRawKeyFrameRaw, *thisRawKeyFrame, rawCloudIndices);
+
+        // rawCloudKeyFrames stores a placeholder here. LioSamMapping generates
+        // the full-resolution deskewed raw cloud only after this frame is
+        // accepted as a keyframe, then replaces the latest placeholder.
 
         // save key frame cloud
         cornerCloudKeyFrames.push_back(thisCornerKeyFrame);
         surfCloudKeyFrames.push_back(thisSurfKeyFrame);
         rawCloudKeyFrames.push_back(thisRawKeyFrame);
+        t_copy = std::chrono::steady_clock::now();
+        saved_keyframe = true;
+        maybeLogIsamTiming("SAVED");
     }
 
     void correctPoses()

@@ -19,6 +19,13 @@
 #include "common/options.h"
 #include "core/lio/eskf.hpp"
 
+namespace pcl {
+template <typename PointT>
+class PointCloud;
+}
+
+struct VelodynePointXYZIRT;
+
 class ImageProjection;
 class FeatureExtraction;
 class mapOptimization;
@@ -42,12 +49,15 @@ class LioSamMapping {
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
+    using NativeCloud = pcl::PointCloud<::VelodynePointXYZIRT>;
+    using NativeCloudPtr = std::shared_ptr<NativeCloud>;
+
     LioSamMapping();
     explicit LioSamMapping(Options options);
     ~LioSamMapping();
 
     bool Init(const std::string& config_yaml);
-    bool Run();
+    bool Run(bool need_output_cloud = true);
 
     void ProcessIMU(const IMUPtr& imu);
     void ProcessPointCloud2(CloudPtr cloud);
@@ -85,6 +95,8 @@ class LioSamMapping {
         return CloudPtr(new PointCloudType(*recent_cloud_));
     }
 
+    CloudPtr GetProjCloudShared() const { return recent_cloud_; }
+
     CloudPtr GetRecentCloud() const {
         if (!recent_cloud_) {
             return nullptr;
@@ -96,10 +108,11 @@ class LioSamMapping {
 
    private:
     struct SyncedPackage {
-        sensor_msgs::msg::PointCloud2 cloud;
+        NativeCloudPtr native_cloud;
         std::vector<sensor_msgs::msg::Imu> imus;
         double lidar_begin_time = 0.0;
         double lidar_end_time = 0.0;
+        std::string frame_id;
     };
 
     bool LoadParamsFromYAML(const std::string& yaml_path);
@@ -116,8 +129,10 @@ class LioSamMapping {
     std::unique_ptr<::mapOptimization> map_optimization_;
 
     mutable std::mutex mtx_buffer_;
-    std::deque<sensor_msgs::msg::PointCloud2> lidar_buffer_;
+    std::deque<NativeCloudPtr> native_lidar_buffer_;
     std::deque<double> time_buffer_;
+    std::deque<double> scan_duration_buffer_;
+    std::deque<std::string> frame_id_buffer_;
     std::deque<sensor_msgs::msg::Imu> imu_buffer_; //给 LIO-SAM 的 ImageProjection 去畸变用的 ROS IMU 消息
 
     //0603新增imu 预测

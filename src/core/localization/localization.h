@@ -100,6 +100,7 @@ class Localization {
     void UpdateMapOdomByPGOResult(const LocalizationResult& pgo_result);
     void UpdateMapOdomByLidarLocResult(const LocalizationResult& loc_result);
     void PublishHighFrequencyResultByLO(const NavState& lo_state);
+    bool ShouldRunLidarLocThisFrame();
 
     /// 模块  ========================================================================================================
     std::mutex global_mutex_;  // 防止处理过程中被重复init
@@ -134,6 +135,7 @@ class Localization {
     SE3 map_odom_pose_;
     std::mutex lo_pose_mutex_;
     std::deque<NavState> lo_pose_queue_;
+    int lidar_loc_frame_count_ = 0;
 
     /// 框架相关
     TFCallback tf_callback_;

@@ -78,9 +78,9 @@ system:
   enable_lidar_loc_skip: true
   enable_lidar_loc_rviz: false
   enable_lidar_odom_skip: false
-  lidar_loc_skip_num: 4
+  lidar_loc_skip_num: 20
   lidar_odom_skip_num: 2
-  map_path: /data/new_map/
+  map_path: ./data/new_map/
   pub_tf: true
 
 loop_closing:
@@ -152,7 +152,7 @@ lio_sam:
   # Sensor settings
   N_SCAN: 128
   Horizon_SCAN: 1800
-  downsampleRate: 1
+  downsampleRate: 2
   lidarMinRange: 0.5
   lidarMaxRange: 200.0
 
@@ -183,9 +183,9 @@ lio_sam:
   surfFeatureMinValidNum: 100
 
   # Voxel filters
-  odometrySurfLeafSize: 0.2
-  mappingCornerLeafSize: 0.1
-  mappingSurfLeafSize: 0.2
+  odometrySurfLeafSize: 0.6
+  mappingCornerLeafSize: 0.4
+  mappingSurfLeafSize: 0.6
 
   # Robot motion constraint
   z_tollerance: 1000.0
@@ -193,14 +193,14 @@ lio_sam:
 
   # CPU params
   numberOfCores: 4
-  mappingProcessInterval: 0.15
+  mappingProcessInterval: 0.1
   mappingLowSpeedMaxTranslationSpeed: 0.8
 
   # Surrounding map
-  surroundingkeyframeAddingDistThreshold: 1.0
-  surroundingkeyframeAddingAngleThreshold: 0.2
-  surroundingKeyframeDensity: 2.0
-  surroundingKeyframeSearchRadius: 50.0
+  surroundingkeyframeAddingDistThreshold: 2.0
+  surroundingkeyframeAddingAngleThreshold: 0.4
+  surroundingKeyframeDensity: 4.0
+  surroundingKeyframeSearchRadius: 25.0
 
   # Loop closure
   loopClosureEnableFlag: true

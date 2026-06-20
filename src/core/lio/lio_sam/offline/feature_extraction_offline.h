@@ -21,10 +21,12 @@ public:
     pcl::PointCloud<PointType>::Ptr extractedCloud;
     pcl::PointCloud<PointType>::Ptr cornerCloud;
     pcl::PointCloud<PointType>::Ptr surfaceCloud;
+    pcl::PointCloud<PointType>::Ptr surfaceCloudScan;
+    pcl::PointCloud<PointType>::Ptr surfaceCloudScanDS;
 
     pcl::VoxelGrid<PointType> downSizeFilter;
 
-    LioSamCloudInfo cloudInfo;
+    LioSamCloudInfo* cloudInfoPtr = nullptr;
 
     std::vector<smoothness_t> cloudSmoothness;
     float *cloudCurvature;
@@ -46,6 +48,8 @@ public:
         extractedCloud.reset(new pcl::PointCloud<PointType>());
         cornerCloud.reset(new pcl::PointCloud<PointType>());
         surfaceCloud.reset(new pcl::PointCloud<PointType>());
+        surfaceCloudScan.reset(new pcl::PointCloud<PointType>());
+        surfaceCloudScanDS.reset(new pcl::PointCloud<PointType>());
 
         cloudCurvature = new float[N_SCAN*Horizon_SCAN];
         cloudNeighborPicked = new int[N_SCAN*Horizon_SCAN];
@@ -54,8 +58,8 @@ public:
 
     bool Run(LioSamCloudInfo& cloudInfoInOut)
     {
-        cloudInfo = cloudInfoInOut; // new cloud info
-        extractedCloud = cloudInfo.cloud_deskewed; // new cloud for extraction
+        cloudInfoPtr = &cloudInfoInOut;
+        extractedCloud = cloudInfoInOut.cloud_deskewed; // new cloud for extraction
 
         calculateSmoothness();
 
@@ -64,6 +68,7 @@ public:
         extractFeatures();
 
         packFeatureCloud(cloudInfoInOut);
+        cloudInfoPtr = nullptr;
         return true;
     }
 
@@ -72,12 +77,12 @@ public:
         int cloudSize = extractedCloud->points.size();
         for (int i = 5; i < cloudSize - 5; i++)
         {
-            float diffRange = cloudInfo.point_range[i-5] + cloudInfo.point_range[i-4]
-                            + cloudInfo.point_range[i-3] + cloudInfo.point_range[i-2]
-                            + cloudInfo.point_range[i-1] - cloudInfo.point_range[i] * 10
-                            + cloudInfo.point_range[i+1] + cloudInfo.point_range[i+2]
-                            + cloudInfo.point_range[i+3] + cloudInfo.point_range[i+4]
-                            + cloudInfo.point_range[i+5];
+            float diffRange = cloudInfoPtr->point_range[i-5] + cloudInfoPtr->point_range[i-4]
+                            + cloudInfoPtr->point_range[i-3] + cloudInfoPtr->point_range[i-2]
+                            + cloudInfoPtr->point_range[i-1] - cloudInfoPtr->point_range[i] * 10
+                            + cloudInfoPtr->point_range[i+1] + cloudInfoPtr->point_range[i+2]
+                            + cloudInfoPtr->point_range[i+3] + cloudInfoPtr->point_range[i+4]
+                            + cloudInfoPtr->point_range[i+5];
 
             cloudCurvature[i] = diffRange*diffRange;//diffX * diffX + diffY * diffY + diffZ * diffZ;
 
@@ -96,9 +101,9 @@ public:
         for (int i = 5; i < cloudSize - 6; ++i)
         {
             // occluded points
-            float depth1 = cloudInfo.point_range[i];
-            float depth2 = cloudInfo.point_range[i+1];
-            int columnDiff = std::abs(int(cloudInfo.point_col_ind[i+1] - cloudInfo.point_col_ind[i]));
+            float depth1 = cloudInfoPtr->point_range[i];
+            float depth2 = cloudInfoPtr->point_range[i+1];
+            int columnDiff = std::abs(int(cloudInfoPtr->point_col_ind[i+1] - cloudInfoPtr->point_col_ind[i]));
             if (columnDiff < 10){
                 // 10 pixel diff in range image
                 if (depth1 - depth2 > 0.3){
@@ -118,10 +123,10 @@ public:
                 }
             }
             // parallel beam
-            float diff1 = std::abs(float(cloudInfo.point_range[i-1] - cloudInfo.point_range[i]));
-            float diff2 = std::abs(float(cloudInfo.point_range[i+1] - cloudInfo.point_range[i]));
+            float diff1 = std::abs(float(cloudInfoPtr->point_range[i-1] - cloudInfoPtr->point_range[i]));
+            float diff2 = std::abs(float(cloudInfoPtr->point_range[i+1] - cloudInfoPtr->point_range[i]));
 
-            if (diff1 > 0.02 * cloudInfo.point_range[i] && diff2 > 0.02 * cloudInfo.point_range[i])
+            if (diff1 > 0.02 * cloudInfoPtr->point_range[i] && diff2 > 0.02 * cloudInfoPtr->point_range[i])
                 cloudNeighborPicked[i] = 1;
         }
     }
@@ -130,9 +135,8 @@ public:
     {
         cornerCloud->clear();
         surfaceCloud->clear();
-
-        pcl::PointCloud<PointType>::Ptr surfaceCloudScan(new pcl::PointCloud<PointType>());
-        pcl::PointCloud<PointType>::Ptr surfaceCloudScanDS(new pcl::PointCloud<PointType>());
+        surfaceCloudScan->clear();
+        surfaceCloudScanDS->clear();
 
         for (int i = 0; i < N_SCAN; i++)
         {
@@ -141,8 +145,8 @@ public:
             for (int j = 0; j < 6; j++)
             {
 
-                int sp = (cloudInfo.start_ring_index[i] * (6 - j) + cloudInfo.end_ring_index[i] * j) / 6;
-                int ep = (cloudInfo.start_ring_index[i] * (5 - j) + cloudInfo.end_ring_index[i] * (j + 1)) / 6 - 1;
+                int sp = (cloudInfoPtr->start_ring_index[i] * (6 - j) + cloudInfoPtr->end_ring_index[i] * j) / 6;
+                int ep = (cloudInfoPtr->start_ring_index[i] * (5 - j) + cloudInfoPtr->end_ring_index[i] * (j + 1)) / 6 - 1;
 
                 if (sp >= ep)
                     continue;
@@ -166,14 +170,14 @@ public:
                         cloudNeighborPicked[ind] = 1;
                         for (int l = 1; l <= 5; l++)
                         {
-                            int columnDiff = std::abs(int(cloudInfo.point_col_ind[ind + l] - cloudInfo.point_col_ind[ind + l - 1]));
+                            int columnDiff = std::abs(int(cloudInfoPtr->point_col_ind[ind + l] - cloudInfoPtr->point_col_ind[ind + l - 1]));
                             if (columnDiff > 10)
                                 break;
                             cloudNeighborPicked[ind + l] = 1;
                         }
                         for (int l = -1; l >= -5; l--)
                         {
-                            int columnDiff = std::abs(int(cloudInfo.point_col_ind[ind + l] - cloudInfo.point_col_ind[ind + l + 1]));
+                            int columnDiff = std::abs(int(cloudInfoPtr->point_col_ind[ind + l] - cloudInfoPtr->point_col_ind[ind + l + 1]));
                             if (columnDiff > 10)
                                 break;
                             cloudNeighborPicked[ind + l] = 1;
@@ -191,14 +195,14 @@ public:
                         cloudNeighborPicked[ind] = 1;
 
                         for (int l = 1; l <= 5; l++) {
-                            int columnDiff = std::abs(int(cloudInfo.point_col_ind[ind + l] - cloudInfo.point_col_ind[ind + l - 1]));
+                            int columnDiff = std::abs(int(cloudInfoPtr->point_col_ind[ind + l] - cloudInfoPtr->point_col_ind[ind + l - 1]));
                             if (columnDiff > 10)
                                 break;
 
                             cloudNeighborPicked[ind + l] = 1;
                         }
                         for (int l = -1; l >= -5; l--) {
-                            int columnDiff = std::abs(int(cloudInfo.point_col_ind[ind + l] - cloudInfo.point_col_ind[ind + l + 1]));
+                            int columnDiff = std::abs(int(cloudInfoPtr->point_col_ind[ind + l] - cloudInfoPtr->point_col_ind[ind + l + 1]));
                             if (columnDiff > 10)
                                 break;
 
@@ -225,21 +229,15 @@ public:
 
     void freeCloudInfoMemory()
     {
-        cloudInfo.start_ring_index.clear();
-        cloudInfo.end_ring_index.clear();
-        cloudInfo.point_col_ind.clear();
-        cloudInfo.point_range.clear();
     }
 
     void packFeatureCloud(LioSamCloudInfo& cloudInfoInOut)
     {
         // save newly extracted features
-        cloudInfo.cloud_corner = cornerCloud;
-        cloudInfo.cloud_surface = surfaceCloud;
-        cloudInfoInOut = cloudInfo;
+        cloudInfoInOut.cloud_corner = cornerCloud;
+        cloudInfoInOut.cloud_surface = surfaceCloud;
         cornerCloud.reset(new pcl::PointCloud<PointType>());
         surfaceCloud.reset(new pcl::PointCloud<PointType>());
         extractedCloud.reset(new pcl::PointCloud<PointType>());
-        freeCloudInfoMemory();
     }
 };

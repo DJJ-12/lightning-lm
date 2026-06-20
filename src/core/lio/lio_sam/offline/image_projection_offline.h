@@ -65,8 +65,20 @@ private:
     LioSamCloudInfo cloudInfo;
     double timeScanCur;
     double timeScanEnd;
+    std::string currentFrameId;
 
     vector<int> columnIdnCountVec;
+
+    std::vector<double> imuTimeForRawKeyframe_;
+    std::vector<double> imuRotXForRawKeyframe_;
+    std::vector<double> imuRotYForRawKeyframe_;
+    std::vector<double> imuRotZForRawKeyframe_;
+    int imuPointerCurForRawKeyframe_ = -1;
+    bool imuAvailableForRawKeyframe_ = false;
+    int deskewFlagForRawKeyframe_ = 0;
+    double lastTimeScanCurForRawKeyframe_ = 0.0;
+    double lastTimeScanEndForRawKeyframe_ = 0.0;
+    std::string lastFrameIdForRawKeyframe_;
 
 
 public:
@@ -99,10 +111,25 @@ public:
 
     void resetParameters()
     {
-        laserCloudIn->clear();
+        resetParametersImpl(false);
+    }
+
+    void resetParametersButKeepRawKeyframeCache()
+    {
+        resetParametersImpl(true);
+    }
+
+    void resetParametersImpl(bool keep_laser_cloud)
+    {
+        if (!keep_laser_cloud)
+            laserCloudIn.reset(new pcl::PointCloud<PointXYZIRT>());
         extractedCloud->clear();
         // reset range matrix for range image projection
         rangeMat = cv::Mat(N_SCAN, Horizon_SCAN, CV_32F, cv::Scalar::all(FLT_MAX));
+        cloudInfo.start_ring_index.assign(N_SCAN, 0);
+        cloudInfo.end_ring_index.assign(N_SCAN, 0);
+        cloudInfo.point_col_ind.assign(N_SCAN * Horizon_SCAN, 0);
+        cloudInfo.point_range.assign(N_SCAN * Horizon_SCAN, 0);
 
         imuPointerCur = 0;
         firstPointFlag = true;
@@ -138,13 +165,70 @@ public:
             return false;
         }
 
+        cacheRawKeyframeDeskewInfo();
+
         projectPointCloud();
 
         cloudExtraction();
 
         packCloudInfo(cloudInfoOut);
 
-        resetParameters();
+        resetParametersButKeepRawKeyframeCache();
+        return true;
+    }
+
+    bool RunNativeCloud(const pcl::PointCloud<PointXYZIRT>::Ptr& native_cloud,
+                        const std::vector<sensor_msgs::msg::Imu>& imus,
+                        double lidar_begin_time,
+                        double lidar_end_time,
+                        const std::string& frame_id,
+                        LioSamCloudInfo& cloudInfoOut)
+    {
+        imuQueue.clear();
+        for (const auto& imu : imus)
+            imuQueue.push_back(imuConverter(imu));
+
+        if (!cacheNativeCloud(native_cloud, lidar_begin_time, lidar_end_time, frame_id))
+            return false;
+
+        if (!deskewInfo())
+        {
+            resetParameters();
+            return false;
+        }
+
+        cacheRawKeyframeDeskewInfo();
+
+        projectPointCloud();
+
+        cloudExtraction();
+
+        packCloudInfo(cloudInfoOut);
+
+        resetParametersButKeepRawKeyframeCache();
+        return true;
+    }
+
+    bool cacheNativeCloud(const pcl::PointCloud<PointXYZIRT>::Ptr& native_cloud,
+                          double lidar_begin_time,
+                          double lidar_end_time,
+                          const std::string& frame_id)
+    {
+        if (!native_cloud || native_cloud->empty())
+        {
+            RCLCPP_WARN(get_logger(), "Empty native point cloud, skip this scan.");
+            return false;
+        }
+
+        laserCloudIn = native_cloud;
+        currentFrameId = frame_id;
+
+        timeScanCur = lidar_begin_time;
+        timeScanEnd = lidar_end_time;
+
+        ringFlag = 1;
+        deskewFlag = 1;
+
         return true;
     }
 
@@ -153,6 +237,7 @@ public:
                          double lidar_end_time)
     {
         currentCloudMsg = laserCloudMsg;
+        currentFrameId = laserCloudMsg.header.frame_id;
         if (sensor == SensorType::VELODYNE || sensor == SensorType::LIVOX)
         {
             pcl::moveFromROSMsg(currentCloudMsg, *laserCloudIn);  
@@ -189,21 +274,22 @@ public:
 
         // get timestamp
         timeScanCur = lidar_begin_time;
-        double pointTimeLast = laserCloudIn->points.back().time;
+        // double pointTimeLast = laserCloudIn->points.back().time;
         timeScanEnd = lidar_end_time;
 
-        static int pointTimeDebugCount = 0;
-        pointTimeDebugCount++;
-        if (pointTimeDebugCount == 1 || pointTimeLast < 0.0 || pointTimeLast > 0.2)
-        {
-            RCLCPP_WARN(get_logger(),
-                "[POINT_TIME] stamp=%.6f last_point_time=%.9f scan_end=%.6f points=%zu sensor=%d",
-                timeScanCur,
-                pointTimeLast,
-                timeScanEnd,
-                laserCloudIn->points.size(),
-                int(sensor));
-        }
+        // Per-frame point time debug logging is disabled for LIO-SAM performance testing.
+        // static int pointTimeDebugCount = 0;
+        // pointTimeDebugCount++;
+        // if (pointTimeDebugCount == 1 || pointTimeLast < 0.0 || pointTimeLast > 0.2)
+        // {
+        //     RCLCPP_WARN(get_logger(),
+        //         "[POINT_TIME] stamp=%.6f last_point_time=%.9f scan_end=%.6f points=%zu sensor=%d",
+        //         timeScanCur,
+        //         pointTimeLast,
+        //         timeScanEnd,
+        //         laserCloudIn->points.size(),
+        //         int(sensor));
+        // }
     
         // remove Nan
         vector<int> indices;
@@ -266,7 +352,7 @@ public:
             stamp2Sec(imuQueue.front().header.stamp) > timeScanCur ||
             stamp2Sec(imuQueue.back().header.stamp) < timeScanEnd)
         {
-            RCLCPP_INFO(get_logger(), "Waiting for IMU data ...");
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000, "Waiting for IMU data ...");
             return false;
         }
 
@@ -307,7 +393,7 @@ public:
                     double accPitch = 0.0;
                     if (imuAccel2rosRollPitch(&thisImuMsg, &accRoll, &accPitch))
                     {
-                        static int accelInitDebugCount = 0;
+                        // static int accelInitDebugCount = 0;
                         /* 0617 测试频率 故此注释掉
                         if (accelInitDebugCount < 5)
                         {
@@ -425,9 +511,150 @@ public:
         return newPoint;
     }
 
+    void cacheRawKeyframeDeskewInfo()
+    {
+        imuAvailableForRawKeyframe_ = cloudInfo.imu_available;
+        deskewFlagForRawKeyframe_ = deskewFlag;
+        lastTimeScanCurForRawKeyframe_ = timeScanCur;
+        lastTimeScanEndForRawKeyframe_ = timeScanEnd;
+        lastFrameIdForRawKeyframe_ = currentFrameId;
+        imuPointerCurForRawKeyframe_ = imuPointerCur;
+
+        const int count = imuPointerCurForRawKeyframe_ >= 0 ? imuPointerCurForRawKeyframe_ + 1 : 0;
+        imuTimeForRawKeyframe_.assign(imuTime, imuTime + count);
+        imuRotXForRawKeyframe_.assign(imuRotX, imuRotX + count);
+        imuRotYForRawKeyframe_.assign(imuRotY, imuRotY + count);
+        imuRotZForRawKeyframe_.assign(imuRotZ, imuRotZ + count);
+    }
+
+    void findRotationForRawKeyframe(double pointTime, float *rotXCur, float *rotYCur, float *rotZCur) const
+    {
+        *rotXCur = 0;
+        *rotYCur = 0;
+        *rotZCur = 0;
+
+        if (imuTimeForRawKeyframe_.empty())
+            return;
+
+        int imuPointerFront = 0;
+        const int lastIdx = static_cast<int>(imuTimeForRawKeyframe_.size()) - 1;
+        while (imuPointerFront < lastIdx)
+        {
+            if (pointTime < imuTimeForRawKeyframe_[imuPointerFront])
+                break;
+            ++imuPointerFront;
+        }
+
+        if (pointTime > imuTimeForRawKeyframe_[imuPointerFront] || imuPointerFront == 0)
+        {
+            *rotXCur = imuRotXForRawKeyframe_[imuPointerFront];
+            *rotYCur = imuRotYForRawKeyframe_[imuPointerFront];
+            *rotZCur = imuRotZForRawKeyframe_[imuPointerFront];
+        } else {
+            int imuPointerBack = imuPointerFront - 1;
+            const double dt = imuTimeForRawKeyframe_[imuPointerFront] - imuTimeForRawKeyframe_[imuPointerBack];
+            if (dt <= 0.0)
+                return;
+
+            double ratioFront = (pointTime - imuTimeForRawKeyframe_[imuPointerBack]) / dt;
+            double ratioBack = (imuTimeForRawKeyframe_[imuPointerFront] - pointTime) / dt;
+            *rotXCur = imuRotXForRawKeyframe_[imuPointerFront] * ratioFront + imuRotXForRawKeyframe_[imuPointerBack] * ratioBack;
+            *rotYCur = imuRotYForRawKeyframe_[imuPointerFront] * ratioFront + imuRotYForRawKeyframe_[imuPointerBack] * ratioBack;
+            *rotZCur = imuRotZForRawKeyframe_[imuPointerFront] * ratioFront + imuRotZForRawKeyframe_[imuPointerBack] * ratioBack;
+        }
+    }
+
+    PointType deskewPointForSavedFrame(PointType *point,
+                                       double relTime,
+                                       bool& firstPointForRaw,
+                                       Eigen::Affine3f& transStartInverseForRaw)
+    {
+        if (deskewFlagForRawKeyframe_ == -1 || imuAvailableForRawKeyframe_ == false)
+            return *point;
+
+        double pointTime = lastTimeScanCurForRawKeyframe_ + relTime;
+
+        float rotXCur, rotYCur, rotZCur;
+        findRotationForRawKeyframe(pointTime, &rotXCur, &rotYCur, &rotZCur);
+
+        float posXCur = 0.0f;
+        float posYCur = 0.0f;
+        float posZCur = 0.0f;
+
+        if (firstPointForRaw == true)
+        {
+            transStartInverseForRaw = (pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur)).inverse();
+            firstPointForRaw = false;
+        }
+
+        Eigen::Affine3f transFinal = pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur);
+        Eigen::Affine3f transBt = transStartInverseForRaw * transFinal;
+
+        PointType newPoint;
+        newPoint.x = transBt(0,0) * point->x + transBt(0,1) * point->y + transBt(0,2) * point->z + transBt(0,3);
+        newPoint.y = transBt(1,0) * point->x + transBt(1,1) * point->y + transBt(1,2) * point->z + transBt(1,3);
+        newPoint.z = transBt(2,0) * point->x + transBt(2,1) * point->y + transBt(2,2) * point->z + transBt(2,3);
+        newPoint.intensity = point->intensity;
+
+        return newPoint;
+    }
+
+    pcl::PointCloud<PointType>::Ptr BuildRawDeskewedCloudForLastFrame()
+    {
+        pcl::PointCloud<PointType>::Ptr raw(new pcl::PointCloud<PointType>());
+        if (!laserCloudIn || laserCloudIn->empty())
+            return raw;
+
+        // NOTE: LIO-SAM frontend is currently executed in a single odometry thread.
+        // BuildRawDeskewedCloudForLastFrame() is called immediately after
+        // mapOptimization::Run() for the same frame. Therefore it is safe to use
+        // laserCloudIn here. If the frontend is parallelized in the future, this
+        // cache should be revisited.
+        raw->reserve(laserCloudIn->size());
+        bool firstPointForRaw = true;
+        Eigen::Affine3f transStartInverseForRaw = Eigen::Affine3f::Identity();
+
+        for (const auto& src : laserCloudIn->points)
+        {
+            PointType thisPoint;
+            thisPoint.x = src.x;
+            thisPoint.y = src.y;
+            thisPoint.z = src.z;
+            thisPoint.intensity = src.intensity;
+
+            float range = pointDistance(thisPoint);
+            if (range < lidarMinRange || range > lidarMaxRange)
+                continue;
+
+            int rowIdn = src.ring;
+            if (ringFlag == 2) {
+                float verticalAngle =
+                    atan2(thisPoint.z,
+                        sqrt(thisPoint.x * thisPoint.x + thisPoint.y * thisPoint.y)) *
+                    180 / M_PI;
+                rowIdn = (verticalAngle + (N_SCAN - 1)) / 2.0;
+            }
+
+            if (rowIdn < 0 || rowIdn >= N_SCAN)
+                continue;
+
+            PointType deskewedPoint =
+                deskewPointForSavedFrame(&thisPoint, src.time, firstPointForRaw, transStartInverseForRaw);
+            raw->push_back(deskewedPoint);
+        }
+
+        raw->header.stamp = static_cast<std::uint64_t>(std::llround(lastTimeScanCurForRawKeyframe_ * 1e6));
+        raw->header.frame_id = lastFrameIdForRawKeyframe_;
+        raw->height = 1;
+        raw->width = raw->size();
+        raw->is_dense = true;
+        return raw;
+    }
+
     void projectPointCloud()
     {
         int cloudSize = laserCloudIn->points.size();
+
         // range image projection
         for (int i = 0; i < cloudSize; ++i)
         {
@@ -454,9 +681,6 @@ public:
             if (rowIdn < 0 || rowIdn >= N_SCAN)
                 continue;
 
-            if (rowIdn % downsampleRate != 0)
-                continue;
-
             int columnIdn = -1;
             if (sensor == SensorType::VELODYNE || sensor == SensorType::OUSTER)
             {
@@ -476,15 +700,17 @@ public:
             if (columnIdn < 0 || columnIdn >= Horizon_SCAN)
                 continue;
 
+            if (rowIdn % downsampleRate != 0)
+                continue;
+
             if (rangeMat.at<float>(rowIdn, columnIdn) != FLT_MAX)
                 continue;
 
-            thisPoint = deskewPoint(&thisPoint, laserCloudIn->points[i].time);
-
+            PointType deskewedPoint = deskewPoint(&thisPoint, laserCloudIn->points[i].time);
             rangeMat.at<float>(rowIdn, columnIdn) = range;
 
             int index = columnIdn + rowIdn * Horizon_SCAN;
-            fullCloud->points[index] = thisPoint;
+            fullCloud->points[index] = deskewedPoint;
         }
     }
 
@@ -524,10 +750,21 @@ public:
         extractedCloud->is_dense = true;
 
         // PCL header.frame_id 是 std::string，可以从 currentCloudMsg 带过来
-        extractedCloud->header.frame_id = currentCloudMsg.header.frame_id;
+        extractedCloud->header.frame_id = currentFrameId;
 
         cloudInfo.cloud_deskewed = extractedCloud;
-        cloudInfoOut = cloudInfo;
+
+        cloudInfoOut.timestamp = cloudInfo.timestamp;
+        cloudInfoOut.imu_available = cloudInfo.imu_available;
+        cloudInfoOut.imu_roll_init = cloudInfo.imu_roll_init;
+        cloudInfoOut.imu_pitch_init = cloudInfo.imu_pitch_init;
+        cloudInfoOut.imu_yaw_init = cloudInfo.imu_yaw_init;
+        cloudInfoOut.start_ring_index = std::move(cloudInfo.start_ring_index);
+        cloudInfoOut.end_ring_index = std::move(cloudInfo.end_ring_index);
+        cloudInfoOut.point_col_ind = std::move(cloudInfo.point_col_ind);
+        cloudInfoOut.point_range = std::move(cloudInfo.point_range);
+        cloudInfoOut.cloud_deskewed = extractedCloud;
+
         extractedCloud.reset(new pcl::PointCloud<PointType>());
     }
 };

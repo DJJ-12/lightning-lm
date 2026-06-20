@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <utility>
@@ -145,6 +146,9 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
         SetParamOverride(overrides, "rotation_tollerance", params["rotation_tollerance"].as<double>());
         SetParamOverride(overrides, "numberOfCores", params["numberOfCores"].as<int>());
         SetParamOverride(overrides, "mappingProcessInterval", params["mappingProcessInterval"].as<double>());
+        if (!options_.is_in_slam_mode_) {
+            SetParamOverride(overrides, "mappingProcessInterval", 0.0);
+        }
         SetParamOverride(overrides, "mappingLowSpeedMaxTranslationSpeed",
                          params["mappingLowSpeedMaxTranslationSpeed"].as<double>());
         SetParamOverride(overrides, "surroundingkeyframeAddingDistThreshold",
@@ -302,10 +306,11 @@ void LioSamMapping::ProcessIMU(const IMUPtr& input) {
 void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
     const double timestamp = math::ToSec(cloud->header.stamp);
 
-    pcl::PointCloud<::VelodynePointXYZIRT> native_cloud;
-    native_cloud.header.frame_id = cloud->header.frame_id;
-    native_cloud.header.stamp = static_cast<std::uint64_t>(std::llround(timestamp * 1e6));
-    native_cloud.reserve(cloud->size());
+    NativeCloudPtr native_cloud(new NativeCloud());
+    native_cloud->header.frame_id = cloud->header.frame_id;
+    native_cloud->header.stamp = static_cast<std::uint64_t>(std::llround(timestamp * 1e6));
+    native_cloud->reserve(cloud->size());
+    float max_point_time = 0.0f;
     for (const auto& source : cloud->points) {
         if (!std::isfinite(source.x) ||
             !std::isfinite(source.y) ||
@@ -322,20 +327,31 @@ void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
         // PointCloudPreprocess::RoboSenseHandler 输出 source.time 单位是 ms；
         // LIO-SAM VelodynePointXYZIRT::time 需要 seconds。
         point.time = static_cast<float>(source.time * 1e-3);
-        native_cloud.push_back(point);
+        max_point_time = std::max(max_point_time, point.time);
+        native_cloud->push_back(point);
     }
-    native_cloud.height = 1;
-    native_cloud.width = native_cloud.size();
-    native_cloud.is_dense = true;
-    sensor_msgs::msg::PointCloud2 msg;
-    pcl::toROSMsg(native_cloud, msg);
-    msg.header.stamp = ToRosStamp(timestamp);
-    msg.header.frame_id = cloud->header.frame_id;
+    native_cloud->height = 1;
+    native_cloud->width = native_cloud->size();
+    native_cloud->is_dense = true;
+
+    if (native_cloud->size() <= 1) {
+        LOG(WARNING) << "LIO-SAM input point cloud has too few points, drop scan";
+        return;
+    }
+
+    const double scan_duration = static_cast<double>(max_point_time);
+    if (!std::isfinite(scan_duration) || scan_duration <= 0.0 || scan_duration > 0.5) {
+        LOG(ERROR) << "invalid LIO-SAM scan duration: " << scan_duration;
+        return;
+    }
+
     std::lock_guard<std::mutex> lock(mtx_buffer_);
     if (timestamp < last_timestamp_lidar_) {
         LOG(ERROR) << "lio-sam lidar loop back, clear buffer";
-        lidar_buffer_.clear();
+        native_lidar_buffer_.clear();
         time_buffer_.clear();
+        scan_duration_buffer_.clear();
+        frame_id_buffer_.clear();
         lidar_pushed_ = false;
 
     }
@@ -344,69 +360,45 @@ void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
     // run_loc_offline 离线定位不能丢，否则离线评估/回放不完整。
     // run_slam_offline 建图也不能丢。
     if (options_.online_mode_ && !options_.is_in_slam_mode_) {
-        if (!lidar_buffer_.empty()) {
+        if (!native_lidar_buffer_.empty()) {
             LOG_EVERY_N(WARNING, 20)
                 << "[LIO_SAM_ONLINE_DROP] drop stale lidar in internal buffer, size="
-                << lidar_buffer_.size()
+                << native_lidar_buffer_.size()
                 << ", new_t=" << std::setprecision(14) << timestamp
                 << ", latest_imu=" << last_timestamp_imu_;
         }
 
-        lidar_buffer_.clear();
+        native_lidar_buffer_.clear();
         time_buffer_.clear();
+        scan_duration_buffer_.clear();
+        frame_id_buffer_.clear();
         lidar_pushed_ = false;
     }
 
     scan_count_++;
     last_timestamp_lidar_ = timestamp;
-    lidar_buffer_.push_back(msg);
+    native_lidar_buffer_.push_back(native_cloud);
     time_buffer_.push_back(timestamp);
+    scan_duration_buffer_.push_back(scan_duration);
+    frame_id_buffer_.push_back(cloud->header.frame_id);
 
     //LOG(INFO) << "lio-sam enqueue cloud at " << std::setprecision(14) << timestamp << ", latest imu: " << last_timestamp_imu_;
 }
 
 bool LioSamMapping::SyncPackages() {
     std::lock_guard<std::mutex> lock(mtx_buffer_);
-    if (lidar_buffer_.empty() || imu_buffer_.empty()) {
+    if (native_lidar_buffer_.empty() || imu_buffer_.empty()) {
         return false;
     }
 
     /*** push a lidar scan ***/
     if (!lidar_pushed_) {
         measures_ = SyncedPackage();
-        measures_.cloud = lidar_buffer_.front();
+        measures_.native_cloud = native_lidar_buffer_.front();
         measures_.lidar_begin_time = time_buffer_.front();
+        measures_.frame_id = frame_id_buffer_.front();
 
-        double scan_duration = 0.0;
-        if (sensor_type_ == "ouster") {
-            pcl::PointCloud<::OusterPointXYZIRT> scan_for_time;
-            pcl::fromROSMsg(measures_.cloud, scan_for_time);
-            if (scan_for_time.points.size() <= 1) {
-                LOG(WARNING) << "LIO-SAM input point cloud has too few points, drop scan";
-                lidar_buffer_.pop_front();
-                time_buffer_.pop_front();
-                return false;
-            }
-            scan_duration = scan_for_time.points.back().t * 1e-9;
-        } else {
-            pcl::PointCloud<::PointXYZIRT> scan_for_time;
-            pcl::fromROSMsg(measures_.cloud, scan_for_time);
-            if (scan_for_time.points.size() <= 1) {
-                LOG(WARNING) << "LIO-SAM input point cloud has too few points, drop scan";
-                lidar_buffer_.pop_front();
-                time_buffer_.pop_front();
-                return false;
-            }
-            scan_duration = scan_for_time.points.back().time;
-        }
-
-        if (!std::isfinite(scan_duration) || scan_duration <= 0.0 || scan_duration > 0.5) {
-            LOG(ERROR) << "invalid LIO-SAM scan duration: " << scan_duration;
-            lidar_buffer_.pop_front();
-            time_buffer_.pop_front();
-            lidar_pushed_ = false;
-            return false;
-        }
+        const double scan_duration = scan_duration_buffer_.front();
 
         scan_num_for_mean_++;
         lidar_mean_scantime_ += (scan_duration - lidar_mean_scantime_) / scan_num_for_mean_;
@@ -431,8 +423,10 @@ bool LioSamMapping::SyncPackages() {
         LOG(WARNING) << "LIO-SAM IMU does not cover scan begin, drop lidar scan. scan="
                      << std::setprecision(14) << lidar_begin_time_
                      << ", first imu=" << ToSec(imu_buffer_.front().header.stamp);
-        lidar_buffer_.pop_front();
+        native_lidar_buffer_.pop_front();
         time_buffer_.pop_front();
+        scan_duration_buffer_.pop_front();
+        frame_id_buffer_.pop_front();
         lidar_pushed_ = false;
         return false;
     }
@@ -459,8 +453,10 @@ bool LioSamMapping::SyncPackages() {
         imu_buffer_.pop_front();
     }
 
-    lidar_buffer_.pop_front();
+    native_lidar_buffer_.pop_front();
     time_buffer_.pop_front();
+    scan_duration_buffer_.pop_front();
+    frame_id_buffer_.pop_front();
     lidar_pushed_ = false;
     /*0617 测试频率 故此注释掉
     LOG(INFO) << "LIO-SAM sync: begin=" << std::setprecision(14) << measures_.lidar_begin_time
@@ -471,29 +467,48 @@ bool LioSamMapping::SyncPackages() {
     return true;
 }
 
-bool LioSamMapping::Run() {
+bool LioSamMapping::Run(bool need_output_cloud) {
     if (!image_projection_ || !feature_extraction_ || !map_optimization_) {
         return false;
     }
 
+    const auto t0 = std::chrono::steady_clock::now();
     if (!SyncPackages()) {
         return false;
     }
+    const auto t_sync = std::chrono::steady_clock::now();
 
     LioSamCloudInfo cloud_info;
 
-    if (!image_projection_->Run(measures_.cloud, measures_.imus,
-                                measures_.lidar_begin_time, measures_.lidar_end_time,
-                                cloud_info)) {
+    if (!image_projection_->RunNativeCloud(measures_.native_cloud, measures_.imus,
+                                           measures_.lidar_begin_time, measures_.lidar_end_time,
+                                           measures_.frame_id,
+                                           cloud_info)) {
         return false;
     }
+    const auto t_proj = std::chrono::steady_clock::now();
 
     if (!feature_extraction_->Run(cloud_info)) {
         return false;
     }
+    const auto t_feat = std::chrono::steady_clock::now();
 
     if (!map_optimization_->Run(cloud_info)) {
         return false;
+    }
+    const auto t_map = std::chrono::steady_clock::now();
+
+    if (options_.is_in_slam_mode_) {
+        if (map_optimization_->CreatedNewKeyframe()) {
+            auto raw_cloud = image_projection_->BuildRawDeskewedCloudForLastFrame();
+            if (raw_cloud && !raw_cloud->empty()) {
+                map_optimization_->SetLatestRawCloudKeyFrame(std::move(raw_cloud));
+            }
+        }
+    } else {
+        if (map_optimization_->CreatedNewKeyframe()) {
+            map_optimization_->ClearCreatedNewKeyframe();
+        }
     }
 
     const float* transform = map_optimization_->TransformTobeMapped();
@@ -579,8 +594,8 @@ bool LioSamMapping::Run() {
 
         static int dr_anchor_count = 0;
         if (++dr_anchor_count % 20 == 0) {
-            const auto& dr = kf_imu_.GetX();
             /* 0617 测试频率 故此注释掉
+            const auto& dr = kf_imu_.GetX();
             LOG(INFO) << "[LIO_SAM_DR_ANCHOR] lidar_t=" << std::setprecision(14) << state_.timestamp_
                     << ", dr_t=" << dr.timestamp_
                     << ", pos=" << dr.pos_.transpose()
@@ -591,34 +606,59 @@ bool LioSamMapping::Run() {
         }
     }
 
-    // 显示
-    scan_undistort_->clear();
-    if (cloud_info.cloud_deskewed) {
-        scan_undistort_->reserve(cloud_info.cloud_deskewed->size());
-        for (const auto& p : cloud_info.cloud_deskewed->points) {
-            PointType pt;
-            pt.x = p.x;
-            pt.y = p.y;
-            pt.z = p.z;
-            pt.intensity = p.intensity;
-            pt.ring = 0.0;
-            pt.time = 0.0;
-            scan_undistort_->push_back(pt);
+    if (need_output_cloud) {
+        scan_undistort_.reset(new PointCloudType());
+        if (cloud_info.cloud_deskewed) {
+            scan_undistort_->reserve(cloud_info.cloud_deskewed->size());
+            for (const auto& p : cloud_info.cloud_deskewed->points) {
+                PointType pt;
+                pt.x = p.x;
+                pt.y = p.y;
+                pt.z = p.z;
+                pt.intensity = p.intensity;
+                pt.ring = 0.0;
+                pt.time = 0.0;
+                scan_undistort_->push_back(pt);
+            }
         }
+
+        scan_undistort_->header.stamp = static_cast<std::uint64_t>(std::llround(state_.timestamp_ * 1e9));
+        scan_undistort_->header.frame_id = measures_.frame_id;
+        scan_undistort_->height = 1;
+        scan_undistort_->width = scan_undistort_->size();
+        scan_undistort_->is_dense = true;
+        recent_cloud_ = scan_undistort_;
+    } else {
+        scan_undistort_.reset();
+        recent_cloud_.reset();
     }
-    scan_undistort_->header.stamp = static_cast<std::uint64_t>(std::llround(state_.timestamp_ * 1e9));
-    scan_undistort_->header.frame_id = measures_.cloud.header.frame_id;
-    scan_undistort_->height = 1;
-    scan_undistort_->width = scan_undistort_->size();
-    scan_undistort_->is_dense = true;
-    recent_cloud_.reset(new PointCloudType(*scan_undistort_));
 
     if (ui_) {
         ui_->UpdateNavState(state_);
-        ui_->UpdateScan(scan_undistort_, state_.GetPose());
+        if (need_output_cloud && scan_undistort_) {
+            ui_->UpdateScan(scan_undistort_, state_.GetPose());
+        }
     }
 
-    MakeLightningKeyframeIfNeeded();
+    if (options_.is_in_slam_mode_) {
+        MakeLightningKeyframeIfNeeded();
+    }
+
+    const auto t_end = std::chrono::steady_clock::now();
+    static int timing_count = 0;
+    if (++timing_count % 20 == 0) {
+        auto ms = [](const auto& a, const auto& b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+
+        LOG(INFO) << "[LIO_SAM_TIMING] "
+                  << "sync=" << ms(t0, t_sync) << " ms, "
+                  << "projection=" << ms(t_sync, t_proj) << " ms, "
+                  << "feature=" << ms(t_proj, t_feat) << " ms, "
+                  << "mapopt=" << ms(t_feat, t_map) << " ms, "
+                  << "tail=" << ms(t_map, t_end) << " ms, "
+                  << "total=" << ms(t0, t_end) << " ms";
+    }
     //SyncLightningKeyframePoses();
     /* 0617 测试频率 故此注释掉
     LOG(INFO) << "[LIO_SAM_OUTPUT] scan_header="
@@ -644,8 +684,10 @@ bool LioSamMapping::MakeLightningKeyframeIfNeeded() {
     pcl::PointCloud<::PointType>::Ptr native_cloud = map_optimization_->LatestRawCloudKeyFrame();
 
     CloudPtr cloud(new PointCloudType());
+    cloud->header.frame_id = measures_.frame_id;
+    cloud->header.stamp = static_cast<std::uint64_t>(std::llround(state_.timestamp_ * 1e9));
     if (native_cloud) {
-        cloud->header = scan_undistort_->header;
+        cloud->header = native_cloud->header;
         cloud->reserve(native_cloud->size());
         for (const auto& p : native_cloud->points) {
             PointType pt;

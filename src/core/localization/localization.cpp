@@ -89,6 +89,7 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
         UL lock_lo(lo_pose_mutex_);
         lo_pose_queue_.clear();
     }
+    lidar_loc_frame_count_ = 0;
     {
         UL lock_result(loc_result_mutex_);
         loc_result_ = LocalizationResult();
@@ -166,7 +167,9 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     lidar_loc_proc_cloud_.SetName("激光定位");
 
     // 允许跳帧
-    lidar_loc_proc_cloud_.SetSkipParam(options_.enable_lidar_loc_skip_, options_.lidar_loc_skip_num_);
+    // NDT skip is handled before LIO-SAM generates recent_cloud_.
+    // Do not skip again inside lidar_loc_proc_cloud_, otherwise skip is applied twice.
+    lidar_loc_proc_cloud_.SetSkipParam(false, 1);
     lidar_odom_proc_cloud_.SetSkipParam(options_.enable_lidar_odom_skip_, options_.lidar_odom_skip_num_);
 
     lidar_odom_proc_cloud_.SetProcFunc([this](CloudPtr cloud) { LidarOdomProcCloud(cloud); });
@@ -191,6 +194,15 @@ void Localization::PublishLatestResult() {
     if (tf_callback_ && latest.valid_) {
         tf_callback_(latest.ToGeoMsg());
     }
+}
+
+bool Localization::ShouldRunLidarLocThisFrame() {
+    if (!options_.enable_lidar_loc_skip_ || options_.lidar_loc_skip_num_ <= 1) {
+        return true;
+    }
+
+    const int idx = lidar_loc_frame_count_++;
+    return (idx % options_.lidar_loc_skip_num_) == 0;
 }
 
 void Localization::UpdateMapOdomByPGOResult(const LocalizationResult& pgo_result) {
@@ -223,7 +235,7 @@ void Localization::UpdateMapOdomByPGOResult(const LocalizationResult& pgo_result
 }
 
 void Localization::UpdateMapOdomByLidarLocResult(const LocalizationResult& loc_result) {
-    if (!loc_result.valid_ || !loc_result.lidar_loc_valid_) {
+    if (!loc_result.lidar_loc_valid_ || loc_result.status_ != LocalizationStatus::GOOD) {
         return;
     }
 
@@ -321,6 +333,8 @@ void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPt
     // 串行模式
     CloudPtr laser_cloud(new PointCloudType);
     preprocess_->Process(cloud, laser_cloud);
+    // TODO(perf): For LIO-SAM frontend, fuse preprocessing, T_base_lidar transform,
+    // and NativeCloud conversion into one pass to avoid extra point cloud traversal.
     CloudPtr cloud_base(new PointCloudType);
     pcl::transformPointCloud(*laser_cloud, *cloud_base, options_.T_base_lidar_.matrix().cast<float>());
     cloud_base->header = laser_cloud->header;
@@ -344,6 +358,8 @@ void Localization::ProcessLivoxLidarMsg(const livox_ros_driver2::msg::CustomMsg:
     // 串行模式
     CloudPtr laser_cloud(new PointCloudType);
     preprocess_->Process(cloud, laser_cloud);
+    // TODO(perf): For LIO-SAM frontend, fuse preprocessing, T_base_lidar transform,
+    // and NativeCloud conversion into one pass to avoid extra point cloud traversal.
     CloudPtr cloud_base(new PointCloudType);
     pcl::transformPointCloud(*laser_cloud, *cloud_base, options_.T_base_lidar_.matrix().cast<float>());
     cloud_base->header = laser_cloud->header;
@@ -361,29 +377,29 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
     if ((!use_lio_sam_ && lio_ == nullptr) || (use_lio_sam_ && lio_sam_ == nullptr)) {
         return;
     }
+    const bool need_loc_scan = options_.online_mode_ ? ShouldRunLidarLocThisFrame() : true;
     NavState lo_state;
-    CloudPtr scan(new PointCloudType);
+    CloudPtr scan = nullptr;
     Keyframe::Ptr kf = nullptr;
     /// NOTE: 在NCLT这种数据集中，lio内部是有缓存的，它拿到的点云不一定是最新时刻的点云
     if (use_lio_sam_) {
         lio_sam_->ProcessPointCloud2(cloud);
-        if (!lio_sam_->Run()) {
+        if (!lio_sam_->Run(need_loc_scan)) {
             return;
         }
         lo_state = lio_sam_->GetState();
-        scan = lio_sam_->GetProjCloud();
+        if (need_loc_scan) {
+            scan = lio_sam_->GetProjCloudShared();
+        }
     } else {
         lio_->ProcessPointCloud2(cloud);
         if (!lio_->Run()) {
             return;
         }
         lo_state = lio_->GetState();
-        scan = lio_->GetProjCloud();
-    }
-    
-    if (scan == nullptr || scan->empty()) {
-        LOG(WARNING) << "[LIDAR_LOC_INPUT] empty scan from frontend, skip";
-        return;
+        if (need_loc_scan) {
+            scan = lio_->GetProjCloud();
+        }
     }
 
     {
@@ -399,9 +415,20 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
         }
     }
 
-    lidar_loc_->ProcessLO(lo_state);
+    if (lidar_loc_) {
+        lidar_loc_->ProcessLO(lo_state);
+    }
     // pgo_->ProcessLidarOdom(lo_state);
     PublishHighFrequencyResultByLO(lo_state);
+
+    if (!need_loc_scan) {
+        return;
+    }
+
+    if (scan == nullptr || scan->empty()) {
+        LOG(WARNING) << "[LIDAR_LOC_INPUT] empty scan from frontend, skip NDT";
+        return;
+    }
 
     // LOG(INFO) << "LO pose: " << std::setprecision(12) << lo_state.timestamp_ << " "
     //           << lo_state.GetPose().translation().transpose();
