@@ -11,7 +11,7 @@ endif ()
 set(CMAKE_BUILD_TYPE Release)
 
 # -------------------------------------------------------------
-# µ¼ÈëµÚÈý·½¿â£¬Í¬Ê±×öÒ»Ð©È«¾Ö±àÒëÑ¡ÏîÅäÖÃ
+# ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½â£¬Í¬Ê±ï¿½ï¿½Ò»Ð©È«ï¿½Ö±ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 add_definitions("-DPCL_NO_PRECOMPILE")
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -fopenmp -fPIC -g")
@@ -37,8 +37,9 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(pcl_conversions REQUIRED)
+find_package(OpenMP REQUIRED)
 
-# msg ºÍ srv
+# msg ï¿½ï¿½ srv
 set(MY_MSG_FILES "")
 set(MSG_DIR ${PROJECT_SOURCE_DIR}/msg)
 file(GLOB_RECURSE MSG_FILES ${MSG_DIR}/*.msg)

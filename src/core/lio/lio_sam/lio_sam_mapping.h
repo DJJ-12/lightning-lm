@@ -51,7 +51,7 @@ class LioSamMapping {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
     using NativeCloud = pcl::PointCloud<::VelodynePointXYZIRT>;
-    using NativeCloudPtr = std::shared_ptr<NativeCloud>;
+    using NativeCloudPtr = NativeCloud::Ptr;
 
     LioSamMapping();
     explicit LioSamMapping(Options options);

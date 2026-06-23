@@ -87,6 +87,7 @@ add_subdirectory(core/miao)
 target_link_libraries(${PROJECT_NAME}.libs
         ${third_party_libs}
         ${PCL_LIBRARIES}
+        OpenMP::OpenMP_CXX
         gtsam
         miao.core
         miao.utils

@@ -80,7 +80,7 @@ system:
   enable_lidar_odom_skip: false
   lidar_loc_skip_num: 20
   lidar_odom_skip_num: 2
-  map_path: ./data/new_map/
+  map_path: /data/new_map/
   pub_tf: true
 
 loop_closing:
