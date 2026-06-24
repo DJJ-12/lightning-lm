@@ -372,8 +372,7 @@ void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPt
         ++stat_preprocess_ok_;
         ++stat_window_preprocess_ok_;
     }
-    // TODO(perf): For LIO-SAM frontend, fuse preprocessing, T_base_lidar transform,
-    // and NativeCloud conversion into one pass to avoid extra point cloud traversal.
+    // TODO(perf): Fuse preprocessing and T_base_lidar transform into one pass.
     CloudPtr cloud_base(new PointCloudType);
     pcl::transformPointCloud(*laser_cloud, *cloud_base, T_base_lidar.matrix().cast<float>());
     cloud_base->header = laser_cloud->header;
@@ -452,8 +451,7 @@ void Localization::ProcessLivoxLidarMsg(const livox_ros_driver2::msg::CustomMsg:
     // 串行模式
     CloudPtr laser_cloud(new PointCloudType);
     preprocess_->Process(cloud, laser_cloud);
-    // TODO(perf): For LIO-SAM frontend, fuse preprocessing, T_base_lidar transform,
-    // and NativeCloud conversion into one pass to avoid extra point cloud traversal.
+    // TODO(perf): Fuse preprocessing and T_base_lidar transform into one pass.
     CloudPtr cloud_base(new PointCloudType);
     pcl::transformPointCloud(*laser_cloud, *cloud_base, options_.T_base_lidar_.matrix().cast<float>());
     cloud_base->header = laser_cloud->header;

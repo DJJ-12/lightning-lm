@@ -1,8 +1,6 @@
 #include "core/lio/lio_sam/lio_sam_mapping.h"
 
 #include <algorithm>
-#include <cctype>
-#include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <utility>
@@ -16,9 +14,6 @@
 #include "core/lightning_math.hpp"
 #include "wrapper/ros_utils.h"
 
-// Header-only offline LIO-SAM stages: no ROS topic handoff, no included .cpp files.
-#include "core/lio/lio_sam/offline/image_projection_offline.h"
-#include "core/lio/lio_sam/offline/feature_extraction_offline.h"
 #include "core/lio/lio_sam/offline/deskew_feature_extractor.h"
 #include "core/lio/lio_sam/offline/map_optimization_offline.h"
 
@@ -62,12 +57,6 @@ LioSamMapping::LioSamMapping() : LioSamMapping(Options()) {}
 LioSamMapping::LioSamMapping(Options options) : options_(options) {}
 
 LioSamMapping::~LioSamMapping() {
-    if (ab_csv_file_.is_open()) {
-        ab_csv_file_.flush();
-        ab_csv_file_.close();
-    }
-    image_projection_.reset();
-    feature_extraction_.reset();
     deskew_feature_extractor_.reset();
     map_optimization_.reset();
     frontend_cloud_info_.reset();
@@ -96,35 +85,10 @@ bool LioSamMapping::Init(const std::string& config_yaml) {
     kf_imu_.Init(eskf_options);
 
     frontend_cloud_info_ = std::make_unique<::LioSamCloudInfo>();
-    if (use_fused_deskew_feature_extractor_) {
-        deskew_feature_extractor_ = std::make_unique<::DeskewFeatureExtractor>(node_options_);
-    } else {
-        image_projection_ = std::make_unique<::ImageProjection>(node_options_);
-        feature_extraction_ = std::make_unique<::FeatureExtraction>(node_options_);
-    }
+    deskew_feature_extractor_ = std::make_unique<::DeskewFeatureExtractor>(node_options_);
     map_optimization_ = std::make_unique<::mapOptimization>(node_options_);
 
-    LOG(INFO) << "[LIO_SAM_PARAM_EFFECTIVE] "
-              << "is_in_slam_mode=" << options_.is_in_slam_mode_
-              << ", useFusedDeskewFeatureExtractor=" << use_fused_deskew_feature_extractor_
-              << ", mappingProcessInterval=" << map_optimization_->mappingProcessInterval
-              << ", loopClosureEnableFlag=" << map_optimization_->loopClosureEnableFlag
-              << ", downsampleRate=" << map_optimization_->downsampleRate
-              << ", odometrySurfLeafSize=" << map_optimization_->odometrySurfLeafSize
-              << ", mappingCornerLeafSize=" << map_optimization_->mappingCornerLeafSize
-              << ", mappingSurfLeafSize=" << map_optimization_->mappingSurfLeafSize
-              << ", numberOfCores=" << map_optimization_->numberOfCores
-              << ", maxOptimizationIterations=" << map_optimization_->maxOptimizationIterations
-              << ", onlineMaxOptimizationIterations="
-              << map_optimization_->onlineMaxOptimizationIterations
-              << ", onlineLimitOptimizationPoints="
-              << map_optimization_->onlineLimitOptimizationPoints
-              << ", onlineMaxSurfOptimizationPoints="
-              << map_optimization_->onlineMaxSurfOptimizationPoints
-              << ", onlineMaxCornerOptimizationPoints="
-              << map_optimization_->onlineMaxCornerOptimizationPoints
-              << ", abCsvEnable=" << ab_csv_enable_
-              << ", abCsvPath=" << ab_csv_path_;
+    LOG(INFO) << "[LIO_SAM_FRONTEND] frontend=deskew_feature_extractor";
 
     return true;
 }
@@ -139,16 +103,6 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
             return false;
         }
         std::vector<rclcpp::Parameter> overrides;
-        sensor_type_ = params["sensor"].as<std::string>();
-        use_fused_deskew_feature_extractor_ =
-            params["useFusedDeskewFeatureExtractor"]
-                ? params["useFusedDeskewFeatureExtractor"].as<bool>()
-                : true;
-        ab_csv_enable_ = params["abCsvEnable"] ? params["abCsvEnable"].as<bool>() : false;
-        ab_csv_path_ = params["abCsvPath"]
-                           ? params["abCsvPath"].as<std::string>()
-                           : "./data/lio_sam_ab.csv";
-        std::transform(sensor_type_.begin(), sensor_type_.end(), sensor_type_.begin(), ::tolower);
 
         SetParamOverride(overrides, "pointCloudTopic", common["lidar_topic"].as<std::string>());
         SetParamOverride(overrides, "imuTopic", common["imu_topic"].as<std::string>());
@@ -159,7 +113,6 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
         SetParamOverride(overrides, "odometryFrame", common["odometry_frame"].as<std::string>());
         SetParamOverride(overrides, "mapFrame", common["map_frame"].as<std::string>());
 
-        SetParamOverride(overrides, "sensor", sensor_type_);
         SetParamOverride(overrides, "useImuHeadingInitialization", params["useImuHeadingInitialization"].as<bool>());
         SetParamOverride(overrides, "useImuAccelRollPitchInitialization",
                          params["useImuAccelRollPitchInitialization"].as<bool>());
@@ -212,6 +165,8 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
                          params["onlineMaxCornerOptimizationPoints"]
                              ? params["onlineMaxCornerOptimizationPoints"].as<int>()
                              : 900);
+        SetParamOverride(overrides, "debugTiming",
+                         params["debugTiming"] ? params["debugTiming"].as<bool>() : false);
         SetParamOverride(overrides, "mappingLowSpeedMaxTranslationSpeed",
                          params["mappingLowSpeedMaxTranslationSpeed"].as<double>());
         SetParamOverride(overrides, "surroundingkeyframeAddingDistThreshold",
@@ -251,18 +206,9 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
         imu_Q_.block<3, 3>(3, 3).diagonal() = Vec3d(acc_cov, acc_cov, acc_cov);
         imu_Q_.block<3, 3>(6, 6).diagonal() = Vec3d(b_gyr_cov, b_gyr_cov, b_gyr_cov);
         imu_Q_.block<3, 3>(9, 9).diagonal() = Vec3d(b_acc_cov, b_acc_cov, b_acc_cov);
-        /* 0617 测试频率 故此注释掉
-        LOG(INFO) << "[LIO_SAM_DR] imu_Q loaded from fasterlio: "
-                  << "gyr_cov=" << gyr_cov
-                  << ", acc_cov=" << acc_cov
-                  << ", b_gyr_cov=" << b_gyr_cov
-                  << ", b_acc_cov=" << b_acc_cov
-                  << ", Q_diag=" << imu_Q_.diagonal().transpose();
-        */
         node_options_ = rclcpp::NodeOptions();
         node_options_.use_intra_process_comms(true);
         node_options_.parameter_overrides(overrides);
-        LOG(INFO) << "LIO-SAM params loaded: sensor=" << sensor_type_ << ", overrides=" << overrides.size();
         return true;
     } catch (const std::exception& e) {
         LOG(ERROR) << "failed to load LIO-SAM params from " << yaml_path << ": " << e.what();
@@ -304,7 +250,6 @@ void LioSamMapping::ProcessIMU(const IMUPtr& input) {
     }
 
     last_timestamp_imu_ = timestamp;
-    imu_count_++;
     imu_buffer_.push_back(imu);
     // 0603新增imu外推
     // 3. 给新增 ESKF / DR 高频预测使用
@@ -326,11 +271,6 @@ void LioSamMapping::ProcessIMU(const IMUPtr& input) {
 
         if (imu_init_count_ >= imu_init_min_count_) {
             imu_mean_ready_ = true;
-            /* 0617 测试频率 故此注释掉
-            LOG(INFO) << "[LIO_SAM_DR] imu mean ready, acc="
-                      << imu_mean_acc_.transpose()
-                      << ", gyr=" << imu_mean_gyr_.transpose();
-            */
         }
     }
 
@@ -346,10 +286,6 @@ void LioSamMapping::ProcessIMU(const IMUPtr& input) {
     }
 
     if (dt > 0.1) {
-        /* 0617 测试频率 故此注释掉
-        LOG(WARNING) << "[LIO_SAM_DR] abnormal imu dt=" << dt
-                     << ", skip predict";
-        */
         imu_dr_inited_ = false;
         last_dr_imu_time_ = -1.0;
         return;
@@ -368,93 +304,31 @@ void LioSamMapping::ProcessIMU(const IMUPtr& input) {
 
 void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
     const double timestamp = math::ToSec(cloud->header.stamp);
-    ++stat_native_in_;
-    auto log_native_stats = [this]() {
-        if (stat_native_in_ % 50 != 0) {
-            return;
-        }
-        LOG(INFO) << "[LIO_NATIVE_INPUT_STAT] in=" << stat_native_in_
-                  << ", valid=" << stat_native_valid_
-                  << ", too_few=" << stat_native_too_few_
-                  << ", invalid_duration=" << stat_invalid_duration_;
-    };
 
-    CloudPtr frontend_cloud;
-    NativeCloudPtr native_cloud;
-    if (use_fused_deskew_feature_extractor_) {
-        frontend_cloud.reset(new PointCloudType());
-        frontend_cloud->header = cloud->header;
-        frontend_cloud->reserve(cloud->size());
-    } else {
-        native_cloud.reset(new NativeCloud());
-        native_cloud->header.frame_id = cloud->header.frame_id;
-        native_cloud->header.stamp =
-            static_cast<std::uint64_t>(std::llround(timestamp * 1e6));
-        native_cloud->reserve(cloud->size());
-    }
+    CloudPtr frontend_cloud(new PointCloudType());
+    frontend_cloud->header = cloud->header;
+    frontend_cloud->reserve(cloud->size());
 
     float max_point_time = 0.0f;
     for (const auto& source : cloud->points) {
-        if (!std::isfinite(source.x) ||
-            !std::isfinite(source.y) ||
-            !std::isfinite(source.z) ||
-            !std::isfinite(source.time)) {
-            continue;
-        }
-        // The shared PointCloudType keeps FastLIO's millisecond convention.
-        // Normalize to seconds at the LIO-SAM wrapper boundary.
-        const float point_time_seconds = static_cast<float>(source.time * 1e-3);
-        max_point_time = std::max(max_point_time, point_time_seconds);
-        if (use_fused_deskew_feature_extractor_) {
-            PointType point = source;
-            point.time = point_time_seconds;
-            frontend_cloud->push_back(point);
-        } else {
-            ::VelodynePointXYZIRT point;
-            point.x = source.x;
-            point.y = source.y;
-            point.z = source.z;
-            point.intensity = source.intensity;
-            point.ring = source.ring;
-            point.time = point_time_seconds;
-            native_cloud->push_back(point);
-        }
+        PointType point = source;
+        // PointCloudPreprocess keeps point.time in milliseconds for FastLIO compatibility.
+        // LIO-SAM deskew expects point.time in seconds, so convert only inside this wrapper.
+        point.time = static_cast<float>(source.time * 1e-3);
+        max_point_time = std::max(max_point_time, static_cast<float>(point.time));
+        frontend_cloud->push_back(point);
     }
 
-    const size_t valid_point_count = use_fused_deskew_feature_extractor_
-                                         ? frontend_cloud->size()
-                                         : native_cloud->size();
-    if (valid_point_count <= 1) {
-        ++stat_native_too_few_;
-        LOG(WARNING) << "LIO-SAM input point cloud has too few points, drop scan";
-        log_native_stats();
-        return;
-    }
-
-    if (use_fused_deskew_feature_extractor_) {
-        frontend_cloud->height = 1;
-        frontend_cloud->width = frontend_cloud->size();
-        frontend_cloud->is_dense = true;
-    } else {
-        native_cloud->height = 1;
-        native_cloud->width = native_cloud->size();
-        native_cloud->is_dense = true;
-    }
+    frontend_cloud->height = 1;
+    frontend_cloud->width = frontend_cloud->size();
+    frontend_cloud->is_dense = true;
 
     const double scan_duration = static_cast<double>(max_point_time);
-    if (!std::isfinite(scan_duration) || scan_duration <= 0.0 || scan_duration > 0.5) {
-        ++stat_invalid_duration_;
-        LOG(ERROR) << "invalid LIO-SAM scan duration: " << scan_duration;
-        log_native_stats();
-        return;
-    }
-    ++stat_native_valid_;
 
     std::lock_guard<std::mutex> lock(mtx_buffer_);
     if (timestamp < last_timestamp_lidar_) {
         LOG(ERROR) << "lio-sam lidar loop back, clear buffer";
         lidar_buffer_.clear();
-        native_lidar_buffer_.clear();
         time_buffer_.clear();
         scan_duration_buffer_.clear();
         frame_id_buffer_.clear();
@@ -466,83 +340,39 @@ void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
     // run_loc_offline 离线定位不能丢，否则离线评估/回放不完整。
     // run_slam_offline 建图也不能丢。
     if (options_.online_mode_ && !options_.is_in_slam_mode_) {
-        const size_t buffered_clouds = use_fused_deskew_feature_extractor_
-                                           ? lidar_buffer_.size()
-                                           : native_lidar_buffer_.size();
-        if (buffered_clouds > 0) {
-            stat_lidar_dropped_by_sync_ += buffered_clouds;
-            LOG_EVERY_N(WARNING, 20)
-                << "[LIO_SAM_ONLINE_DROP] drop stale lidar in internal buffer, size="
-                << buffered_clouds
-                << ", new_t=" << std::setprecision(14) << timestamp
-                << ", latest_imu=" << last_timestamp_imu_;
-        }
-
         lidar_buffer_.clear();
-        native_lidar_buffer_.clear();
         time_buffer_.clear();
         scan_duration_buffer_.clear();
         frame_id_buffer_.clear();
         lidar_pushed_ = false;
     }
 
-    scan_count_++;
     last_timestamp_lidar_ = timestamp;
-    if (use_fused_deskew_feature_extractor_)
-        lidar_buffer_.push_back(frontend_cloud);
-    else
-        native_lidar_buffer_.push_back(native_cloud);
+    lidar_buffer_.push_back(frontend_cloud);
     time_buffer_.push_back(timestamp);
     scan_duration_buffer_.push_back(scan_duration);
     frame_id_buffer_.push_back(cloud->header.frame_id);
-    log_native_stats();
-
-    //LOG(INFO) << "lio-sam enqueue cloud at " << std::setprecision(14) << timestamp << ", latest imu: " << last_timestamp_imu_;
 }
 
 bool LioSamMapping::SyncPackages() {
     std::lock_guard<std::mutex> lock(mtx_buffer_);
-    ++stat_sync_calls_;
-    auto log_sync_stats = [this]() {
-        if (stat_sync_calls_ % 50 != 0) {
-            return;
-        }
-        LOG(INFO) << "[LIO_SYNC_STAT] success=" << stat_sync_success_
-                  << ", no_cloud=" << stat_sync_no_cloud_
-                  << ", no_imu=" << stat_sync_no_imu_
-                  << ", imu_not_cover_begin=" << stat_imu_not_cover_begin_
-                  << ", imu_not_cover_end=" << stat_imu_not_cover_end_
-                  << ", lidar_dropped=" << stat_lidar_dropped_by_sync_;
-    };
 
-    const bool lidar_buffer_empty = use_fused_deskew_feature_extractor_
-                                        ? lidar_buffer_.empty()
-                                        : native_lidar_buffer_.empty();
-    if (lidar_buffer_empty) {
-        ++stat_sync_no_cloud_;
-        log_sync_stats();
+    if (lidar_buffer_.empty()) {
         return false;
     }
     if (imu_buffer_.empty()) {
-        ++stat_sync_no_imu_;
-        log_sync_stats();
         return false;
     }
 
     /*** push a lidar scan ***/
     if (!lidar_pushed_) {
         measures_ = SyncedPackage();
-        if (use_fused_deskew_feature_extractor_)
-            measures_.cloud = lidar_buffer_.front();
-        else
-            measures_.native_cloud = native_lidar_buffer_.front();
+        measures_.cloud = lidar_buffer_.front();
         measures_.lidar_begin_time = time_buffer_.front();
         measures_.frame_id = frame_id_buffer_.front();
 
         const double scan_duration = scan_duration_buffer_.front();
 
-        scan_num_for_mean_++;
-        lidar_mean_scantime_ += (scan_duration - lidar_mean_scantime_) / scan_num_for_mean_;
         lidar_begin_time_ = measures_.lidar_begin_time;
         lidar_end_time_ = measures_.lidar_begin_time + scan_duration;
 
@@ -552,8 +382,6 @@ bool LioSamMapping::SyncPackages() {
     }
 
     if (last_timestamp_imu_ < lidar_end_time_) {
-        ++stat_imu_not_cover_end_;
-        log_sync_stats();
         return false;
     }
 
@@ -563,20 +391,14 @@ bool LioSamMapping::SyncPackages() {
     }
 
     if (ToSec(imu_buffer_.front().header.stamp) > lidar_begin_time_) {
-        ++stat_imu_not_cover_begin_;
-        ++stat_lidar_dropped_by_sync_;
         LOG(WARNING) << "LIO-SAM IMU does not cover scan begin, drop lidar scan. scan="
                      << std::setprecision(14) << lidar_begin_time_
                      << ", first imu=" << ToSec(imu_buffer_.front().header.stamp);
-        if (use_fused_deskew_feature_extractor_)
-            lidar_buffer_.pop_front();
-        else
-            native_lidar_buffer_.pop_front();
+        lidar_buffer_.pop_front();
         time_buffer_.pop_front();
         scan_duration_buffer_.pop_front();
         frame_id_buffer_.pop_front();
         lidar_pushed_ = false;
-        log_sync_stats();
         return false;
     }
 
@@ -595,8 +417,6 @@ bool LioSamMapping::SyncPackages() {
     }
 
     if (measures_.imus.empty() || !imu_covers_scan_end) {
-        ++stat_imu_not_cover_end_;
-        log_sync_stats();
         return false;
     }
 
@@ -604,141 +424,41 @@ bool LioSamMapping::SyncPackages() {
         imu_buffer_.pop_front();
     }
 
-    if (use_fused_deskew_feature_extractor_)
-        lidar_buffer_.pop_front();
-    else
-        native_lidar_buffer_.pop_front();
+    lidar_buffer_.pop_front();
     time_buffer_.pop_front();
     scan_duration_buffer_.pop_front();
     frame_id_buffer_.pop_front();
     lidar_pushed_ = false;
-    ++stat_sync_success_;
-    log_sync_stats();
-    /*0617 测试频率 故此注释掉
-    LOG(INFO) << "LIO-SAM sync: begin=" << std::setprecision(14) << measures_.lidar_begin_time
-              << ", end=" << measures_.lidar_end_time
-              << ", duration=" << (measures_.lidar_end_time - measures_.lidar_begin_time)
-              << " s, imu=" << measures_.imus.size();
-    */
     return true;
 }
 
-void LioSamMapping::WriteAbCsv(double stamp,
-                               size_t corner_points,
-                               size_t surface_points) {
-    if (!ab_csv_enable_) {
-        return;
-    }
-
-    if (!ab_csv_file_.is_open()) {
-        ab_csv_file_.open(ab_csv_path_, std::ios::out);
-        if (!ab_csv_file_.is_open()) {
-            LOG(ERROR) << "[AB_CSV] failed to open: " << ab_csv_path_;
-            return;
-        }
-    }
-
-    if (!ab_csv_header_written_) {
-        ab_csv_file_ << "mode,stamp,corner,surface,x,y,z,roll,pitch,yaw\n";
-        ab_csv_header_written_ = true;
-    }
-
-    const float* transform = map_optimization_->TransformTobeMapped();
-    ab_csv_file_ << (use_fused_deskew_feature_extractor_ ? "new" : "old") << ","
-                 << std::fixed << std::setprecision(9) << stamp << ","
-                 << corner_points << ","
-                 << surface_points << ","
-                 << state_.pos_.x() << ","
-                 << state_.pos_.y() << ","
-                 << state_.pos_.z() << ","
-                 << transform[0] << ","
-                 << transform[1] << ","
-                 << transform[2] << "\n";
-    ab_csv_file_.flush();
-}
-
 bool LioSamMapping::Run(bool need_output_cloud) {
-    if (!map_optimization_ || !frontend_cloud_info_ ||
-        (use_fused_deskew_feature_extractor_ && !deskew_feature_extractor_) ||
-        (!use_fused_deskew_feature_extractor_ && (!image_projection_ || !feature_extraction_))) {
+    if (!map_optimization_ || !frontend_cloud_info_ || !deskew_feature_extractor_) {
         return false;
     }
 
-    const auto t0 = std::chrono::steady_clock::now();
     if (!SyncPackages()) {
         return false;
     }
-    const auto t_sync = std::chrono::steady_clock::now();
 
     LioSamCloudInfo& cloud_info = *frontend_cloud_info_;
-    auto t_proj = t_sync;
-    auto t_feat = t_sync;
-    if (use_fused_deskew_feature_extractor_) {
-        if (!deskew_feature_extractor_->Run(
-                measures_.cloud,
-                measures_.imus,
-                measures_.lidar_begin_time,
-                measures_.lidar_end_time,
-                measures_.frame_id,
-                need_output_cloud,
-                cloud_info)) {
-            return false;
-        }
-        t_proj = std::chrono::steady_clock::now();
-        t_feat = t_proj;
-    } else {
-        if (!image_projection_->RunNativeCloud(measures_.native_cloud, measures_.imus,
-                                               measures_.lidar_begin_time, measures_.lidar_end_time,
-                                               measures_.frame_id,
-                                               cloud_info)) {
-            return false;
-        }
-        t_proj = std::chrono::steady_clock::now();
-
-        if (!feature_extraction_->Run(cloud_info)) {
-            return false;
-        }
-        t_feat = std::chrono::steady_clock::now();
+    if (!deskew_feature_extractor_->Run(
+            measures_.cloud,
+            measures_.imus,
+            measures_.lidar_begin_time,
+            measures_.lidar_end_time,
+            measures_.frame_id,
+            need_output_cloud,
+            cloud_info)) {
+        return false;
     }
-    /////////////////////////////////////////////////测试前端打印//////////////////////////////////
-    const auto frontend_ms =
-        std::chrono::duration<double, std::milli>(t_feat - t_sync).count();
-
-    const size_t input_points =
-        measures_.cloud ? measures_.cloud->size()
-                        : (measures_.native_cloud ? measures_.native_cloud->size() : 0);
-
-    const size_t extracted_points = cloud_info.point_range.size();
-
-    const size_t corner_points =
-        cloud_info.cloud_corner ? cloud_info.cloud_corner->size() : 0;
-
-    const size_t surface_points =
-        cloud_info.cloud_surface ? cloud_info.cloud_surface->size() : 0;
-
-    static int frontend_stat_count = 0;
-    if (++frontend_stat_count % 20 == 0) {
-        LOG(INFO) << "[FRONTEND_STAT] "
-                << "mode=" << (use_fused_deskew_feature_extractor_ ? "new" : "old")
-                << ", stamp=" << std::setprecision(14) << cloud_info.timestamp
-                << ", input=" << input_points
-                << ", extracted=" << extracted_points
-                << ", corner=" << corner_points
-                << ", surface=" << surface_points
-                << ", imu_available=" << cloud_info.imu_available
-                << ", frontend_ms=" << frontend_ms;
-    }
-    ////////////////////////////////////////////////////////////////////////////////////////
     if (!map_optimization_->Run(cloud_info)) {
         return false;
     }
-    const auto t_map = std::chrono::steady_clock::now();
 
     if (options_.is_in_slam_mode_) {
         if (map_optimization_->CreatedNewKeyframe()) {
-            auto raw_cloud = use_fused_deskew_feature_extractor_
-                                 ? deskew_feature_extractor_->BuildRawDeskewedCloudForLastFrame()
-                                 : image_projection_->BuildRawDeskewedCloudForLastFrame();
+            auto raw_cloud = deskew_feature_extractor_->BuildRawDeskewedCloudForLastFrame();
             if (raw_cloud && !raw_cloud->empty()) {
                 map_optimization_->SetLatestRawCloudKeyFrame(std::move(raw_cloud));
             }
@@ -755,7 +475,6 @@ bool LioSamMapping::Run(bool need_output_cloud) {
     state_.rot_ = RpyToSO3(transform[0], transform[1], transform[2]);
     state_.pose_is_ok_ = map_optimization_->mappingPoseReliable;
     state_.lidar_odom_reliable_ = map_optimization_->mappingPoseReliable;
-    WriteAbCsv(cloud_info.timestamp, corner_points, surface_points);
     //0603 imu外推,高频发布
     if (state_.pose_is_ok_) {
         std::lock_guard<std::mutex> lock(mtx_buffer_);
@@ -817,10 +536,6 @@ bool LioSamMapping::Run(bool need_output_cloud) {
                 continue;
             }
             if (dt > 0.1) {
-                /* 0617 测试频率 故此注释掉
-                LOG(WARNING) << "[LIO_SAM_DR] replay abnormal imu dt=" << dt
-                            << ", stop replay at t=" << std::setprecision(14) << t;
-                */
                 break;
             }
 
@@ -831,18 +546,6 @@ bool LioSamMapping::Run(bool need_output_cloud) {
         kf_imu_.SetTime(t);
         last_dr_imu_time_ = t;
 
-        static int dr_anchor_count = 0;
-        if (++dr_anchor_count % 20 == 0) {
-            /* 0617 测试频率 故此注释掉
-            const auto& dr = kf_imu_.GetX();
-            LOG(INFO) << "[LIO_SAM_DR_ANCHOR] lidar_t=" << std::setprecision(14) << state_.timestamp_
-                    << ", dr_t=" << dr.timestamp_
-                    << ", pos=" << dr.pos_.transpose()
-                    << ", vel=" << dr.vel_.transpose()
-                    << ", grav=" << dr.grav_.transpose()
-                    << ", bg=" << dr.bg_.transpose();
-            */
-        }
     }
 
     if (need_output_cloud) {
@@ -869,44 +572,13 @@ bool LioSamMapping::Run(bool need_output_cloud) {
     if (options_.is_in_slam_mode_) {
         MakeLightningKeyframeIfNeeded();
     }
-
-    const auto t_end = std::chrono::steady_clock::now();
-    static int timing_count = 0;
-    if (++timing_count % 20 == 0) {
-        auto ms = [](const auto& a, const auto& b) {
-            return std::chrono::duration<double, std::milli>(b - a).count();
-        };
-
-        LOG(INFO) << "[LIO_SAM_TIMING] "
-                  << "frontend="
-                  << (use_fused_deskew_feature_extractor_ ? "fused" : "legacy") << ", "
-                  << "sync=" << ms(t0, t_sync) << " ms, "
-                  << "projection=" << ms(t_sync, t_proj) << " ms, "
-                  << "feature=" << ms(t_proj, t_feat) << " ms, "
-                  << "mapopt=" << ms(t_feat, t_map) << " ms, "
-                  << "tail=" << ms(t_map, t_end) << " ms, "
-                  << "total=" << ms(t0, t_end) << " ms";
-    }
-    //SyncLightningKeyframePoses();
-    /* 0617 测试频率 故此注释掉
-    LOG(INFO) << "[LIO_SAM_OUTPUT] scan_header="
-          << std::setprecision(14)
-          <<  math::ToSec(scan_undistort_->header.stamp)
-          << ", duration=" << lo::lidar_time_interval
-          << ", loc_time="<< measures_.lidar_end_time
-          << ", state_time=" << state_.timestamp_
-          << ", begin=" << measures_.lidar_begin_time
-          << ", end=" << measures_.lidar_end_time
-          << ", scan_size=" << scan_undistort_->size()
-          << ", reliable=" << state_.lidar_odom_reliable_;    
-    */
     return true;
 }
 
 bool LioSamMapping::MakeLightningKeyframeIfNeeded() {
     if (!map_optimization_ || !map_optimization_->CreatedNewKeyframe() ||
         map_optimization_->KeyPoseSize() == 0 ||
-        map_optimization_->KeyPoseSize() <= native_keyframe_count_) {
+        map_optimization_->KeyPoseSize() <= map_keyframe_count_) {
         return false;
     }
     PointCloudType::Ptr raw_cloud = map_optimization_->LatestRawCloudKeyFrame();
@@ -928,12 +600,8 @@ bool LioSamMapping::MakeLightningKeyframeIfNeeded() {
 
     all_keyframes_.push_back(kf);
     last_kf_ = kf;
-    native_keyframe_count_ = map_optimization_->KeyPoseSize();
+    map_keyframe_count_ = map_optimization_->KeyPoseSize();
     map_optimization_->ClearCreatedNewKeyframe();
-    /*0617 测试频率 故此注释掉
-    LOG(INFO) << "LIO-SAM: create lightning keyframe " << kf->GetID() << ", pose: "
-              << state_.pos_.transpose() << ", time: " << std::setprecision(14) << state_.timestamp_;
-    */
     return true;
 }
 

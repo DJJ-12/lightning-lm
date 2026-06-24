@@ -301,7 +301,7 @@ public:
             };
             const double total_ms = ms(t0, t_state);
             map_timing_total_ms += total_ms;
-            if (++map_timing_count % 20 == 0)
+            if (debugTiming && ++map_timing_count % 20 == 0)
             {
                 RCLCPP_INFO(get_logger(),
                     "[MAP_OPT_TIMING] reset=%.3f ms, guess=%.3f ms, extract=%.3f ms, "
@@ -1188,7 +1188,7 @@ public:
             std::chrono::duration<double, std::milli>(t_kdtree - t_voxel).count();
 
         static int local_map_timing_count = 0;
-        if (++local_map_timing_count % 20 == 0)
+        if (debugTiming && ++local_map_timing_count % 20 == 0)
         {
             auto ms = [](const auto& a, const auto& b) {
                 return std::chrono::duration<double, std::milli>(b - a).count();
@@ -1604,6 +1604,8 @@ public:
         double icp_ms = 0.0;
         int iter_count = 0;
         auto maybeLogScan2MapTiming = [&](const char* result) {
+            if (!debugTiming)
+                return;
             static int scan2map_timing_count = 0;
             if (++scan2map_timing_count % 20 != 0)
                 return;
@@ -1912,12 +1914,6 @@ public:
         if (cloudKeyPoses3D->points.empty())
             return true;
 
-        if (sensor == SensorType::LIVOX)
-        {
-            if (timeLaserInfoCur - cloudKeyPoses6D->back().time > 1.0)
-                return true;
-        }
-
         Eigen::Affine3f transStart = pclPointToAffine3f(cloudKeyPoses6D->back());
         Eigen::Affine3f transFinal = pcl::getTransformation(transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5], 
                                                             transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]);
@@ -1982,6 +1978,8 @@ public:
         auto t_copy = t0;
         bool saved_keyframe = false;
         auto maybeLogIsamTiming = [&](const char* result) {
+            if (!debugTiming)
+                return;
             static int isam_timing_count = 0;
             if (++isam_timing_count % 20 != 0)
                 return;

@@ -15,8 +15,7 @@ LIO-SAM Offline Mapping Core for lightning-lm
 也就是说，它保留 LIO-SAM 的核心建图算法：
 
 ```text
-ImageProjection
-FeatureExtraction
+DeskewFeatureExtractor
 mapOptimization
 GTSAM / iSAM2
 LIO-SAM 内部 loop closure
@@ -35,7 +34,7 @@ LIO-SAM 内部 loop closure
 2. 保持原有 LaserMapping / FAST-LIO 分支不受影响。
 3. LIO-SAM 分支只用于 offline mapping，不用于在线实时定位。
 4. 不使用原版 LIO-SAM 的 IMUPreintegration 和 TransformFusion。
-5. 不通过 ROS topic 在 ImageProjection、FeatureExtraction、mapOptimization 之间传递数据。
+5. 不通过 ROS topic 在前端和 mapOptimization 之间传递数据。
 6. 改为函数调用式数据流。
 7. 使用 lightning-lm 的 rosbag 离线读取和保存地图框架。
 8. 使用 LIO-SAM 自己的 mapOptimization / GTSAM / loop closure 作为该分支后端。
@@ -58,18 +57,16 @@ frontend = faster_lio / fastlio / 默认
 
 frontend = lio_sam / liosam
     -> LioSamMapping
-        -> ImageProjection
-        -> FeatureExtraction
+        -> DeskewFeatureExtractor
         -> mapOptimization
     -> LIO-SAM 内部 GTSAM / loop closure
     -> lightning-lm UI / SaveMap / G2P5
 ```
 
-`LioSamMapping` 是一个和 `LaserMapping` 平行的类。它内部持有三个 LIO-SAM 核心模块：
+`LioSamMapping` 是一个和 `LaserMapping` 平行的类。它内部持有两个 LIO-SAM 核心模块：
 
 ```cpp
-std::unique_ptr<::ImageProjection> image_projection_;
-std::unique_ptr<::FeatureExtraction> feature_extraction_;
+std::unique_ptr<::DeskewFeatureExtractor> deskew_feature_extractor_;
 std::unique_ptr<::mapOptimization> map_optimization_;
 ```
 
@@ -113,10 +110,7 @@ rosbag
       SyncPackages()
           |
           v
-      ImageProjection::Run()
-          |
-          v
-      FeatureExtraction::Run()
+      DeskewFeatureExtractor::Run()
           |
           v
       mapOptimization::Run()
@@ -155,7 +149,7 @@ LIO-SAM 相关参数建议放在：
 
 ```yaml
 lio_sam:
-  sensor: velodyne
+  debugTiming: false
   N_SCAN: 16
   Horizon_SCAN: 1800
   downsampleRate: 1
@@ -223,11 +217,11 @@ ros2 run lightning run_slam_offline \
 原版 LIO-SAM 是 ROS topic 节点式结构：
 
 ```text
-ImageProjection
+Projection node
   subscribe: point cloud / IMU / incremental odom
   publish: deskewed cloud + CloudInfo
 
-FeatureExtraction
+Feature node
   subscribe: deskewed CloudInfo
   publish: feature CloudInfo
 
@@ -236,9 +230,9 @@ mapOptimization
   publish: mapping odometry / path / local map / global map
 ```
 
-原版 `ImageProjection` 订阅 LiDAR、IMU 和 `odomTopic + "_incremental"`，内部维护 `cloudQueue`、`imuQueue`、`odomQueue`，并在 `cloudHandler()` 中执行点云缓存、去畸变、投影和 CloudInfo 发布。
+原版投影节点订阅 LiDAR、IMU 和 `odomTopic + "_incremental"`，内部维护 `cloudQueue`、`imuQueue`、`odomQueue`，并在 `cloudHandler()` 中执行点云缓存、去畸变、投影和 CloudInfo 发布。
 
-原版 `FeatureExtraction` 订阅 `lio_sam/deskew/cloud_info`，执行曲率计算、遮挡点标记和角点/面点提取，然后发布 feature cloud info。
+原版特征节点订阅 `lio_sam/deskew/cloud_info`，执行曲率计算、遮挡点标记和角点/面点提取，然后发布 feature cloud info。
 
 原版 `mapOptimization` 订阅 feature cloud info、GPS 和外部 loop info，并负责 scan-to-map 优化、GTSAM/iSAM2、GPSFactor、loop factor、位姿发布、TF 发布、路径发布和 save map service。
 
@@ -250,14 +244,11 @@ mapOptimization
 
 ```text
 LioSamMapping::Run()
-  -> ImageProjection::Run()
-  -> FeatureExtraction::Run()
+  -> DeskewFeatureExtractor::Run()
   -> mapOptimization::Run()
 ```
 
-当前 `ImageProjection` 不再创建 ROS subscriber/publisher，而是通过函数参数接收当前点云、同步好的 IMU 序列、LiDAR scan begin time 和 scan end time。
-
-当前 `FeatureExtraction` 不再订阅和发布 `lio_sam::msg::CloudInfo`，而是直接读写 `LioSamCloudInfo`。
+当前 `DeskewFeatureExtractor` 通过函数参数接收统一点云、同步好的 IMU 序列、LiDAR scan begin/end time，并直接输出 `LioSamCloudInfo`。
 
 当前 `mapOptimization` 不再作为 ROS topic callback 节点运行，而是由 `LioSamMapping` 逐帧调用 `Run()`。它保留了 GTSAM / iSAM2、scan-to-map、loop closure、keyframe 和 `correctPoses()` 等核心功能。
 
@@ -296,12 +287,12 @@ LioSamMapping::Run()
 当前分支删除或替换了以下原版 LIO-SAM 功能：
 
 ```text
-1. 删除 ImageProjection / FeatureExtraction / mapOptimization 之间的 ROS topic 通信。
+1. 删除前端与 mapOptimization 之间的 ROS topic 通信。
 2. 删除 lio_sam::msg::CloudInfo 作为模块间通信载体，改用 LioSamCloudInfo。
 3. 删除 IMUPreintegration 节点。
 4. 删除 TransformFusion 节点。
 5. 删除 odomTopic + "_incremental" 依赖。
-6. 删除 ImageProjection 中的 odomDeskewInfo。
+6. 删除原投影节点中的 odomDeskewInfo。
 7. 删除 mapOptimization 中的 ROS odometry / path / TF publisher。
 8. 删除 LIO-SAM save_map service，改用 lightning-lm SaveMap。
 9. 删除 GPSFactor / addGPSFactor。
@@ -350,78 +341,23 @@ ROS header.stamp: 秒
 
 ---
 
-## 10. ImageProjection offline 说明
+## 10. DeskewFeatureExtractor 说明
 
-当前 `ImageProjection::Run()` 接收：
-
-```cpp
-const sensor_msgs::msg::PointCloud2& cloud_msg
-const std::vector<sensor_msgs::msg::Imu>& imus
-double lidar_begin_time
-double lidar_end_time
-LioSamCloudInfo& cloudInfoOut
-```
+`DeskewFeatureExtractor::Run()` 直接接收统一后的 `PointCloudType`、同步 IMU、scan begin/end time 和 frame id。每个点包含 `x/y/z/intensity/ring/time`，其中进入前端时 `time` 已在 wrapper 边界转换为相对 scan 起点的秒。
 
 处理流程为：
 
 ```text
-1. 清空内部 imuQueue。
-2. 对传入的 IMU 做 imuConverter。
-3. cachePointCloud。
-4. deskewInfo。
-5. projectPointCloud。
-6. cloudExtraction。
-7. packCloudInfo。
-8. resetParameters。
+imuDeskewInfo
+projectPointCloud
+cloudExtraction
+calculateSmoothness
+markOccludedPoints
+extractFeatures
+packCloudInfo_packFeatureCloud
 ```
 
-和原版相比：
-
-```text
-保留：
-    点云类型转换
-    IMU orientation 获取 scan start 姿态
-    IMU angular_velocity 积分
-    deskewPoint
-    range image projection
-    cloudExtraction
-
-删除：
-    cloudQueue
-    imuHandler callback
-    odometryHandler callback
-    odomQueue
-    odomDeskewInfo
-    publishClouds
-```
-
-当前去畸变只使用 IMU 旋转，不使用 IMUPreintegration 输出的 incremental odom。
-
----
-
-## 11. FeatureExtraction offline 说明
-
-当前 `FeatureExtraction::Run()` 接收并修改 `LioSamCloudInfo`：
-
-```text
-输入：
-    cloud_deskewed
-    point_range
-    point_col_ind
-    start_ring_index
-    end_ring_index
-
-处理：
-    calculateSmoothness
-    markOccludedPoints
-    extractFeatures
-
-输出：
-    cloud_corner
-    cloud_surface
-```
-
-它和原版 `FeatureExtraction` 的算法基本等价，只是原版通过 ROS topic 订阅和发布 `lio_sam::msg::CloudInfo`，当前版本改为直接函数调用。
+输出的 `LioSamCloudInfo` 包含 `cloud_deskewed`、`cloud_corner`、`cloud_surface` 及 range image 索引信息，随后直接传给 `mapOptimization::Run()`。当前去畸变只使用 IMU 旋转，不使用 IMUPreintegration 输出的 incremental odom。
 
 ---
 
@@ -730,11 +666,11 @@ UI 当前 scan 显示的是当前处理帧，不一定是 keyframe。
 | ------------------------ | ------------------------------------- | --------------------------------------- |
 | 数据入口                     | ROS topic callback                    | lightning-lm rosbag offline input       |
 | 模块通信                     | ROS topic + `lio_sam::msg::CloudInfo` | 函数调用 + `LioSamCloudInfo`                |
-| ImageProjection          | 订阅 LiDAR / IMU / odom                 | 接收同步后的 cloud + IMU                      |
+| 点云投影与去畸变                | 独立 ROS 节点                            | `DeskewFeatureExtractor` 函数调用             |
 | 点云去畸变                    | IMU rotation + odom deskew            | IMU rotation deskew                     |
 | IMUPreintegration        | 使用                                    | 不使用                                     |
 | TransformFusion          | 使用                                    | 不使用                                     |
-| FeatureExtraction        | topic callback                        | 函数调用                                    |
+| 特征提取                     | 独立 ROS 节点                            | `DeskewFeatureExtractor` 内部直接执行          |
 | mapOptimization          | topic callback                        | 函数调用                                    |
 | GTSAM/iSAM2              | 保留                                    | 保留                                      |
 | GPSFactor                | 有                                     | 当前无                                     |
@@ -827,8 +763,7 @@ RTK 应作为 keyframe-level position factor，而不是作为前端强先验。
 建议长期整理为：
 
 ```text
-image_projection_offline.h / .cc
-feature_extraction_offline.h / .cc
+deskew_feature_extractor.h / .cc
 map_optimization_offline.h / .cc
 ```
 

@@ -30,50 +30,58 @@ int main(int argc, char** argv) {
 
     using namespace lightning;
 
-    {
-        RosbagIO rosbag(FLAGS_input_bag);
+    RosbagIO rosbag(FLAGS_input_bag);
 
-        SlamSystem::Options options;
-        options.online_mode_ = false;
+    SlamSystem::Options options;
+    options.online_mode_ = false;
 
-        SlamSystem slam(options);
+    SlamSystem slam(options);
 
-        /// 实时模式好像掉帧掉的比较厉害？
+    /// 实时模式好像掉帧掉的比较厉害？
 
-        if (!slam.Init(FLAGS_config)) {
-            LOG(ERROR) << "failed to init slam";
-            return -1;
-        }
+    if (!slam.Init(FLAGS_config)) {
+        LOG(ERROR) << "failed to init slam";
+        return -1;
+    }
 
-        slam.StartSLAM("new_map");
+    slam.StartSLAM("new_map");
 
-        lightning::YAML_IO yaml(FLAGS_config);
-        std::string lidar_topic = yaml.GetValue<std::string>("common", "lidar_topic");
-        std::string imu_topic = yaml.GetValue<std::string>("common", "imu_topic");
+    lightning::YAML_IO yaml(FLAGS_config);
+    std::string lidar_topic = yaml.GetValue<std::string>("common", "lidar_topic");
+    std::string imu_topic = yaml.GetValue<std::string>("common", "imu_topic");
         std::string livox_lidar_topic = yaml.GetValue<std::string>("common", "livox_lidar_topic");
 
-        std::string save_map_path = yaml.GetValue<std::string>("system", "map_path");
+    std::string save_map_path = yaml.GetValue<std::string>("system", "map_path");
 
-        rosbag
-            .AddImuHandle(imu_topic,
-                          [&slam](sensor_msgs::msg::Imu::SharedPtr imu) {
-                              slam.ProcessIMU(imu);
-                              return true;
-                          })
-            .AddPointCloud2Handle(lidar_topic,
-                                  [&slam](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
-                                      slam.ProcessLidar(msg);
-                                      return true;
-                                  })
-            .AddLivoxCloudHandle(livox_lidar_topic,
-                                 [&slam](livox_ros_driver2::msg::CustomMsg::SharedPtr cloud) {
-                                     slam.ProcessLidar(cloud);
-                                     return true;
-                                 })
-            .Go();
+    rosbag
+        /// IMU 的处理
+        /*
+        .AddImuHandle(imu_topic,
+                      [&slam](IMUPtr imu) {
+                          slam.ProcessIMU(imu);
+                          return true;
+                      })
+        */
+        .AddImuHandle(imu_topic,
+                      [&slam](sensor_msgs::msg::Imu::SharedPtr imu) {
+                          slam.ProcessIMU(imu);
+                          return true;
+                      })
+        /// lidar 的处理
+        .AddPointCloud2Handle(lidar_topic,
+                              [&slam](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+                                  slam.ProcessLidar(msg);
+                                  return true;
+                              })
+        /// livox 的处理
+        .AddLivoxCloudHandle(livox_lidar_topic,
+                             [&slam](livox_ros_driver2::msg::CustomMsg::SharedPtr cloud) {
+                                 slam.ProcessLidar(cloud);
+                                 return true;
+                             })
+        .Go();
 
-        slam.SaveMap(save_map_path);
-    }
+    slam.SaveMap(save_map_path);
     Timer::PrintAll();
 
     LOG(INFO) << "done";

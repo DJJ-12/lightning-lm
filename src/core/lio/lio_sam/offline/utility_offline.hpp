@@ -156,8 +156,6 @@ struct LioSamCloudInfo
     PointCloudType::Ptr cloud_surface{new PointCloudType()};
 };
 
-enum class SensorType { VELODYNE, OUSTER, LIVOX };
-
 class ParamServer : public rclcpp::Node
 {
 public:
@@ -175,7 +173,6 @@ public:
     bool useImuHeadingInitialization;
 
     // Lidar Sensor Configuration
-    SensorType sensor = SensorType::OUSTER;
     int N_SCAN;
     int Horizon_SCAN;
     int downsampleRate;
@@ -222,6 +219,7 @@ public:
     bool onlineLimitOptimizationPoints = true;
     int onlineMaxSurfOptimizationPoints = 4000;
     int onlineMaxCornerOptimizationPoints = 900;
+    bool debugTiming = false;
 
 
     // Surrounding map
@@ -273,29 +271,6 @@ public:
 
         declare_parameter("useImuHeadingInitialization", false);
         get_parameter("useImuHeadingInitialization", useImuHeadingInitialization);
-
-        std::string sensorStr;
-        declare_parameter("sensor", "ouster");
-        get_parameter("sensor", sensorStr);
-        if (sensorStr == "velodyne")
-        {
-            sensor = SensorType::VELODYNE;
-        }
-        else if (sensorStr == "ouster")
-        {
-            sensor = SensorType::OUSTER;
-        }
-        else if (sensorStr == "livox")
-        {
-            sensor = SensorType::LIVOX;
-        }
-        else
-        {
-            RCLCPP_ERROR_STREAM(
-                get_logger(),
-                "Invalid sensor type (must be either 'velodyne' or 'ouster' or 'livox'): " << sensorStr);
-            rclcpp::shutdown();
-        }
 
         declare_parameter("N_SCAN", 64);
         get_parameter("N_SCAN", N_SCAN);
@@ -380,6 +355,8 @@ public:
         get_parameter("onlineMaxSurfOptimizationPoints", onlineMaxSurfOptimizationPoints);
         declare_parameter("onlineMaxCornerOptimizationPoints", 900);
         get_parameter("onlineMaxCornerOptimizationPoints", onlineMaxCornerOptimizationPoints);
+        declare_parameter("debugTiming", false);
+        get_parameter("debugTiming", debugTiming);
 
         declare_parameter("surroundingkeyframeAddingDistThreshold", 1.0);
         get_parameter("surroundingkeyframeAddingDistThreshold", surroundingkeyframeAddingDistThreshold);

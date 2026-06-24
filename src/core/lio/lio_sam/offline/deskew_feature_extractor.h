@@ -1,7 +1,6 @@
 #pragma once
 
 #include <algorithm>
-#include <chrono>
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
@@ -56,12 +55,7 @@ public:
              bool keepDeskewedCloud,
              LioSamCloudInfo& cloudInfoOut)
     {
-        const auto t0 = std::chrono::steady_clock::now();
         resetParameters();
-        const auto tReset = std::chrono::steady_clock::now();
-
-        if (!inputCloud || inputCloud->empty())
-            return false;
 
         laserCloudIn = inputCloud;
         timeScanCur = lidarBeginTime;
@@ -71,50 +65,18 @@ public:
         if (!imuDeskewInfo(imuWindow))
             return false;
         cacheRawKeyframeDeskewInfo();
-        const auto tImu = std::chrono::steady_clock::now();
 
         projectPointCloud();
-        const auto tProject = std::chrono::steady_clock::now();
 
         cloudExtraction();
-        const auto tExtract = std::chrono::steady_clock::now();
 
         calculateSmoothness();
-        const auto tSmooth = std::chrono::steady_clock::now();
 
         markOccludedPoints();
-        const auto tOcclusion = std::chrono::steady_clock::now();
 
         extractFeatures();
-        const auto tFeature = std::chrono::steady_clock::now();
 
-        const size_t cornerCount = cornerCloud->size();
-        const size_t surfaceCount = surfaceCloud->size();
         packCloudInfo_packFeatureCloud(keepDeskewedCloud, cloudInfoOut);
-        const auto tOutput = std::chrono::steady_clock::now();
-
-        static int timingCount = 0;
-        if (++timingCount % 20 == 0)
-        {
-            auto ms = [](const auto& begin, const auto& end) {
-                return std::chrono::duration<double, std::milli>(end - begin).count();
-            };
-            RCLCPP_INFO(get_logger(),
-                "[FRONTEND_TIMING] reset=%.3f ms, imu=%.3f ms, project=%.3f ms, "
-                "extract=%.3f ms, smooth=%.3f ms, occlusion=%.3f ms, feature=%.3f ms, "
-                "output=%.3f ms, total=%.3f ms, corner=%zu, surface=%zu",
-                ms(t0, tReset),
-                ms(tReset, tImu),
-                ms(tImu, tProject),
-                ms(tProject, tExtract),
-                ms(tExtract, tSmooth),
-                ms(tSmooth, tOcclusion),
-                ms(tOcclusion, tFeature),
-                ms(tFeature, tOutput),
-                ms(t0, tOutput),
-                cornerCount,
-                surfaceCount);
-        }
         return true;
     }
 
