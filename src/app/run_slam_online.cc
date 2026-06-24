@@ -24,23 +24,25 @@ int main(int argc, char** argv) {
     /// 需要rclcpp::init
     rclcpp::init(argc, argv);
 
-    SlamSystem::Options options;
-    options.online_mode_ = true;
+    int result = 0;
+    {
+        SlamSystem::Options options;
+        options.online_mode_ = true;
 
-    SlamSystem slam(options);
-    if (!slam.Init(FLAGS_config)) {
-        LOG(ERROR) << "failed to init slam";
-        return -1;
+        SlamSystem slam(options);
+        if (!slam.Init(FLAGS_config)) {
+            LOG(ERROR) << "failed to init slam";
+            result = -1;
+        } else {
+            slam.StartSLAM("new_map");
+            slam.Spin();
+            Timer::PrintAll();
+        }
     }
-
-    slam.StartSLAM("new_map");
-    slam.Spin();
-
-    Timer::PrintAll();
 
     rclcpp::shutdown();
 
     LOG(INFO) << "done";
 
-    return 0;
+    return result;
 }

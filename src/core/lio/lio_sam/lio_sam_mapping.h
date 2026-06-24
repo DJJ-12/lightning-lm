@@ -4,6 +4,7 @@
 #include <deque>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -26,9 +27,11 @@ class PointCloud;
 }
 
 struct VelodynePointXYZIRT;
+struct LioSamCloudInfo;
 
 class ImageProjection;
 class FeatureExtraction;
+class DeskewFeatureExtractor;
 class mapOptimization;
 
 namespace lightning {
@@ -109,6 +112,7 @@ class LioSamMapping {
 
    private:
     struct SyncedPackage {
+        CloudPtr cloud;
         NativeCloudPtr native_cloud;
         std::vector<sensor_msgs::msg::Imu> imus;
         double lidar_begin_time = 0.0;
@@ -120,6 +124,7 @@ class LioSamMapping {
     bool SyncPackages();
     bool MakeLightningKeyframeIfNeeded();
     void SyncLightningKeyframePoses();
+    void WriteAbCsv(double stamp, size_t corner_points, size_t surface_points);
 
     Options options_;
     rclcpp::NodeOptions node_options_;
@@ -127,9 +132,17 @@ class LioSamMapping {
 
     std::unique_ptr<::ImageProjection> image_projection_;
     std::unique_ptr<::FeatureExtraction> feature_extraction_;
+    std::unique_ptr<::DeskewFeatureExtractor> deskew_feature_extractor_;
     std::unique_ptr<::mapOptimization> map_optimization_;
+    std::unique_ptr<::LioSamCloudInfo> frontend_cloud_info_;
+    bool use_fused_deskew_feature_extractor_ = true;
+    bool ab_csv_enable_ = false;
+    std::string ab_csv_path_;
+    std::ofstream ab_csv_file_;
+    bool ab_csv_header_written_ = false;
 
     mutable std::mutex mtx_buffer_;
+    std::deque<CloudPtr> lidar_buffer_;
     std::deque<NativeCloudPtr> native_lidar_buffer_;
     std::deque<double> time_buffer_;
     std::deque<double> scan_duration_buffer_;

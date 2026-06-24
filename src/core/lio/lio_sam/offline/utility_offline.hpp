@@ -84,6 +84,8 @@ struct Serializer<std::unordered_map<Key, Value, Hash, Eq, Alloc>> {
 #define PCL_NO_PRECOMPILE
 #endif
 
+#include "common/point_def.h"
+
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/search/impl/search.hpp>
@@ -106,7 +108,11 @@ struct Serializer<std::unordered_map<Key, Value, Hash, Eq, Alloc>> {
 
 using namespace std;
 
-typedef pcl::PointXYZI PointType;
+using PointType = lightning::PointType;
+using PointCloudType = lightning::PointCloudType;
+using CloudPtr = lightning::CloudPtr;
+
+inline constexpr int queueLength = 2000;
 
 /*
     * A point cloud type that has 6D pose info ([x,y,z,roll,pitch,yaw] intensity is time stamp)
@@ -133,6 +139,7 @@ typedef PointXYZIRPYT PointTypePose;
 struct LioSamCloudInfo
 {
     double timestamp = 0.0;
+    std::string frame_id;
 
     bool imu_available = false;
     float imu_roll_init = 0.0f;
@@ -144,10 +151,9 @@ struct LioSamCloudInfo
     std::vector<int> point_col_ind;
     std::vector<float> point_range;
 
-    pcl::PointCloud<PointType>::Ptr cloud_deskewed{new pcl::PointCloud<PointType>()};
-    pcl::PointCloud<PointType>::Ptr cloud_raw_deskewed{new pcl::PointCloud<PointType>()};
-    pcl::PointCloud<PointType>::Ptr cloud_corner{new pcl::PointCloud<PointType>()};
-    pcl::PointCloud<PointType>::Ptr cloud_surface{new pcl::PointCloud<PointType>()};
+    PointCloudType::Ptr cloud_deskewed{new PointCloudType()};
+    PointCloudType::Ptr cloud_corner{new PointCloudType()};
+    PointCloudType::Ptr cloud_surface{new PointCloudType()};
 };
 
 enum class SensorType { VELODYNE, OUSTER, LIVOX };
@@ -211,11 +217,11 @@ public:
     double mappingProcessInterval;
     float mappingLowSpeedMaxTranslationSpeed;
     bool isInSlamMode;
-    int maxOptimizationIterations;
-    int onlineMaxOptimizationIterations;
-    bool onlineLimitOptimizationPoints;
-    int onlineMaxSurfOptimizationPoints;
-    int onlineMaxCornerOptimizationPoints;
+    int maxOptimizationIterations = 30;
+    int onlineMaxOptimizationIterations = 10;
+    bool onlineLimitOptimizationPoints = true;
+    int onlineMaxSurfOptimizationPoints = 4000;
+    int onlineMaxCornerOptimizationPoints = 900;
 
 
     // Surrounding map

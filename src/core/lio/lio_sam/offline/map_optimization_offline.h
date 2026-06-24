@@ -749,8 +749,8 @@ public:
 
         pcl::PointCloud<PointType>::Ptr sourceCloud(new pcl::PointCloud<PointType>());
         pcl::PointCloud<PointType>::Ptr targetCloud(new pcl::PointCloud<PointType>());
-        if (cloudInfoPtr->cloud_deskewed)
-            pcl::copyPointCloud(*cloudInfoPtr->cloud_deskewed, *sourceCloud);
+        if (cloudInfoPtr->cloud_deskewed && !cloudInfoPtr->cloud_deskewed->empty())
+            *sourceCloud = *cloudInfoPtr->cloud_deskewed;
 
         laserCloudRawFromMap->clear();
         laserCloudRawFromMapDS->clear();

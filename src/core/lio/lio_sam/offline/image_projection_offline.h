@@ -34,8 +34,6 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(OusterPointXYZIRT,
 // Use the Velodyne point format as a common representation
 using PointXYZIRT = VelodynePointXYZIRT;
 
-const int queueLength = 2000;
-
 class ImageProjection : public ParamServer
 {
 private:
@@ -507,6 +505,8 @@ public:
         newPoint.y = transBt(1,0) * point->x + transBt(1,1) * point->y + transBt(1,2) * point->z + transBt(1,3);
         newPoint.z = transBt(2,0) * point->x + transBt(2,1) * point->y + transBt(2,2) * point->z + transBt(2,3);
         newPoint.intensity = point->intensity;
+        newPoint.ring = point->ring;
+        newPoint.time = point->time;
 
         return newPoint;
     }
@@ -595,6 +595,8 @@ public:
         newPoint.y = transBt(1,0) * point->x + transBt(1,1) * point->y + transBt(1,2) * point->z + transBt(1,3);
         newPoint.z = transBt(2,0) * point->x + transBt(2,1) * point->y + transBt(2,2) * point->z + transBt(2,3);
         newPoint.intensity = point->intensity;
+        newPoint.ring = point->ring;
+        newPoint.time = point->time;
 
         return newPoint;
     }
@@ -621,6 +623,8 @@ public:
             thisPoint.y = src.y;
             thisPoint.z = src.z;
             thisPoint.intensity = src.intensity;
+            thisPoint.ring = src.ring;
+            thisPoint.time = src.time;
 
             float range = pointDistance(thisPoint);
             if (range < lidarMinRange || range > lidarMaxRange)
@@ -663,6 +667,8 @@ public:
             thisPoint.y = laserCloudIn->points[i].y;
             thisPoint.z = laserCloudIn->points[i].z;
             thisPoint.intensity = laserCloudIn->points[i].intensity;
+            thisPoint.ring = laserCloudIn->points[i].ring;
+            thisPoint.time = laserCloudIn->points[i].time;
 
             float range = pointDistance(thisPoint);
             if (range < lidarMinRange || range > lidarMaxRange)

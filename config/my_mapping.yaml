@@ -70,6 +70,7 @@ g2p5:
 system:
   frontend: "lio_sam" # options: fasterlio, lio_sam
   with_loop_closing: false # 是否需要回环检测
+  enableViewer: false # 离线默认不创建3D Viewer
   with_ui: true # 是否需要3D UI
   with_2dui: false # 是否需要2D UI
   with_g2p5: false # 是否需要栅格地图
@@ -144,6 +145,9 @@ ui:
 lio_sam:
   # PointCloudPreprocess outputs a Velodyne-style ring/time cloud for LIO-SAM.
   sensor: "velodyne"
+  useFusedDeskewFeatureExtractor: true
+  abCsvEnable: false
+  abCsvPath: "./data/lio_sam_ab.csv"
 
   # GPS settings
   useImuHeadingInitialization: false
@@ -193,7 +197,7 @@ lio_sam:
 
   # CPU params
   numberOfCores: 4
-  mappingProcessInterval: 0.1
+  mappingProcessInterval: 0.0
   mappingLowSpeedMaxTranslationSpeed: 0.8
   maxOptimizationIterations: 30
   onlineMaxOptimizationIterations: 10
