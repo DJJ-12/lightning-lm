@@ -43,6 +43,10 @@ add_library(${PROJECT_NAME}.libs SHARED
         core/localization/pose_graph/pgo_impl.cc
         core/localization/pose_graph/pose_extrapolator.cc
         core/localization/localization.cpp
+        core/localization/fusion/pose_chain_fusion_backend.cpp
+        core/localization/fusion/se3_low_pass_filter.cpp
+        # Deprecated velocity-EKF backend is kept in source tree for future use.
+        # core/localization/fusion/ekf_timer_fusion_backend.cpp
 
         utils/timer.cc
         utils/pointcloud_utils.cc

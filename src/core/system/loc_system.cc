@@ -6,7 +6,9 @@
 #include "core/localization/localization.h"
 #include "io/yaml_io.h"
 #include "wrapper/ros_utils.h"
+#include <chrono>
 #include <iomanip>
+#include <yaml-cpp/yaml.h>
 namespace lightning {
 
 LocSystem::LocSystem(LocSystem::Options options) : options_(options) {
@@ -33,6 +35,18 @@ bool LocSystem::Init(const std::string &yaml_path) {
     imu_topic_ = yaml.GetValue<std::string>("common", "imu_topic");
     cloud_topic_ = yaml.GetValue<std::string>("common", "lidar_topic");
     livox_topic_ = yaml.GetValue<std::string>("common", "livox_lidar_topic");
+    const YAML::Node yaml_node = YAML::LoadFile(yaml_path);
+    if (yaml_node["common"] && yaml_node["common"]["wheel_odom_topic"]) {
+        wheel_odom_topic_ = yaml_node["common"]["wheel_odom_topic"].as<std::string>();
+    }
+    if (yaml_node["fusion"] && yaml_node["fusion"]["ekf_timer_period_ms"]) {
+        ekf_timer_period_ms_ = yaml_node["fusion"]["ekf_timer_period_ms"].as<int>();
+        if (ekf_timer_period_ms_ <= 0) {
+            LOG(WARNING) << "[FUSION_EKF_TIMER_PARAM] invalid ekf_timer_period_ms="
+                         << ekf_timer_period_ms_ << ", fallback to 100ms";
+            ekf_timer_period_ms_ = 100;
+        }
+    }
 
     auto imu_qos = rclcpp::QoS(rclcpp::KeepLast(2000));
     imu_qos.best_effort();
@@ -44,25 +58,16 @@ bool LocSystem::Init(const std::string &yaml_path) {
     // 在线定位模式下，稳定发布位姿
     imu_cb_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     lidar_cb_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-    pub_timer_cb_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    ekf_timer_cb_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
     rclcpp::SubscriptionOptions imu_sub_options;
     imu_sub_options.callback_group = imu_cb_group_;
 
     rclcpp::SubscriptionOptions lidar_sub_options;
     lidar_sub_options.callback_group = lidar_cb_group_;
+    rclcpp::SubscriptionOptions wheel_sub_options;
+    wheel_sub_options.callback_group = imu_cb_group_;
 
-    using namespace std::chrono_literals;
-    /*
-    loc_pub_timer_ = node_->create_wall_timer(
-        100ms,
-        [this]() {
-            if (loc_started_ && loc_) {
-                loc_->PublishLatestResult();
-            }
-        },
-        pub_timer_cb_group_);
-    */
     imu_sub_ = node_->create_subscription<sensor_msgs::msg::Imu>(
         imu_topic_, imu_qos, [this](sensor_msgs::msg::Imu::SharedPtr msg) {
             IMUPtr imu = std::make_shared<IMU>();
@@ -96,6 +101,21 @@ bool LocSystem::Init(const std::string &yaml_path) {
             Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", false);
         },
         lidar_sub_options);
+
+    if (!wheel_odom_topic_.empty()) {
+        auto wheel_qos = rclcpp::QoS(rclcpp::KeepLast(200));
+        wheel_qos.best_effort();
+        wheel_qos.durability_volatile();
+        wheel_odom_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
+            wheel_odom_topic_, wheel_qos,
+            [this](nav_msgs::msg::Odometry::SharedPtr odom) {
+                if (loc_started_) {
+                    loc_->ProcessWheelOdomMsg(odom);
+                }
+            },
+            wheel_sub_options);
+        LOG(INFO) << "[FUSION_WHEEL_SUB] topic=" << wheel_odom_topic_;
+    }
         
     // 发布定位结果
     loc_odom_pub_ = node_->create_publisher<nav_msgs::msg::Odometry>(
@@ -133,10 +153,21 @@ bool LocSystem::Init(const std::string &yaml_path) {
             loc_odom_pub_->publish(odom_msg);
         }
     });
-    
+
     bool ret = loc_->Init(yaml_path, map_path);
     if (ret) {
         LOG(INFO) << "online loc node has been created.";
+        if (loc_->IsFusionEnabled()) {
+            LOG(INFO) << "[FUSION_EKF_TIMER_CREATE] period_ms=" << ekf_timer_period_ms_;
+            ekf_timer_ = node_->create_wall_timer(
+                std::chrono::milliseconds(ekf_timer_period_ms_),
+                [this]() {
+                    if (loc_started_ && loc_) {
+                        loc_->RunEkfTimerTickAndPublish(node_->now().seconds());
+                    }
+                },
+                ekf_timer_cb_group_);
+        }
     }
 
     return ret;

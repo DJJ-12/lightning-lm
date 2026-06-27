@@ -3,9 +3,11 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <mutex>
 
 #include "geometry_msgs/msg/transform_stamped.hpp"
+#include "nav_msgs/msg/odometry.hpp"
 #include "std_msgs/msg/int32.hpp"
 
 #include "common/imu.h"
@@ -14,6 +16,9 @@
 #include "core/lio/lio_sam/lio_sam_mapping.h"
 #include "core/lio/pointcloud_preprocess.h"
 #include "core/localization/localization_result.h"
+#include "core/localization/fusion/pose_chain_fusion_backend.h"
+// EKF timer backend is intentionally kept in source tree for future experiments,
+// but the active backend is PoseChainFusionBackend.
 #include "core/system/async_message_process.h"
 
 /// 预声明
@@ -66,6 +71,7 @@ class Localization {
 
     /// 处理IMU消息
     void ProcessIMUMsg(IMUPtr imu);
+    void ProcessWheelOdomMsg(const nav_msgs::msg::Odometry::SharedPtr odom_msg);
 
     // void ProcessOdomMsg(const nav_msgs::msg::Odometry::SharedPtr odom_msg) override;
 
@@ -83,7 +89,10 @@ class Localization {
     void LidarOdomProcCloud(CloudPtr);
     void LidarLocProcCloud(CloudPtr);
 
-    void PublishLatestResult() ;
+    void RunFusionTimerTickAndPublish(double timestamp = -1.0);
+    // Backward-compatible wrapper used by existing LocSystem timer code.
+    void RunEkfTimerTickAndPublish(double timestamp = -1.0) { RunFusionTimerTickAndPublish(timestamp); }
+    bool IsFusionEnabled() const { return pose_chain_fusion_enable_; }
     
     using TFCallback = std::function<void(const geometry_msgs::msg::TransformStamped& odom)>;
     using LocStateCallback = std::function<void(const std_msgs::msg::Int32& state)>;
@@ -125,6 +134,15 @@ class Localization {
 
     // lidar localization
     std::shared_ptr<LidarLoc> lidar_loc_;
+
+    // Active NDT-LIO pose-chain fusion backend.
+    std::unique_ptr<PoseChainFusionBackend> pose_chain_backend_;
+    bool pose_chain_fusion_enable_ = false;
+    std::uint64_t last_fusion_map_odom_seq_ = 0;
+
+    // Deprecated velocity-EKF timer backend is kept in source tree but not instantiated.
+    // std::unique_ptr<EkfTimerFusionBackend> ekf_timer_backend_;
+    // bool ekf_timer_fusion_enable_ = false;
 
     /// TODO async 处理
     sys::AsyncMessageProcess<CloudPtr> lidar_odom_proc_cloud_;  // lidar odom 处理点云

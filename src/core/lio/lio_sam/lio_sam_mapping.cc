@@ -622,6 +622,18 @@ void LioSamMapping::SyncLightningKeyframePoses() {
     }
 }
 
+bool LioSamMapping::GetLastScanToMapCovariance(Eigen::Matrix<double, 6, 6>* covariance) const {
+    if (!covariance || !map_optimization_) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(map_optimization_->mtx);
+    if (!map_optimization_->lastScanToMapCovarianceValid) {
+        return false;
+    }
+    *covariance = map_optimization_->lastScanToMapCovariance;
+    return true;
+}
+
 CloudPtr LioSamMapping::GetGlobalMap(bool use_lio_pose, bool use_voxel, float res) {
     CloudPtr global_map(new PointCloudType);
 

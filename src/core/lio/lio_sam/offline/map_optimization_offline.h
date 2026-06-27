@@ -153,6 +153,10 @@ public:
     int lastLMIterationCount = 0;
     bool lastLMRan = false;
     bool lastLMConverged = false;
+    // Scan-to-map LM covariance from the latest normal equation.
+    // Order follows transformTobeMapped update: roll, pitch, yaw, x, y, z.
+    Eigen::Matrix<double, 6, 6> lastScanToMapCovariance = Eigen::Matrix<double, 6, 6>::Identity() * 1e3;
+    bool lastScanToMapCovarianceValid = false;
 
     int laserCloudCornerFromMapDSNum = 0;
     int laserCloudSurfFromMapDSNum = 0;
@@ -536,6 +540,8 @@ public:
         lastLMIterationCount = 0;
         lastLMRan = false;
         lastLMConverged = false;
+        lastScanToMapCovarianceValid = false;
+        lastScanToMapCovariance = Eigen::Matrix<double, 6, 6>::Identity() * 1e3;
     }
 
     bool acceptMappingPose(const std::string& source)
@@ -1536,6 +1542,66 @@ public:
         cv::transpose(matA, matAt);
         matAtA = matAt * matA;
         matAtB = matAt * matB;
+
+        // Estimate local scan-to-map pose covariance from the LM normal equation.
+        // matA column order equals transformTobeMapped update order:
+        // [roll, pitch, yaw, x, y, z].  This covariance is not a global pose
+        // covariance; the fusion backend uses it conservatively to derive twist covariance.
+        {
+            Eigen::Matrix<double, 6, 6> H = Eigen::Matrix<double, 6, 6>::Zero();
+            for (int rr = 0; rr < 6; ++rr) {
+                for (int cc = 0; cc < 6; ++cc) {
+                    H(rr, cc) = static_cast<double>(matAtA.at<float>(rr, cc));
+                }
+            }
+            H = 0.5 * (H + H.transpose());
+
+            double rss = 0.0;
+            for (int rr = 0; rr < matB.rows; ++rr) {
+                const double r = static_cast<double>(matB.at<float>(rr, 0));
+                rss += r * r;
+            }
+            const double sigma2 = rss / static_cast<double>(std::max(laserCloudSelNum - 6, 1));
+
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es(H);
+            bool ok = es.info() == Eigen::Success && std::isfinite(sigma2);
+            if (ok) {
+                Eigen::Matrix<double, 6, 1> eval = es.eigenvalues();
+                const double max_eval = eval.cwiseAbs().maxCoeff();
+                double min_eval = std::numeric_limits<double>::max();
+                for (int ii = 0; ii < 6; ++ii) {
+                    if (!std::isfinite(eval(ii)) || eval(ii) <= 1e-8) {
+                        ok = false;
+                    }
+                    min_eval = std::min(min_eval, std::max(std::abs(eval(ii)), 1e-8));
+                    eval(ii) = std::max(std::abs(eval(ii)), 1e-8);
+                }
+                const double cond = max_eval / std::max(min_eval, 1e-8);
+                if (!std::isfinite(cond) || cond > 1e12) {
+                    ok = false;
+                }
+
+                Eigen::Matrix<double, 6, 6> invH =
+                    es.eigenvectors() * eval.cwiseInverse().asDiagonal() * es.eigenvectors().transpose();
+                Eigen::Matrix<double, 6, 6> cov = std::max(sigma2, 1e-6) * invH;
+                cov = 0.5 * (cov + cov.transpose());
+
+                bool finite = true;
+                for (int rr = 0; rr < 6; ++rr) {
+                    for (int cc = 0; cc < 6; ++cc) {
+                        if (!std::isfinite(cov(rr, cc))) {
+                            finite = false;
+                        }
+                    }
+                    cov(rr, rr) = std::clamp(cov(rr, rr), 1e-8, 1e4);
+                }
+                if (finite) {
+                    lastScanToMapCovariance = cov;
+                    lastScanToMapCovarianceValid = ok;
+                }
+            }
+        }
+
         cv::solve(matAtA, matAtB, matX, cv::DECOMP_QR);
 
         if (iterCount == 0) {

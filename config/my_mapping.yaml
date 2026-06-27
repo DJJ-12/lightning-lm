@@ -4,6 +4,8 @@ common:
   livox_lidar_topic: "/livox/lidar_192_168_1_3"
   imu_topic: "/imu_data"
   odom_topic: "lio_sam/imu/odom"
+  # 可选：底盘/轮速计 Odometry topic。没有轮速计就保持空字符串。
+  wheel_odom_topic: ""
   gps_topic: "odometry/gpsz"
   lidar_frame: "laser_link"
   base_link_frame: "base_link"
@@ -78,8 +80,8 @@ system:
   enable_lidar_loc_skip: true
   enable_lidar_loc_rviz: false
   enable_lidar_odom_skip: false
-  lidar_loc_skip_num: 20
-  lidar_odom_skip_num: 2
+  lidar_loc_skip_num: 2
+  lidar_odom_skip_num: 1
   map_path: /data/new_map/
   pub_tf: true
 
@@ -223,6 +225,68 @@ lio_sam:
   mappingMotionMaxCurvature: 2.0
   mappingMotionMaxRollPitchDeg: 20.0
   mappingFallbackIcpSkipOnBadLmMotion: true
+
+# Autoware-style EKF timer fusion backend
+# 主时间线：EKF timer；NDT 为 delayed absolute pose；LIO-SAM/wheel/IMU 为速度观测。
+fusion:
+  enable: true
+  backend_type: "pose_chain"
+  # Timer only publishes pose-chain output at a fixed rate; it does not run velocity-EKF.
+  ekf_timer_period_ms: 100   # 10Hz output
+  pose_chain_publish_period: 0.10
+  pose_chain_min_publish_interval: 0.02
+
+  # NDT-LIO pose-chain fusion:
+  # T_map_odom_obs = T_map_base_ndt * inverse(T_odom_base_lio_at_ndt)
+  # Two cascaded first-order SE3 low-pass filters form a second-order low-pass.
+  pose_chain_map_odom_low_pass_alpha: 0.25
+  pose_chain_ndt_first_fix_force_init: true
+  pose_chain_ndt_lio_interp_max_gap: 1.5
+  pose_chain_map_odom_ignore_trans_threshold: 5.0
+  pose_chain_map_odom_ignore_yaw_threshold_deg: 45.0
+
+  # 10Hz high-rate fill between sparse LIO-SAM poses.
+  # New implementation: IMU callback groups samples into 0.1s delta segments; timer only publishes when a delta segment is ready.
+  # Wall timer is only the trigger. Published timestamps are fixed sensor-time samples:
+  #     t_out(n) = first_lio_timestamp + n * 0.10
+  # The increment between two output samples is integrated from buffered IMU samples.
+  imu_prediction_enable: true
+  imu_prediction_max_duration: 2.0
+  pose_chain_imu_prediction_max_duration: 2.0
+  # Default user-selected propagation source: IMU acceleration + IMU gyro.
+  # Historical LIO-SAM average velocity is kept in code for later experiments, but disabled here.
+  pose_chain_lio_velocity_prediction_enable: false
+  pose_chain_reset_velocity_on_lio_anchor: true
+  pose_chain_lio_velocity_low_pass_alpha: 0.45
+  pose_chain_lio_velocity_min_dt: 0.05
+  pose_chain_lio_velocity_max_dt: 5.0
+  pose_chain_lio_velocity_max_speed: 1.5
+  pose_chain_lio_velocity_max_yaw_rate_deg: 60.0
+  pose_chain_lio_velocity_stale_time: 5.0
+  # Delayed LIO-SAM correction uses strict timestamp re-propagation:
+  # X_current(t2) = X_lio(t1) * [inverse(X_predict(t1)) * X_predict(t2)].
+  pose_chain_lio_delay_correction_enable: true
+  pose_chain_reset_velocity_on_lio_correction: false
+  pose_chain_prediction_history_size: 500
+  pose_chain_prediction_history_age: 30.0
+  imu_acc_low_pass_tau: 0.25
+  imu_gyro_low_pass_tau: 0.25
+  imu_max_velocity: 1.5
+  imu_max_yaw_rate_deg: 30.0
+  imu_max_acc: 2.0
+  # Use filtered IMU linear acceleration for 0.1s fixed-step translation extrapolation.
+  imu_use_accel_xy: true
+  imu_use_gyro_z: true
+  R_base_imu: [1.0, 0.0, 0.0,
+               0.0, 1.0, 0.0,
+               0.0, 0.0, 1.0]
+
+  # Buffers. IMU ~100Hz; keep enough history for delayed LIO/NDT arrival.
+  max_imu_buffer_size: 8000
+  max_lio_buffer_size: 2000
+  max_ndt_queue_size: 100
+  max_imu_buffer_age: 30.0
+  max_lio_buffer_age: 30.0
 
 relocalization:
   initialMapOdomTrans: [0.0, 0.0, 0.0]

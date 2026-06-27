@@ -7,6 +7,7 @@
 #include <opencv2/highgui.hpp>
 
 #include <chrono>
+#include <cmath>
 #include "core/lightning_math.hpp"
 #include "core/localization/pose_graph/pgo.h"
 #include "io/yaml_io.h"
@@ -131,6 +132,20 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     }
     LOG(INFO) << "[MAP_ODOM_INIT] map_odom_pose trans=" << map_odom_pose_.translation().transpose();
 
+    pose_chain_fusion_enable_ = false;
+    pose_chain_backend_.reset();
+    if (yaml_node["fusion"]) {
+        pose_chain_fusion_enable_ = yaml_node["fusion"]["enable"] ? yaml_node["fusion"]["enable"].as<bool>() : false;
+        if (yaml_node["fusion"]["backend_type"]) {
+            const auto backend_type = yaml_node["fusion"]["backend_type"].as<std::string>();
+            if (backend_type == "disabled" || backend_type == "none") {
+                pose_chain_fusion_enable_ = false;
+            }
+            // Old velocity-EKF backend is intentionally not selected here.
+            // Use backend_type: pose_chain for the active NDT-LIO pose-chain fusion.
+        }
+    }
+
     preprocess_ = std::make_shared<PointCloudPreprocess>();
     if (!preprocess_->Init(yaml_path)) {
         LOG(ERROR) << "failed to init input preprocess";
@@ -184,6 +199,19 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
         lidar_loc_->SetMapOdomPose(map_odom_pose_);
     }
 
+    if (pose_chain_fusion_enable_) {
+        pose_chain_backend_ = std::make_unique<PoseChainFusionBackend>();
+        if (!pose_chain_backend_->Init(yaml_path)) {
+            LOG(ERROR) << "failed to init NDT-LIO pose-chain fusion backend";
+            return false;
+        }
+        {
+            UL lock_map_odom(map_odom_mutex_);
+            pose_chain_backend_->SetInitialMapOdom(map_odom_pose_);
+        }
+        pose_chain_backend_->Start();
+    }
+
     /// pose graph
     pgo_ = std::make_shared<PGO>();
     pgo_->SetDebug(false);
@@ -220,7 +248,50 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     return true;
 }
 
-void Localization::PublishLatestResult() {
+void Localization::RunFusionTimerTickAndPublish(double timestamp) {
+    if (pose_chain_fusion_enable_ && pose_chain_backend_) {
+        SE3 map_base;
+        SE3 map_odom;
+        std::uint64_t seq = 0;
+        double output_timestamp = timestamp;
+        if (pose_chain_backend_->RunTimerTick(timestamp, &map_base, &map_odom, &seq, &output_timestamp)) {
+            {
+                UL lock_map_odom(map_odom_mutex_);
+                map_odom_pose_ = map_odom;
+            }
+            if (seq != last_fusion_map_odom_seq_) {
+                last_fusion_map_odom_seq_ = seq;
+                if (lidar_loc_) {
+                    lidar_loc_->SetMapOdomPose(map_odom);
+                }
+                LOG(INFO) << "[FUSION_MAP_ODOM_APPLIED] seq=" << seq
+                          << ", timer_time=" << std::setprecision(14) << timestamp
+                          << ", output_time=" << output_timestamp;
+            }
+
+            LocalizationResult result;
+            result.timestamp_ = output_timestamp > 0.0 ? output_timestamp : (timestamp > 0.0 ? timestamp : 0.0);
+            result.pose_ = map_base;
+            result.valid_ = true;
+            result.lidar_loc_valid_ = true;
+            result.status_ = LocalizationStatus::GOOD;
+            result.confidence_ = 1.0;
+            {
+                UL lock_result(loc_result_mutex_);
+                loc_result_ = result;
+            }
+            if (tf_callback_) {
+                tf_callback_(result.ToGeoMsg());
+            }
+            // UI must display the EKF timer published pose, not raw LIO/NDT pose.
+            if (ui_) {
+                ui_->UpdateNavState(result.ToNavState());
+                ui_->UpdateRecentPose(result.pose_);
+            }
+            return;
+        }
+    }
+
     LocalizationResult latest;
     {
         UL lock_result(loc_result_mutex_);
@@ -566,8 +637,22 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
         lidar_loc_->ProcessLO(lo_state);
     }
     // pgo_->ProcessLidarOdom(lo_state);
-    PublishHighFrequencyResultByLO(lo_state);
-
+    if (pose_chain_fusion_enable_ && pose_chain_backend_) {
+        FusionLioMeasurement m;
+        m.timestamp = lo_state.timestamp_;
+        m.odom_base = lo_state.GetPose();
+        m.pose_valid = lo_state.pose_is_ok_;
+        if (use_lio_sam_ && lio_sam_) {
+            Eigen::Matrix<double, 6, 6> lio_cov;
+            if (lio_sam_->GetLastScanToMapCovariance(&lio_cov)) {
+                m.pose_covariance = lio_cov;
+                m.has_pose_covariance = true;
+            }
+        }
+        pose_chain_backend_->FeedLio(m);
+    } else {
+        PublishHighFrequencyResultByLO(lo_state);
+    }
     if (!need_loc_scan) {
         log_odom_stats();
         return;
@@ -632,7 +717,31 @@ void Localization::LidarLocProcCloud(CloudPtr scan_undist) {
     lidar_loc_->ProcessCloud(scan_undist);
 
     auto res = lidar_loc_->GetLocalizationResult();
-    UpdateMapOdomByLidarLocResult(res);
+    if (pose_chain_fusion_enable_ && pose_chain_backend_) {
+        const bool ndt_valid = res.lidar_loc_valid_ && res.status_ == LocalizationStatus::GOOD;
+        if (ndt_valid) {
+            FusionNdtMeasurement m;
+            m.timestamp = res.timestamp_;
+            m.map_base = res.pose_;
+            m.converged = true;
+            m.fitness_score = res.confidence_;
+            m.confidence = res.confidence_;
+            if (res.has_pose_covariance_) {
+                m.pose_covariance = res.pose_covariance_;
+                m.has_pose_covariance = true;
+            }
+            pose_chain_backend_->FeedNdt(m);
+        }
+        LOG(INFO) << "[FUSION_NDT_FEED_ONLY] t=" << std::setprecision(14) << res.timestamp_
+                  << ", fed=" << ndt_valid
+                  << ", res.valid=" << res.valid_
+                  << ", lidar_loc_valid=" << res.lidar_loc_valid_
+                  << ", status=" << static_cast<int>(res.status_)
+                  << ", confidence=" << res.confidence_
+                  << ", has_pose_covariance=" << res.has_pose_covariance_;
+    } else {
+        UpdateMapOdomByLidarLocResult(res);
+    }
     // pgo_->ProcessLidarLoc(res);
     // UI 显示什么定位结果，RViz TF 就发布什么定位结果。
     /* 注释掉TF 直发
@@ -641,8 +750,21 @@ void Localization::LidarLocProcCloud(CloudPtr scan_undist) {
     }
     */
     if (ui_) {
-        // Twi with Til, here pose means Twl, thus Til=I
-        ui_->UpdateScan(scan_undist, res.pose_);
+        // In fusion mode the UI should visualize the EKF timer output pose.
+        // Do not display the raw NDT pose here, otherwise the UI will jump at NDT frequency.
+        if (pose_chain_fusion_enable_) {
+            LocalizationResult latest;
+            {
+                UL lock_result(loc_result_mutex_);
+                latest = loc_result_;
+            }
+            if (latest.valid_) {
+                ui_->UpdateScan(scan_undist, latest.pose_);
+            }
+        } else {
+            // Twi with Til, here pose means Twl, thus Til=I
+            ui_->UpdateScan(scan_undist, res.pose_);
+        }
     }
 
     if (loc_state_callback_) {
@@ -685,6 +807,14 @@ void Localization::ProcessIMUMsg(IMUPtr imu) {
         lio->ProcessIMU(imu);
     }
 
+    if (pose_chain_fusion_enable_ && pose_chain_backend_) {
+        FusionImuMeasurement m;
+        m.timestamp = imu->timestamp;
+        m.acc = imu->linear_acceleration;
+        m.gyro = imu->angular_velocity;
+        pose_chain_backend_->FeedImu(m);
+    }
+
     return;
 
     /// 这里需要 IMU predict，否则没法process DR了
@@ -724,6 +854,30 @@ void Localization::ProcessIMUMsg(IMUPtr imu) {
     #endif
 }
 
+void Localization::ProcessWheelOdomMsg(const nav_msgs::msg::Odometry::SharedPtr odom_msg) {
+    if (!odom_msg || !pose_chain_fusion_enable_ || !pose_chain_backend_) {
+        return;
+    }
+
+    FusionWheelMeasurement m;
+    m.timestamp = static_cast<double>(odom_msg->header.stamp.sec) +
+                  static_cast<double>(odom_msg->header.stamp.nanosec) * 1e-9;
+    m.vx = odom_msg->twist.twist.linear.x;
+    m.wz = odom_msg->twist.twist.angular.z;
+    m.valid = std::isfinite(m.timestamp) && std::isfinite(m.vx) && std::isfinite(m.wz);
+
+    const double var_vx = odom_msg->twist.covariance[0];
+    const double var_wz = odom_msg->twist.covariance[35];
+    if (std::isfinite(var_vx) && std::isfinite(var_wz) && var_vx > 0.0 && var_wz > 0.0) {
+        m.twist_covariance.setZero();
+        m.twist_covariance(0, 0) = var_vx;
+        m.twist_covariance(1, 1) = var_wz;
+        m.has_twist_covariance = true;
+    }
+
+    pose_chain_backend_->FeedWheel(m);
+}
+
 // void Localization::ProcessOdomMsg(const nav_msgs::msg::Odometry::SharedPtr odom_msg) {
 //     UL lock(global_mutex_);
 //
@@ -757,13 +911,21 @@ void Localization::ProcessIMUMsg(IMUPtr imu) {
 // }
 
 void Localization::Finish() {
-    lidar_loc_->Finish();
+    // Stop async LIO/NDT workers before resetting FusionBackend.
+    lidar_loc_proc_cloud_.Quit();
+    lidar_odom_proc_cloud_.Quit();
+
+    if (pose_chain_backend_) {
+        pose_chain_backend_->Stop();
+        pose_chain_backend_.reset();
+    }
+
+    if (lidar_loc_) {
+        lidar_loc_->Finish();
+    }
     if (ui_) {
         ui_->Quit();
     }
-
-    lidar_loc_proc_cloud_.Quit();
-    lidar_odom_proc_cloud_.Quit();
 }
 
 void Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vector3d& t) {
@@ -777,4 +939,3 @@ void Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
 void Localization::SetTFCallback(Localization::TFCallback&& callback) { tf_callback_ = callback; }
 
 }  // namespace lightning::loc
-

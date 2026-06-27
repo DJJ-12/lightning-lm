@@ -33,6 +33,8 @@ struct LocalizationResult {
     bool lidar_loc_valid_ = false;        // 该时刻lidarLoc是否有效
     bool lidar_loc_inlier_ = false;       // 该时刻lidarLoc在PGO中是否是内点
     double confidence_ = 1.0;             // lidarLoc的confidence(若有效)
+    Eigen::Matrix<double, 6, 6> pose_covariance_ = Eigen::Matrix<double, 6, 6>::Identity() * 1e3;
+    bool has_pose_covariance_ = false;
     double lidar_loc_error_vert_ = 0;     // lidarLoc相对于PGO定位的误差（纵向）
     double lidar_loc_error_hori_ = 0;     // lidarLoc相对于PGO定位的误差（横向）
     double lidar_loc_delta_t_ = 0;        // 相对于上一帧lidarLoc消息的时延
