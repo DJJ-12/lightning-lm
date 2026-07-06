@@ -249,9 +249,6 @@ class LidarLoc {
 
     std::mutex result_mutex_;
     LocalizationResult localization_result_;  // 输出结果
-    Eigen::Matrix<double, 6, 6> last_ndt_pose_covariance_ =
-        Eigen::Matrix<double, 6, 6>::Identity() * 1e3;
-    bool last_ndt_pose_covariance_valid_ = false;
 
     // 相对运动观测队列
     std::mutex lo_pose_mutex_;
