@@ -49,10 +49,10 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         filter_size_scan = yaml["fasterlio"]["filter_size_scan"].as<float>();
         filter_size_map_min_ = yaml["fasterlio"]["filter_size_map"].as<float>();
         keep_first_imu_estimation_ = yaml["fasterlio"]["keep_first_imu_estimation"].as<bool>();
-        gyr_cov = yaml["fasterlio"]["gyr_cov"].as<float>();
-        acc_cov = yaml["fasterlio"]["acc_cov"].as<float>();
-        b_gyr_cov = yaml["fasterlio"]["b_gyr_cov"].as<float>();
-        b_acc_cov = yaml["fasterlio"]["b_acc_cov"].as<float>();
+        gyr_cov = yaml["common"]["imuGyrNoise"].as<float>();
+        acc_cov = yaml["common"]["imuAccNoise"].as<float>();
+        b_gyr_cov = yaml["common"]["imuGyrBiasN"].as<float>();
+        b_acc_cov = yaml["common"]["imuAccBiasN"].as<float>();
 
         extrinT_ = yaml["fasterlio"]["extrinsic_T"].as<std::vector<double>>();
         extrinR_ = yaml["fasterlio"]["extrinsic_R"].as<std::vector<double>>();
@@ -64,8 +64,8 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         skip_lidar_num_ = yaml["fasterlio"]["skip_lidar_num"].as<int>();
         enable_skip_lidar_ = skip_lidar_num_ > 0;
 
-        options_.kf_dis_th_ = yaml["fasterlio"]["kf_dis_th"].as<double>();
-        options_.kf_angle_th_ = yaml["fasterlio"]["kf_angle_th"].as<double>() * M_PI / 180.0;
+        options_.kf_dis_th_ = yaml["common"]["surroundingkeyframeAddingDistThreshold"].as<double>();
+        options_.kf_angle_th_ = yaml["common"]["surroundingkeyframeAddingAngleThreshold"].as<double>();
         options_.enable_icp_part_ = yaml["fasterlio"]["enable_icp_part"].as<bool>();
         options_.min_pts = yaml["fasterlio"]["min_pts"].as<int>();
         options_.plane_icp_weight_ = yaml["fasterlio"]["plane_icp_weight"].as<float>();

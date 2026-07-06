@@ -175,13 +175,6 @@ lio_sam:
   surroundingKeyframeSearchRadius: 50.0
 
   loopClosureEnableFlag: true
-
-  mappingMotionGateEnable: true
-  mappingIcpFallbackEnable: false
-  mappingMotionMaxSpeed: 3.0
-  mappingMotionMaxAngularVelocity: 90.0
-  mappingMotionMaxCurvature: 2.0
-  mappingMotionMaxRollPitchDeg: 20.0
 ```
 
 当前版本的 LIO-SAM 分支只支持 offline mapping。如果在 online mode 下选择 `lio_sam`，初始化应直接报错退出。
@@ -403,11 +396,6 @@ mappingPoseReliable
 mappingPoseSource
 mappingTrackingState
 mappingFailureCount
-lastAcceptedTrackingTransform
-lastAcceptedTrackingTransformTime
-lastAcceptedImuTransform
-lowSpeedGuessPrevTrustedTransform
-lowSpeedGuessLastTrustedTransform
 frameInitialGuessTransform
 ```
 
@@ -456,12 +444,7 @@ acceptMappingPose("LM")
 当前代码保留 ICP fallback 逻辑，但是否启用由参数控制：
 
 ```yaml
-mappingIcpFallbackEnable: false
 ```
-
-当 `mappingIcpFallbackEnable=false` 时，LM 失败后不会运行 ICP fallback，而是直接 reject。
-
-当 `mappingIcpFallbackEnable=true` 时，ICP 结果也必须满足：
 
 ```text
 1. ICP converged。
@@ -501,7 +484,7 @@ static constexpr int kMaxConsecutiveMappingFailures = 10;
 当前 motion gate 已经简化为：
 
 ```text
-candidate pose vs lastAcceptedTrackingTransform
+candidate pose vs last output pose
 ```
 
 也就是说，所有候选位姿都和最近一次可靠 accepted pose 判断连续性。
@@ -528,19 +511,19 @@ candidate pose vs lastAcceptedTrackingTransform
 
 ---
 
-## 15. lastAcceptedTrackingTransform 设计
+## 15. Output Trajectory History 设计
 
-`lastAcceptedTrackingTransform` 是当前 bad-frame 逻辑中最重要的参考位姿。
+当前 bad-frame 连续性判断使用最近一次输出轨迹作为参考。
 
 它的更新规则是：
 
 ```text
 如果当前 reliable frame 没有成为 keyframe：
-    直接用当前 accepted LM/ICP pose 更新 lastAcceptedTrackingTransform。
+    直接用当前 accepted LM/ICP pose 更新输出轨迹历史。
 
 如果当前 reliable frame 成为 keyframe：
     先由 GTSAM/iSAM2 优化；
-    再用 cloudKeyPoses6D->back() 的优化后 pose 更新 lastAcceptedTrackingTransform。
+    再用 cloudKeyPoses6D->back() 的优化后 pose 更新输出轨迹历史。
 ```
 
 这样设计的原因是：
@@ -554,7 +537,7 @@ candidate pose vs lastAcceptedTrackingTransform
 因此：
 
 ```text
-lastAcceptedTrackingTransform 代表“最近一次可信 tracking pose”，
+输出轨迹历史代表“最近一次可信 tracking pose”，
 而不是“最近一次 keyframe pose”。
 ```
 
@@ -864,7 +847,7 @@ ROS odom/path/tf publish
 
 ```text
 SyncPackages
-lastAcceptedTrackingTransform
+updateOutputTrajectoryHistory
 motion gate
 rejectMappingPose
 failure count limit

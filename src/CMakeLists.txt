@@ -11,6 +11,9 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_eigen REQUIRED)
+find_package(GTSAM REQUIRED)
+
+include_directories(${PROJECT_SOURCE_DIR}/src/core/localization)
 
 add_library(${PROJECT_NAME}.libs SHARED
         common/nav_state.cc
@@ -24,8 +27,9 @@ add_library(${PROJECT_NAME}.libs SHARED
         core/lio/eskf.cc
         core/lio/laser_mapping.cc
         core/lio/lio_sam/lio_sam_mapping.cc
+        core/lio/lio_sam/offline/deskew_feature_extractor.cpp
+        core/lio/lio_sam/offline/map_optimization_offline.cpp
         core/lio/pointcloud_preprocess.cc
-        core/loop_closing/loop_closing.cc
 
         core/g2p5/g2p5_map.cc
         core/g2p5/g2p5.cc
@@ -35,14 +39,14 @@ add_library(${PROJECT_NAME}.libs SHARED
         core/maps/tiled_map_chunk.cc
 
         core/localization/localization_result.cc
-        core/localization/lidar_loc/lidar_loc.cc
-        core/localization/lidar_loc/pclomp/ndt_omp.cpp
-        core/localization/lidar_loc/pclomp/voxel_grid_covariance_omp.cpp
-
-        core/localization/pose_graph/pgo.cc
-        core/localization/pose_graph/pgo_impl.cc
-        core/localization/pose_graph/pose_extrapolator.cc
         core/localization/localization.cpp
+        core/localization/GlobalLocalizer/GlobalLozalizer.cpp
+        core/localization/GlobalLocalizer/tree_structured_parzen_estimator.cpp
+        core/localization/GlobalLocalizer/ndt_omp/estimate_covariance.cpp
+        core/localization/GlobalLocalizer/ndt_omp/multigrid_ndt_omp.cpp
+        core/localization/GlobalLocalizer/ndt_omp/multi_voxel_grid_covariance_omp.cpp
+        core/localization/MapLoader/MapLoader.cpp
+        core/localization/MapLoader/utils.cpp
 
         utils/timer.cc
         utils/pointcloud_utils.cc
@@ -81,21 +85,16 @@ add_dependencies(${PROJECT_NAME}.libs
         ${PROJECT_NAME}__rosidl_typesupport_cpp
 )
 
-include_directories(${PROJECT_SOURCE_DIR}/src/core/miao)
-add_subdirectory(core/miao)
-
 target_link_libraries(${PROJECT_NAME}.libs
         ${third_party_libs}
         ${PCL_LIBRARIES}
         OpenMP::OpenMP_CXX
         gtsam
-        miao.core
-        miao.utils
         livox_interfaces2__rosidl_typesupport_cpp
         ${PROJECT_NAME}__rosidl_typesupport_cpp
 )
 
-install(TARGETS ${PROJECT_NAME}.libs miao.core miao.utils
+install(TARGETS ${PROJECT_NAME}.libs
         DESTINATION lib)
 
 add_subdirectory(app)

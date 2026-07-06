@@ -32,8 +32,7 @@ NavState LocalizationResult::ToNavState() const {
     ret.pos_ = pose_.translation();
     ret.rot_ = pose_.so3();
     ret.pose_is_ok_ = status_ == LocalizationStatus::GOOD;
-
-    ret.vel_ = (pose_.so3() * vel_b_);
+    ret.vel_ = Vec3d::Zero();
 
     return ret;
 }

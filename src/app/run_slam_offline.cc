@@ -12,9 +12,11 @@
 #include "wrapper/ros_utils.h"
 
 #include "io/yaml_io.h"
+#include <yaml-cpp/yaml.h>
 
 DEFINE_string(input_bag, "", "输入数据包");
 DEFINE_string(config, "./config/default.yaml", "配置文件");
+DEFINE_string(save_directory, "", "Output map directory");
 
 /// 运行一个LIO前端，带可视化
 int main(int argc, char** argv) {
@@ -51,7 +53,14 @@ int main(int argc, char** argv) {
     std::string imu_topic = yaml.GetValue<std::string>("common", "imu_topic");
         std::string livox_lidar_topic = yaml.GetValue<std::string>("common", "livox_lidar_topic");
 
-    std::string save_map_path = yaml.GetValue<std::string>("system", "map_path");
+    YAML::Node yaml_node = YAML::LoadFile(FLAGS_config);
+    std::string save_map_path = "./data/new_map/";
+    if (yaml_node["localization"] && yaml_node["localization"]["map_path"]) {
+        save_map_path = yaml_node["localization"]["map_path"].as<std::string>();
+    }
+    if (!FLAGS_save_directory.empty()) {
+        save_map_path = FLAGS_save_directory;
+    }
 
     rosbag
         /// IMU 的处理
@@ -88,4 +97,3 @@ int main(int argc, char** argv) {
 
     return 0;
 }
-

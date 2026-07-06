@@ -15,8 +15,7 @@
 
 #include <gtsam/nonlinear/ISAM2.h>
 #include <gtsam_unstable/nonlinear/IncrementalFixedLagSmoother.h>
-
-#include <cmath>
+#include <functional>
 
 using gtsam::symbol_shorthand::X; // Pose3 (x,y,z,r,p,y)
 using gtsam::symbol_shorthand::V; // Vel   (xdot,ydot,zdot)
@@ -35,6 +34,9 @@ public:
 
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuOdometry;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubImuPath;
+
+    // Offline mode: direct function callback replacing ROS topic publication.
+    std::function<void(const nav_msgs::msg::Odometry&)> offline_imu_odometry_callback_;
 
     Eigen::Isometry3d lidarOdomAffine;
     Eigen::Isometry3d imuOdomAffineFront;
@@ -110,9 +112,6 @@ public:
             else
                 break;
         }
-        if (imuOdomQueue.empty())
-            return;
-
         Eigen::Isometry3d imuOdomAffineFront = odom2affine(imuOdomQueue.front());
         Eigen::Isometry3d imuOdomAffineBack = odom2affine(imuOdomQueue.back());
         Eigen::Isometry3d imuOdomAffineIncre = imuOdomAffineFront.inverse() * imuOdomAffineBack;
@@ -199,11 +198,19 @@ class IMUPreintegration : public ParamServer
 {
 public:
 
+    void SetOfflineImuOdometryCallback(std::function<void(const nav_msgs::msg::Odometry&)> cb)
+    {
+        offline_imu_odometry_callback_ = std::move(cb);
+    }
+
     std::mutex mtx;
 
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr subImu;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr subOdometry;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuOdometry;
+
+    // Offline mode: direct function callback replacing ROS topic publication.
+    std::function<void(const nav_msgs::msg::Odometry&)> offline_imu_odometry_callback_;
 
     rclcpp::CallbackGroup::SharedPtr callbackGroupImu;
     rclcpp::CallbackGroup::SharedPtr callbackGroupOdom;
@@ -243,8 +250,6 @@ public:
     const double delta_t = 0;
 
     int key = 1;
-    int skippedPoseFactorCount = 0;
-    double firstSkippedPoseFactorTime = -1.0;
 
     gtsam::Pose3 imu2Lidar = gtsam::Pose3(gtsam::Rot3(1, 0, 0, 0), gtsam::Point3(-extTrans.x(), -extTrans.y(), -extTrans.z()));
     gtsam::Pose3 lidar2Imu = gtsam::Pose3(gtsam::Rot3(1, 0, 0, 0), gtsam::Point3(extTrans.x(), extTrans.y(), extTrans.z()));
@@ -252,13 +257,6 @@ public:
     IMUPreintegration(const rclcpp::NodeOptions & options) :
             ParamServer("lio_sam_imu_preintegration", options)
     {
-        if (!useImuPreintegration)
-        {
-            RCLCPP_WARN(get_logger(),
-                "[MAPPING_MODE] lioMode=mapping. IMUPreintegration node is disabled.");
-            return;
-        }
-
         callbackGroupImu = create_callback_group(
             rclcpp::CallbackGroupType::MutuallyExclusive);
         callbackGroupOdom = create_callback_group(
@@ -280,8 +278,8 @@ public:
             odomOpt);
 
         pubImuOdometry = create_publisher<nav_msgs::msg::Odometry>(odomTopic+"_incremental", qos_imu);
-        
-        auto p = gtsam::PreintegrationParams::MakeSharedU(imuGravity);
+
+        boost::shared_ptr<gtsam::PreintegrationParams> p = gtsam::PreintegrationParams::MakeSharedU(imuGravity);
         p->accelerometerCovariance  = gtsam::Matrix33::Identity(3,3) * pow(imuAccNoise, 2); // acc white noise in continuous
         p->gyroscopeCovariance      = gtsam::Matrix33::Identity(3,3) * pow(imuGyrNoise, 2); // gyro white noise in continuous
         p->integrationCovariance    = gtsam::Matrix33::Identity(3,3) * pow(1e-4, 2); // error committed in integrating position from velocities
@@ -291,7 +289,7 @@ public:
         priorVelNoise   = gtsam::noiseModel::Isotropic::Sigma(3, 1e4); // m/s
         priorBiasNoise  = gtsam::noiseModel::Isotropic::Sigma(6, 1e-3); // 1e-2 ~ 1e-3 seems to be good
         correctionNoise = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 0.05, 0.05, 0.05, 0.1, 0.1, 0.1).finished()); // rad,rad,rad,m, m, m
-        correctionNoise2 = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 1, 1, 1, 1, 1, 1).finished()); // rad,rad,rad,m, m, m
+        correctionNoise2 = gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 5, 5, 5, 5, 5, 5).finished()); // weak LiDAR pose noise for cov=1/2
         noiseModelBetweenBias = (gtsam::Vector(6) << imuAccBiasN, imuAccBiasN, imuAccBiasN, imuGyrBiasN, imuGyrBiasN, imuGyrBiasN).finished();
         
         imuIntegratorImu_ = new gtsam::PreintegratedImuMeasurements(p, prior_imu_bias); // setting up the IMU integration for IMU message thread
@@ -315,112 +313,10 @@ public:
     void resetParams()
     {
         lastImuT_imu = -1;
-        lastImuT_opt = -1;
-        imuQueOpt.clear();
-        imuQueImu.clear();
         doneFirstOpt = false;
         systemInitialized = false;
-        skippedPoseFactorCount = 0;
-        firstSkippedPoseFactorTime = -1.0;
     }
 
-    bool resetOptimizationWithState(const gtsam::NavState& state,
-                                    const gtsam::imuBias::ConstantBias& bias,
-                                    const std::string& reason)
-    {
-        resetOptimization();
-
-        prevPose_ = state.pose();
-        prevVel_ = state.v();
-        prevState_ = state;
-        prevBias_ = bias;
-
-        gtsam::noiseModel::Diagonal::shared_ptr rebasePoseNoise =
-            gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 0.5, 0.5, 1.0, 5.0, 5.0, 5.0).finished());
-        gtsam::noiseModel::Diagonal::shared_ptr rebaseVelNoise =
-            gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(3) << 5.0, 5.0, 5.0).finished());
-        gtsam::noiseModel::Diagonal::shared_ptr rebaseBiasNoise =
-            gtsam::noiseModel::Diagonal::Sigmas((gtsam::Vector(6) << 0.1, 0.1, 0.1, 0.01, 0.01, 0.01).finished());
-
-        graphFactors.add(gtsam::PriorFactor<gtsam::Pose3>(X(0), prevPose_, rebasePoseNoise));
-        graphFactors.add(gtsam::PriorFactor<gtsam::Vector3>(V(0), prevVel_, rebaseVelNoise));
-        graphFactors.add(gtsam::PriorFactor<gtsam::imuBias::ConstantBias>(B(0), prevBias_, rebaseBiasNoise));
-
-        graphValues.insert(X(0), prevPose_);
-        graphValues.insert(V(0), prevVel_);
-        graphValues.insert(B(0), prevBias_);
-
-        try
-        {
-            optimizer.update(graphFactors, graphValues);
-            graphFactors.resize(0);
-            graphValues.clear();
-        }
-        catch (const std::exception& e)
-        {
-            RCLCPP_ERROR(get_logger(),
-                "[IMU_REBASE_EXCEPTION][%s] %s. Reset IMU-preintegration.",
-                reason.c_str(), e.what());
-            graphFactors.resize(0);
-            graphValues.clear();
-            resetParams();
-            return false;
-        }
-
-        imuIntegratorOpt_->resetIntegrationAndSetBias(prevBias_);
-        imuIntegratorImu_->resetIntegrationAndSetBias(prevBias_);
-        key = 1;
-        systemInitialized = true;
-        return true;
-    }
-
-    void dropImuBeforeCorrection(double currentCorrectionTime)
-    {
-        while (!imuQueOpt.empty() && stamp2Sec(imuQueOpt.front().header.stamp) < currentCorrectionTime - delta_t)
-        {
-            lastImuT_opt = stamp2Sec(imuQueOpt.front().header.stamp);
-            imuQueOpt.pop_front();
-        }
-
-        while (!imuQueImu.empty() && stamp2Sec(imuQueImu.front().header.stamp) < currentCorrectionTime - delta_t)
-            imuQueImu.pop_front();
-    }
-
-    void repropagateImuOdometry(double currentCorrectionTime)
-    {
-        prevStateOdom = prevState_;
-        prevBiasOdom  = prevBias_;
-
-        double lastImuQT = -1;
-        while (!imuQueImu.empty() && stamp2Sec(imuQueImu.front().header.stamp) < currentCorrectionTime - delta_t)
-        {
-            lastImuQT = stamp2Sec(imuQueImu.front().header.stamp);
-            imuQueImu.pop_front();
-        }
-
-        if (imuQueImu.empty())
-            return;
-
-        imuIntegratorImu_->resetIntegrationAndSetBias(prevBiasOdom);
-        for (int i = 0; i < (int)imuQueImu.size(); ++i)
-        {
-            sensor_msgs::msg::Imu *thisImu = &imuQueImu[i];
-            double imuTime = stamp2Sec(thisImu->header.stamp);
-            double dt = (lastImuQT < 0) ? (1.0 / 500.0) : (imuTime - lastImuQT);
-            if (!std::isfinite(dt) || dt <= 0.0 || dt > 0.1)
-            {
-                RCLCPP_WARN(get_logger(),
-                    "[IMU_DT_REPROP] abnormal dt=%.6f imuTime=%.6f lastImuQT=%.6f "
-                    "correctionTime=%.6f imuQueImu=%zu",
-                    dt, imuTime, lastImuQT, currentCorrectionTime, imuQueImu.size());
-            }
-
-            imuIntegratorImu_->integrateMeasurement(
-                gtsam::Vector3(thisImu->linear_acceleration.x, thisImu->linear_acceleration.y, thisImu->linear_acceleration.z),
-                gtsam::Vector3(thisImu->angular_velocity.x,    thisImu->angular_velocity.y,    thisImu->angular_velocity.z), dt);
-            lastImuQT = imuTime;
-        }
-    }
     void odometryHandler(const nav_msgs::msg::Odometry::SharedPtr odomMsg)
     {
         std::lock_guard<std::mutex> lock(mtx);
@@ -438,62 +334,48 @@ public:
         float r_y = odomMsg->pose.pose.orientation.y;
         float r_z = odomMsg->pose.pose.orientation.z;
         float r_w = odomMsg->pose.pose.orientation.w;
-        int correctionFlag = static_cast<int>(std::round(odomMsg->pose.covariance[0]));
-        bool degenerate = correctionFlag == 1;
-        bool skipPoseFactor = correctionFlag >= 2;
+        bool degenerate = (int)odomMsg->pose.covariance[0]  >= 1  ? true : false;
         gtsam::Pose3 lidarPose = gtsam::Pose3(gtsam::Rot3::Quaternion(r_w, r_x, r_y, r_z), gtsam::Point3(p_x, p_y, p_z));
 
-        static bool hasLastCorrection = false;
-        static double lastCorrectionTime = -1.0;
-        static gtsam::Pose3 lastLidarPose;
+        // 0429 新增打印
+        {        // Use stream logging to avoid printf format errors. No graph logic is changed here.
+                    static bool hasLastLidarCorrection = false;
+                    static gtsam::Pose3 lastLidarCorrectionPose;
+                    static double lastLidarCorrectionTime = -1.0;
+                    if (hasLastLidarCorrection)
+                    {
+                    gtsam::Pose3 rel = lastLidarCorrectionPose.between(lidarPose);
+                    double dTrans = rel.translation().norm();
+                    double dYawDeg = std::abs(rel.rotation().rpy()(2)) * 180.0 / M_PI;
+                    double dtCorr = currentCorrectionTime - lastLidarCorrectionTime;
+                    std::ostringstream oss;
+                    oss << "[IMU_PREINT][LIDAR_CORR_IN] status=" << odomMsg->pose.covariance[0]
+                        << " weak=" << (int)degenerate
+                        << " dt=" << dtCorr
+                        << " dTrans=" << dTrans
+                        << " dYawDeg=" << dYawDeg
+                        << " pose=(" << p_x << ", " << p_y << ", " << p_z << ")"
+                        << " optDeltaT=" << imuIntegratorOpt_->deltaTij()
+                        << " queueOpt=" << imuQueOpt.size();
+                    RCLCPP_WARN_STREAM(this->get_logger(), oss.str());
+                }
+                else
+                        {
+                    std::ostringstream oss;
+                    oss << "[IMU_PREINT][LIDAR_CORR_IN] first status=" << odomMsg->pose.covariance[0]
+                        << " weak=" << (int)degenerate
+                        << " pose=(" << p_x << ", " << p_y << ", " << p_z << ")"
+                        << " queueOpt=" << imuQueOpt.size();
+                    RCLCPP_WARN_STREAM(this->get_logger(), oss.str());
+                    }
+                    lastLidarCorrectionPose = lidarPose;
+                    lastLidarCorrectionTime = currentCorrectionTime;
+                    hasLastLidarCorrection = true;
 
-        if (hasLastCorrection)
-        {
-            double dt_corr = currentCorrectionTime - lastCorrectionTime;
-            double dx = p_x - lastLidarPose.translation().x();
-            double dy = p_y - lastLidarPose.translation().y();
-            double dz = p_z - lastLidarPose.translation().z();
-            double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-            double speed_lidar = dist / (dt_corr > 1e-3 ? dt_corr : 1e-3);
-            gtsam::Rot3 rotDelta = lastLidarPose.between(lidarPose).rotation();
-
-            RCLCPP_WARN(get_logger(),
-                "[LIDAR_CORR_DELTA] dt=%.3f dist=%.3f speed=%.3f "
-                "cur=(%.3f %.3f %.3f) rpy=(%.2f %.2f %.2f) "
-                "drpy=(%.2f %.2f %.2f) degenerate=%d flag=%d skipPose=%d imuQueOpt=%zu imuQueImu=%zu",
-                dt_corr, dist, speed_lidar,
-                p_x, p_y, p_z,
-                lidarPose.rotation().roll() * 180.0 / M_PI,
-                lidarPose.rotation().pitch() * 180.0 / M_PI,
-                lidarPose.rotation().yaw() * 180.0 / M_PI,
-                rotDelta.roll() * 180.0 / M_PI,
-                rotDelta.pitch() * 180.0 / M_PI,
-                rotDelta.yaw() * 180.0 / M_PI,
-                int(degenerate),
-                correctionFlag,
-                int(skipPoseFactor),
-                imuQueOpt.size(),
-                imuQueImu.size());
         }
-
-        lastCorrectionTime = currentCorrectionTime;
-        lastLidarPose = lidarPose;
-        hasLastCorrection = true;
-
-
         // 0. initialize system
         if (systemInitialized == false)
         {
-            if (skipPoseFactor)
-            {
-                dropImuBeforeCorrection(currentCorrectionTime);
-                RCLCPP_WARN(get_logger(),
-                    "[IMU_INIT_SKIP_POSE] flag=%d imuQueOpt=%zu imuQueImu=%zu. "
-                    "Wait for a trusted LiDAR correction before initializing the IMU graph.",
-                    correctionFlag, imuQueOpt.size(), imuQueImu.size());
-                return;
-            }
-
             resetOptimization();
 
             // pop old IMU message
@@ -524,20 +406,9 @@ public:
             graphValues.insert(V(0), prevVel_);
             graphValues.insert(B(0), prevBias_);
             // optimize once
-            try
-            {
-                optimizer.update(graphFactors, graphValues);
-                graphFactors.resize(0);
-                graphValues.clear();
-            }
-            catch (const std::exception& e)
-            {
-                RCLCPP_ERROR(get_logger(),
-                    "[IMU_OPT_EXCEPTION][INIT] %s. Reset IMU-preintegration.",
-                    e.what());
-                resetParams();
-                return;
-            }
+            optimizer.update(graphFactors, graphValues);
+            graphFactors.resize(0);
+            graphValues.clear();
 
             imuIntegratorImu_->resetIntegrationAndSetBias(prevBias_);
             imuIntegratorOpt_->resetIntegrationAndSetBias(prevBias_);
@@ -551,42 +422,31 @@ public:
         // reset graph for speed
         if (key == 100)
         {
-            try
-            {
-                // get updated noise before reset
-                gtsam::noiseModel::Gaussian::shared_ptr updatedPoseNoise = gtsam::noiseModel::Gaussian::Covariance(optimizer.marginalCovariance(X(key-1)));
-                gtsam::noiseModel::Gaussian::shared_ptr updatedVelNoise  = gtsam::noiseModel::Gaussian::Covariance(optimizer.marginalCovariance(V(key-1)));
-                gtsam::noiseModel::Gaussian::shared_ptr updatedBiasNoise = gtsam::noiseModel::Gaussian::Covariance(optimizer.marginalCovariance(B(key-1)));
-                // reset graph
-                resetOptimization();
-                // add pose
-                gtsam::PriorFactor<gtsam::Pose3> priorPose(X(0), prevPose_, updatedPoseNoise);
-                graphFactors.add(priorPose);
-                // add velocity
-                gtsam::PriorFactor<gtsam::Vector3> priorVel(V(0), prevVel_, updatedVelNoise);
-                graphFactors.add(priorVel);
-                // add bias
-                gtsam::PriorFactor<gtsam::imuBias::ConstantBias> priorBias(B(0), prevBias_, updatedBiasNoise);
-                graphFactors.add(priorBias);
-                // add values
-                graphValues.insert(X(0), prevPose_);
-                graphValues.insert(V(0), prevVel_);
-                graphValues.insert(B(0), prevBias_);
-                // optimize once
-                optimizer.update(graphFactors, graphValues);
-                graphFactors.resize(0);
-                graphValues.clear();
+            // get updated noise before reset
+            gtsam::noiseModel::Gaussian::shared_ptr updatedPoseNoise = gtsam::noiseModel::Gaussian::Covariance(optimizer.marginalCovariance(X(key-1)));
+            gtsam::noiseModel::Gaussian::shared_ptr updatedVelNoise  = gtsam::noiseModel::Gaussian::Covariance(optimizer.marginalCovariance(V(key-1)));
+            gtsam::noiseModel::Gaussian::shared_ptr updatedBiasNoise = gtsam::noiseModel::Gaussian::Covariance(optimizer.marginalCovariance(B(key-1)));
+            // reset graph
+            resetOptimization();
+            // add pose
+            gtsam::PriorFactor<gtsam::Pose3> priorPose(X(0), prevPose_, updatedPoseNoise);
+            graphFactors.add(priorPose);
+            // add velocity
+            gtsam::PriorFactor<gtsam::Vector3> priorVel(V(0), prevVel_, updatedVelNoise);
+            graphFactors.add(priorVel);
+            // add bias
+            gtsam::PriorFactor<gtsam::imuBias::ConstantBias> priorBias(B(0), prevBias_, updatedBiasNoise);
+            graphFactors.add(priorBias);
+            // add values
+            graphValues.insert(X(0), prevPose_);
+            graphValues.insert(V(0), prevVel_);
+            graphValues.insert(B(0), prevBias_);
+            // optimize once
+            optimizer.update(graphFactors, graphValues);
+            graphFactors.resize(0);
+            graphValues.clear();
 
-                key = 1;
-            }
-            catch (const std::exception& e)
-            {
-                RCLCPP_ERROR(get_logger(),
-                    "[IMU_OPT_EXCEPTION][RESET_WINDOW] %s. Reset IMU-preintegration.",
-                    e.what());
-                resetParams();
-                return;
-            }
+            key = 1;
         }
 
 
@@ -599,13 +459,6 @@ public:
             if (imuTime < currentCorrectionTime - delta_t)
             {
                 double dt = (lastImuT_opt < 0) ? (1.0 / 500.0) : (imuTime - lastImuT_opt);
-                if (!std::isfinite(dt) || dt <= 0.0 || dt > 0.1)
-                {
-                    RCLCPP_WARN(get_logger(),
-                        "[IMU_DT_OPT] abnormal dt=%.6f imuTime=%.6f lastImuT_opt=%.6f "
-                        "correctionTime=%.6f imuQueOpt=%zu",
-                        dt, imuTime, lastImuT_opt, currentCorrectionTime, imuQueOpt.size());
-                }
                 imuIntegratorOpt_->integrateMeasurement(
                         gtsam::Vector3(thisImu->linear_acceleration.x, thisImu->linear_acceleration.y, thisImu->linear_acceleration.z),
                         gtsam::Vector3(thisImu->angular_velocity.x,    thisImu->angular_velocity.y,    thisImu->angular_velocity.z), dt);
@@ -616,68 +469,6 @@ public:
             else
                 break;
         }
-
-        if (skipPoseFactor)
-        {
-            if (skippedPoseFactorCount == 0)
-                firstSkippedPoseFactorTime = currentCorrectionTime;
-            skippedPoseFactorCount++;
-
-            double skippedDuration = currentCorrectionTime - firstSkippedPoseFactorTime;
-            RCLCPP_WARN(get_logger(),
-                "[IMU_POSE_FACTOR_SKIP] key=%d flag=%d skipped=%d duration=%.3f. "
-                "Rebase at IMU prediction, but do not add a graph key.",
-                key, correctionFlag, skippedPoseFactorCount, skippedDuration);
-
-            bool tooManySkips = imuPoseFactorSkipMaxConsecutive > 0 &&
-                                skippedPoseFactorCount > imuPoseFactorSkipMaxConsecutive;
-            bool tooLongSkip = imuPoseFactorSkipMaxTime > 0.0 &&
-                               skippedDuration > imuPoseFactorSkipMaxTime;
-            if (tooManySkips || tooLongSkip)
-            {
-                RCLCPP_WARN(get_logger(),
-                    "[IMU_POSE_FACTOR_SKIP_RESET] skipped=%d duration=%.3f maxSkipped=%d maxDuration=%.3f. "
-                    "Reset IMU-preintegration to avoid an overlong unconstrained chain.",
-                    skippedPoseFactorCount,
-                    skippedDuration,
-                    imuPoseFactorSkipMaxConsecutive,
-                    imuPoseFactorSkipMaxTime);
-                resetParams();
-                return;
-            }
-
-            gtsam::NavState propState_ = imuIntegratorOpt_->predict(prevState_, prevBias_);
-            Eigen::Vector3f vel(propState_.v().x(), propState_.v().y(), propState_.v().z());
-            Eigen::Vector3f ba(prevBias_.accelerometer().x(), prevBias_.accelerometer().y(), prevBias_.accelerometer().z());
-            Eigen::Vector3f bg(prevBias_.gyroscope().x(), prevBias_.gyroscope().y(), prevBias_.gyroscope().z());
-            if (!vel.allFinite() || !ba.allFinite() || !bg.allFinite() ||
-                vel.norm() > imuFailureVelocityThreshold ||
-                ba.norm() > imuFailureBiasThreshold ||
-                bg.norm() > imuFailureBiasThreshold)
-            {
-                RCLCPP_WARN(get_logger(),
-                    "[IMU_SKIP_PRED_RESET] vel=(%.3f %.3f %.3f) |v|=%.3f "
-                    "ba=(%.4f %.4f %.4f) |ba|=%.4f bg=(%.4f %.4f %.4f) |bg|=%.4f. "
-                    "Reset IMU-preintegration.",
-                    vel.x(), vel.y(), vel.z(), vel.norm(),
-                    ba.x(), ba.y(), ba.z(), ba.norm(),
-                    bg.x(), bg.y(), bg.z(), bg.norm());
-                resetParams();
-                return;
-            }
-            if (!resetOptimizationWithState(propState_, prevBias_, "SKIP_POSE"))
-                return;
-
-            repropagateImuOdometry(currentCorrectionTime);
-            doneFirstOpt = true;
-            return;
-        }
-        else
-        {
-            skippedPoseFactorCount = 0;
-            firstSkippedPoseFactorTime = -1.0;
-        }
-
         // add imu factor to graph
         const gtsam::PreintegratedImuMeasurements& preint_imu = dynamic_cast<const gtsam::PreintegratedImuMeasurements&>(*imuIntegratorOpt_);
         gtsam::ImuFactor imu_factor(X(key - 1), V(key - 1), X(key), V(key), B(key - 1), preint_imu);
@@ -687,41 +478,32 @@ public:
                          gtsam::noiseModel::Diagonal::Sigmas(sqrt(imuIntegratorOpt_->deltaTij()) * noiseModelBetweenBias)));
         // add pose factor
         gtsam::Pose3 curPose = lidarPose.compose(lidar2Imu);
-        if (!skipPoseFactor)
-        {
-            gtsam::PriorFactor<gtsam::Pose3> pose_factor(X(key), curPose, degenerate ? correctionNoise2 : correctionNoise);
-            graphFactors.add(pose_factor);
+        { // 0429 新增打印
+            std::ostringstream oss;
+            oss << "[IMU_PREINT][POSE_FACTOR] key=" << key
+                << " status=" << odomMsg->pose.covariance[0]
+                << " noise=" << (degenerate ? "correctionNoise2" : "correctionNoise")
+                << " deltaTij=" << imuIntegratorOpt_->deltaTij();
+            RCLCPP_WARN_STREAM(this->get_logger(), oss.str());
         }
+        gtsam::PriorFactor<gtsam::Pose3> pose_factor(X(key), curPose, degenerate ? correctionNoise2 : correctionNoise);
+        graphFactors.add(pose_factor);
         // insert predicted values
         gtsam::NavState propState_ = imuIntegratorOpt_->predict(prevState_, prevBias_);
         graphValues.insert(X(key), propState_.pose());
         graphValues.insert(V(key), propState_.v());
         graphValues.insert(B(key), prevBias_);
         // optimize
-        try
-        {
-            optimizer.update(graphFactors, graphValues);
-            optimizer.update();
-            graphFactors.resize(0);
-            graphValues.clear();
-            // Overwrite the beginning of the preintegration for the next step.
-            gtsam::Values result = optimizer.calculateEstimate();
-            prevPose_  = result.at<gtsam::Pose3>(X(key));
-            prevVel_   = result.at<gtsam::Vector3>(V(key));
-            prevState_ = gtsam::NavState(prevPose_, prevVel_);
-            prevBias_  = result.at<gtsam::imuBias::ConstantBias>(B(key));
-        }
-        catch (const std::exception& e)
-        {
-            RCLCPP_ERROR(get_logger(),
-                "[IMU_OPT_EXCEPTION] key=%d flag=%d skipPose=%d %s. Reset IMU-preintegration.",
-                key, correctionFlag, int(skipPoseFactor), e.what());
-            graphFactors.resize(0);
-            graphValues.clear();
-            if (imuResetOnOptimizationFailure)
-                resetParams();
-            return;
-        }
+        optimizer.update(graphFactors, graphValues);
+        optimizer.update();
+        graphFactors.resize(0);
+        graphValues.clear();
+        // Overwrite the beginning of the preintegration for the next step.
+        gtsam::Values result = optimizer.calculateEstimate();
+        prevPose_  = result.at<gtsam::Pose3>(X(key));
+        prevVel_   = result.at<gtsam::Vector3>(V(key));
+        prevState_ = gtsam::NavState(prevPose_, prevVel_);
+        prevBias_  = result.at<gtsam::imuBias::ConstantBias>(B(key));
         // Reset the optimization preintegration object.
         imuIntegratorOpt_->resetIntegrationAndSetBias(prevBias_);
         // check optimization
@@ -753,13 +535,6 @@ public:
                 sensor_msgs::msg::Imu *thisImu = &imuQueImu[i];
                 double imuTime = stamp2Sec(thisImu->header.stamp);
                 double dt = (lastImuQT < 0) ? (1.0 / 500.0) :(imuTime - lastImuQT);
-                if (!std::isfinite(dt) || dt <= 0.0 || dt > 0.1)
-                {
-                    RCLCPP_WARN(get_logger(),
-                        "[IMU_DT_REPROP] abnormal dt=%.6f imuTime=%.6f lastImuQT=%.6f "
-                        "correctionTime=%.6f imuQueImu=%zu",
-                        dt, imuTime, lastImuQT, currentCorrectionTime, imuQueImu.size());
-                }
 
                 imuIntegratorImu_->integrateMeasurement(gtsam::Vector3(thisImu->linear_acceleration.x, thisImu->linear_acceleration.y, thisImu->linear_acceleration.z),
                                                         gtsam::Vector3(thisImu->angular_velocity.x,    thisImu->angular_velocity.y,    thisImu->angular_velocity.z), dt);
@@ -774,38 +549,17 @@ public:
     bool failureDetection(const gtsam::Vector3& velCur, const gtsam::imuBias::ConstantBias& biasCur)
     {
         Eigen::Vector3f vel(velCur.x(), velCur.y(), velCur.z());
+        if (vel.norm() > 30)
+        {
+            RCLCPP_WARN(get_logger(), "Large velocity, reset IMU-preintegration!");
+            return true;
+        }
 
         Eigen::Vector3f ba(biasCur.accelerometer().x(), biasCur.accelerometer().y(), biasCur.accelerometer().z());
         Eigen::Vector3f bg(biasCur.gyroscope().x(), biasCur.gyroscope().y(), biasCur.gyroscope().z());
-
-        RCLCPP_WARN(get_logger(),
-            "[IMU_PREINT_CHECK] key=%d vel=(%.3f %.3f %.3f) |v|=%.3f "
-            "ba=(%.4f %.4f %.4f) |ba|=%.4f "
-            "bg=(%.4f %.4f %.4f) |bg|=%.4f",
-            key,
-            vel.x(), vel.y(), vel.z(), vel.norm(),
-            ba.x(), ba.y(), ba.z(), ba.norm(),
-            bg.x(), bg.y(), bg.z(), bg.norm());
-
-        if (!vel.allFinite() || !ba.allFinite() || !bg.allFinite())
+        if (ba.norm() > 1.0 || bg.norm() > 1.0)
         {
-            RCLCPP_WARN(get_logger(), "Non-finite velocity or bias, reset IMU-preintegration!");
-            return true;
-        }
-
-        if (vel.norm() > imuFailureVelocityThreshold)
-        {
-            RCLCPP_WARN(get_logger(),
-                "Large velocity %.3f > %.3f, reset IMU-preintegration!",
-                vel.norm(), imuFailureVelocityThreshold);
-            return true;
-        }
-
-        if (ba.norm() > imuFailureBiasThreshold || bg.norm() > imuFailureBiasThreshold)
-        {
-            RCLCPP_WARN(get_logger(),
-                "Large bias ba=%.3f bg=%.3f limit=%.3f, reset IMU-preintegration!",
-                ba.norm(), bg.norm(), imuFailureBiasThreshold);
+            RCLCPP_WARN(get_logger(), "Large bias, reset IMU-preintegration!");
             return true;
         }
 
@@ -826,12 +580,6 @@ public:
 
         double imuTime = stamp2Sec(thisImu.header.stamp);
         double dt = (lastImuT_imu < 0) ? (1.0 / 500.0) : (imuTime - lastImuT_imu);
-        if (!std::isfinite(dt) || dt <= 0.0 || dt > 0.1)
-        {
-            RCLCPP_WARN(get_logger(),
-                "[IMU_DT_ODOM] abnormal dt=%.6f imuTime=%.6f lastImuT_imu=%.6f imuQueImu=%zu",
-                dt, imuTime, lastImuT_imu, imuQueImu.size());
-        }
         lastImuT_imu = imuTime;
 
         // integrate this single imu message
@@ -866,10 +614,38 @@ public:
         odometry.twist.twist.angular.y = thisImu.angular_velocity.y + prevBiasOdom.gyroscope().y();
         odometry.twist.twist.angular.z = thisImu.angular_velocity.z + prevBiasOdom.gyroscope().z();
         pubImuOdometry->publish(odometry);
+        if (offline_imu_odometry_callback_)
+            offline_imu_odometry_callback_(odometry);
+
+        {// 0429 新增打印
+            // Debug only: continuity of high-rate incremental odometry.
+            static bool hasLastImuOdom = false;
+            static gtsam::Pose3 lastImuOdomPose;
+        static double lastPrintTime = -1.0;
+        if (hasLastImuOdom && (imuTime - lastPrintTime > 0.5))
+            {
+                gtsam::Pose3 rel = lastImuOdomPose.between(lidarPose);
+            std::ostringstream oss;
+            oss << "[IMU_ODOM_CONT] dt=" << dt
+                << " dTrans=" << rel.translation().norm()
+                << " dYawDeg=" << std::abs(rel.rotation().rpy()(2)) * 180.0 / M_PI
+                << " velNorm=" << currentState.velocity().norm()
+                << " pose=(" << lidarPose.translation().x()
+                << ", " << lidarPose.translation().y()
+                << ", " << lidarPose.translation().z() << ")";
+            RCLCPP_WARN_STREAM(this->get_logger(), oss.str());
+            lastPrintTime = imuTime;
+                }
+        if (!hasLastImuOdom)
+            lastPrintTime = imuTime;
+            lastImuOdomPose = lidarPose;
+            hasLastImuOdom = true;
+        }
     }
 };
 
 
+#ifndef LIO_SAM_OFFLINE_LIBRARY
 int main(int argc, char** argv)
 {   
     rclcpp::init(argc, argv);
@@ -883,10 +659,11 @@ int main(int argc, char** argv)
     e.add_node(ImuP);
     e.add_node(TF);
 
-    RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "\033[1;32m----> IMU Preintegration Started.\033[0m");
+    RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "\033[1;32m----> IMU Preintegration Started. cov>=1 uses correctionNoise2, graph structure unchanged.\033[0m");
 
     e.spin();
 
     rclcpp::shutdown();
     return 0;
 }
+#endif  // LIO_SAM_OFFLINE_LIBRARY

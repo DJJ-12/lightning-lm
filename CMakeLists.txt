@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+﻿cmake_minimum_required(VERSION 3.16)
 
 project(lightning)
 
@@ -11,7 +11,7 @@ endif ()
 set(CMAKE_BUILD_TYPE Release)
 
 # -------------------------------------------------------------
-# ����������⣬ͬʱ��һЩȫ�ֱ���ѡ������
+# 导入第三方库，同时做一些全局编译选项配置
 add_definitions("-DPCL_NO_PRECOMPILE")
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -fopenmp -fPIC -g")
@@ -22,6 +22,15 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -g")
 
 if (CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options(-Wall -Wextra -Wpedantic)
+    add_compile_options(-Wno-deprecated-declarations)
+    add_compile_options(-Wno-parentheses)
+    add_compile_options(-Wno-pedantic)  
+    add_compile_options(-Wno-reorder)    
+    add_compile_options(-Wno-sign-compare)  
+    add_compile_options(-Wno-unused-but-set-variable)
+    add_compile_options(-Wno-unused-parameter)    
+    add_compile_options(-Wno-unused-result)
+    add_compile_options(-Wno-unused-variable)
 endif ()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin)
@@ -38,8 +47,10 @@ find_package(tf2_eigen REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(OpenMP REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 
-# msg �� srv
+
+# msg 和 srv
 set(MY_MSG_FILES "")
 set(MSG_DIR ${PROJECT_SOURCE_DIR}/msg)
 file(GLOB_RECURSE MSG_FILES ${MSG_DIR}/*.msg)
@@ -50,12 +61,16 @@ endforeach ()
 
 set(MY_ACTION_FILES "")
 
-set(MY_SRV_FILES "")
-set(SRC_DIR ${PROJECT_SOURCE_DIR}/srv)
-file(GLOB_RECURSE SRC_FILES ${SRC_DIR}/*.srv)
-foreach (SRC_FILE ${SRC_FILES})
-    file(RELATIVE_PATH REL_PATH ${SRC_DIR} ${SRC_FILE})
-    list(APPEND MY_SRV_FILES ${PROJECT_SOURCE_DIR}:srv/${REL_PATH})
+set(MY_SRV_FILES
+        ${PROJECT_SOURCE_DIR}:srv/SetLocation.srv
+)
+set(SRV_DIR ${PROJECT_SOURCE_DIR}/srv)
+file(GLOB_RECURSE SRV_FILES ${SRV_DIR}/*.srv)
+foreach (SRV_FILE ${SRV_FILES})
+    file(RELATIVE_PATH REL_PATH ${SRV_DIR} ${SRV_FILE})
+    if (NOT REL_PATH STREQUAL "SetLocation.srv")
+        list(APPEND MY_SRV_FILES ${PROJECT_SOURCE_DIR}:srv/${REL_PATH})
+    endif ()
 endforeach ()
 
 rosidl_generate_interfaces(${PROJECT_NAME}

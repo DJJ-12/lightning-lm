@@ -22,7 +22,6 @@ namespace lightning {
 class LaserMapping;  //  lio 前端
 class LioSamMapping;
 class PointCloudPreprocess;
-class LoopClosing;   // 回环检测
 
 namespace ui {
 class PangolinWindow;
@@ -44,7 +43,6 @@ class SlamSystem {
 
         bool with_cc_ = true;               // 是否需要带交叉验证
         bool with_gridmap_ = true;          // 是否需要2D栅格
-        bool with_loop_closing_ = true;     // 是否需要回环检测
         bool with_visualization_ = true;    // 是否需要可视化UI
         bool with_2dvisualization_ = true;  // 是否需要2D可视化UI
 
@@ -94,7 +92,6 @@ class SlamSystem {
     std::shared_ptr<PointCloudPreprocess> preprocess_ = nullptr;
     std::shared_ptr<LioSamMapping> lio_sam_ = nullptr;
     std::shared_ptr<LaserMapping> lio_ = nullptr;       // lio 前端
-    std::shared_ptr<LoopClosing> lc_ = nullptr;         // 回环检测
     std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;  // ui
     std::shared_ptr<g2p5::G2P5> g2p5_ = nullptr;        // 栅格地图
 

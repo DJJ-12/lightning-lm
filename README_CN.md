@@ -1,4 +1,39 @@
 # Lightning-LM
+第一步：离线建图
+虚拟机：
+ros2 run lightning run_slam_offline --input_bag /home/mt/dataset/20260616/20260616_0.db3 --config /home/mt/ws_lightning/src/lightning-lm/config/my_mapping.yaml
+盒子：
+ros2 run lightning run_slam_offline \
+  --input_bag /mnt/ros2/dataset/20260616/20260616_0.db3 \
+  --config /opt/ros/humble-agv/lib/lightning/config/my_mapping.yaml
+注意虚拟机上 配置文件中的地图保存路径是 相对路径   map_path: ./data/new_map/
+而 盒子是绝对路径  map_path: /data/new_map/
+
+检查是否正确生成地图文件 ，路径是data/new_map/BlockMap/pointcloud_map
+
+第二步：在线定位
+1， 启动定位程序
+
+虚拟机：
+ros2 run lightning run_loc_online  --config /home/mt/ws_lightning/src/lightning-lm/config/my_mapping.yaml
+盒子上 
+ ros2 run lightning run_loc_online  --config /opt/ros/humble-agv/lib/lightning/config/my_mapping.yaml
+2 ，新开一个终端，别忘记source intall/setup.bash , 给初始猜测位姿，以完成定位程序初始化
+
+ros2 service call /lightning/set_location lightning/srv/SetLocation \
+"{x: <pose_txt_x>, y: <pose_txt_y>, z: <pose_txt_z>, roll: 0.0, pitch: 0.0, yaw: <pose_txt_yaw>}"
+
+初始化需要一点儿时间，因为这里要完成下面整个流程
+////////////////////////////////////////////////////////
+收到第一帧点云后使用 /lightning/set_location 给的初值作为中心，生成大量候选 Initial Pose ，每个候选都跑一次  NDT粗定位，挑 score 最好的候选，再跑一次 NDT精定位 ，然后才初始化完成，所以很慢，
+/////////////////////////
+
+如果在盒子上跑，就执行完ros2 service call /lightning/set_location lightning/srv/SetLocation "{x: <pose_txt_x>, y: <pose_txt_y>, z: <pose_txt_z>, roll: 0.0, pitch: 0.0, yaw: <pose_txt_yaw>}"  后，让车静止一会儿就行了，然后开始跑
+但是如果在虚拟机上播放bag 的化， 由于bag 包播的快，初始化慢，等初始化好了以后，bag 包早就 播到了很远的位置，所以这里 搞了个小巧思，就是播两次bag包 ；
+先启动定位程序，然后给初始位姿，再播放bag 包，播放一小会儿就暂停，让他根据进行初始化，初始化完成后，再重新播放bag 包
+
+定位消息名是/lightning/location_pose"
+
 
 [English](./README.md) | 中文
 

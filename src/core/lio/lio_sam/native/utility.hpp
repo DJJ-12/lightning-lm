@@ -3,9 +3,6 @@
 #define _UTILITY_LIDAR_ODOMETRY_H_
 
 #include <iostream>
-#include <algorithm>
-#include <cctype>
-#include <cmath>
 #include <rclcpp/rclcpp.hpp>
 
 #include <std_msgs/msg/header.hpp>
@@ -65,7 +62,7 @@ using namespace std;
 
 typedef pcl::PointXYZI PointType;
 
-enum class SensorType { VELODYNE, OUSTER, LIVOX };
+enum class SensorType { VELODYNE, OUSTER, LIVOX, HESAI };
 
 class ParamServer : public rclcpp::Node
 {
@@ -77,8 +74,6 @@ public:
     string imuTopic;
     string odomTopic;
     string gpsTopic;
-    string lioMode;
-    bool useImuPreintegration;
 
     //Frames
     string lidarFrame;
@@ -111,7 +106,6 @@ public:
     float imuGyrBiasN;
     float imuGravity;
     float imuRPYWeight;
-    bool useImuAccelRollPitchInitialization;
     vector<double> extRotV;
     vector<double> extRPYV;
     vector<double> extTransV;
@@ -137,8 +131,6 @@ public:
     // CPU Params
     int numberOfCores;
     double mappingProcessInterval;
-    float mappingLowSpeedMaxTranslationSpeed;
-    float mappingLowSpeedMaxExtrapolationTime;
 
     // Surrounding map
     float surroundingkeyframeAddingDistThreshold;
@@ -160,35 +152,6 @@ public:
     float globalMapVisualizationPoseDensity;
     float globalMapVisualizationLeafSize;
 
-    // Mapping robustness
-    bool mappingMotionGateEnable;
-    bool mappingIcpFallbackEnable;
-    float mappingMotionMaxSpeed;
-    float mappingMotionMaxAcceleration;
-    float mappingMotionMaxAngularVelocity;
-    float mappingMotionMaxAngularAcceleration;
-    float mappingMotionMaxCurvature;
-    float mappingMotionMaxRollPitchDeg;
-    bool mappingFallbackIcpSkipOnBadLmMotion;
-    float mappingRecoveryMaxPositionError;
-    float mappingRecoveryMaxYawDeg;
-    float mappingFallbackIcpMaxCorrespondenceDistance;
-    int mappingFallbackIcpMaxIterations;
-    float mappingFallbackIcpLeafSize;
-    float mappingFallbackIcpFitnessScore;
-    float mappingFallbackIcpFitnessScoreMaxRange;
-    int mappingFallbackIcpMinSourcePoints;
-    int mappingFallbackIcpMinTargetPoints;
-    int mappingFallbackIcpMaxSourcePoints;
-    int mappingFallbackIcpMaxTargetPoints;
-
-    // IMU preintegration robustness
-    bool imuResetOnOptimizationFailure;
-    int imuPoseFactorSkipMaxConsecutive;
-    float imuPoseFactorSkipMaxTime;
-    float imuFailureVelocityThreshold;
-    float imuFailureBiasThreshold;
-
     ParamServer(std::string node_name, const rclcpp::NodeOptions & options) : Node(node_name, options)
     {
         declare_parameter("pointCloudTopic", "points");
@@ -199,10 +162,6 @@ public:
         get_parameter("odomTopic", odomTopic);
         declare_parameter("gpsTopic", "lio_sam/odometry/gps");
         get_parameter("gpsTopic", gpsTopic);
-        declare_parameter("lioMode", "mapping");
-        get_parameter("lioMode", lioMode);
-        std::transform(lioMode.begin(), lioMode.end(), lioMode.begin(), ::tolower);
-        useImuPreintegration = lioMode == "localization";
 
         declare_parameter("lidarFrame", "laser_data_frame");
         get_parameter("lidarFrame", lidarFrame);
@@ -242,6 +201,10 @@ public:
         {
             sensor = SensorType::LIVOX;
         }
+        else if (sensorStr == "hesai")
+        {
+            sensor = SensorType::HESAI;
+        }
         else
         {
             RCLCPP_ERROR_STREAM(
@@ -273,8 +236,6 @@ public:
         get_parameter("imuGravity", imuGravity);
         declare_parameter("imuRPYWeight", 0.01);
         get_parameter("imuRPYWeight", imuRPYWeight);
-        declare_parameter("useImuAccelRollPitchInitialization", true);
-        get_parameter("useImuAccelRollPitchInitialization", useImuAccelRollPitchInitialization);
 
         double ida[] = { 1.0,  0.0,  0.0,
                          0.0,  1.0,  0.0,
@@ -319,10 +280,6 @@ public:
         get_parameter("numberOfCores", numberOfCores);
         declare_parameter("mappingProcessInterval", 0.15);
         get_parameter("mappingProcessInterval", mappingProcessInterval);
-        declare_parameter("mappingLowSpeedMaxTranslationSpeed", 0.8);
-        get_parameter("mappingLowSpeedMaxTranslationSpeed", mappingLowSpeedMaxTranslationSpeed);
-        declare_parameter("mappingLowSpeedMaxExtrapolationTime", 1.0);
-        get_parameter("mappingLowSpeedMaxExtrapolationTime", mappingLowSpeedMaxExtrapolationTime);
 
         declare_parameter("surroundingkeyframeAddingDistThreshold", 1.0);
         get_parameter("surroundingkeyframeAddingDistThreshold", surroundingkeyframeAddingDistThreshold);
@@ -355,58 +312,6 @@ public:
         declare_parameter("globalMapVisualizationLeafSize", 1.0);
         get_parameter("globalMapVisualizationLeafSize", globalMapVisualizationLeafSize);
 
-        declare_parameter("mappingMotionGateEnable", true);
-        get_parameter("mappingMotionGateEnable", mappingMotionGateEnable);
-        declare_parameter("mappingIcpFallbackEnable", false);
-        get_parameter("mappingIcpFallbackEnable", mappingIcpFallbackEnable);
-        declare_parameter("mappingMotionMaxSpeed", 3.0);
-        get_parameter("mappingMotionMaxSpeed", mappingMotionMaxSpeed);
-        declare_parameter("mappingMotionMaxAcceleration", 4.0);
-        get_parameter("mappingMotionMaxAcceleration", mappingMotionMaxAcceleration);
-        declare_parameter("mappingMotionMaxAngularVelocity", 90.0);
-        get_parameter("mappingMotionMaxAngularVelocity", mappingMotionMaxAngularVelocity);
-        declare_parameter("mappingMotionMaxAngularAcceleration", 180.0);
-        get_parameter("mappingMotionMaxAngularAcceleration", mappingMotionMaxAngularAcceleration);
-        declare_parameter("mappingMotionMaxCurvature", 2.0);
-        get_parameter("mappingMotionMaxCurvature", mappingMotionMaxCurvature);
-        declare_parameter("mappingMotionMaxRollPitchDeg", 20.0);
-        get_parameter("mappingMotionMaxRollPitchDeg", mappingMotionMaxRollPitchDeg);
-        declare_parameter("mappingFallbackIcpSkipOnBadLmMotion", true);
-        get_parameter("mappingFallbackIcpSkipOnBadLmMotion", mappingFallbackIcpSkipOnBadLmMotion);
-        declare_parameter("mappingRecoveryMaxPositionError", 1.0);
-        get_parameter("mappingRecoveryMaxPositionError", mappingRecoveryMaxPositionError);
-        declare_parameter("mappingRecoveryMaxYawDeg", 45.0);
-        get_parameter("mappingRecoveryMaxYawDeg", mappingRecoveryMaxYawDeg);
-        declare_parameter("mappingFallbackIcpMaxCorrespondenceDistance", 2.0);
-        get_parameter("mappingFallbackIcpMaxCorrespondenceDistance", mappingFallbackIcpMaxCorrespondenceDistance);
-        declare_parameter("mappingFallbackIcpMaxIterations", 10);
-        get_parameter("mappingFallbackIcpMaxIterations", mappingFallbackIcpMaxIterations);
-        declare_parameter("mappingFallbackIcpLeafSize", 0.80);
-        get_parameter("mappingFallbackIcpLeafSize", mappingFallbackIcpLeafSize);
-        declare_parameter("mappingFallbackIcpFitnessScore", 0.14);
-        get_parameter("mappingFallbackIcpFitnessScore", mappingFallbackIcpFitnessScore);
-        declare_parameter("mappingFallbackIcpFitnessScoreMaxRange", 2.0);
-        get_parameter("mappingFallbackIcpFitnessScoreMaxRange", mappingFallbackIcpFitnessScoreMaxRange);
-        declare_parameter("mappingFallbackIcpMinSourcePoints", 300);
-        get_parameter("mappingFallbackIcpMinSourcePoints", mappingFallbackIcpMinSourcePoints);
-        declare_parameter("mappingFallbackIcpMinTargetPoints", 1000);
-        get_parameter("mappingFallbackIcpMinTargetPoints", mappingFallbackIcpMinTargetPoints);
-        declare_parameter("mappingFallbackIcpMaxSourcePoints", 8000);
-        get_parameter("mappingFallbackIcpMaxSourcePoints", mappingFallbackIcpMaxSourcePoints);
-        declare_parameter("mappingFallbackIcpMaxTargetPoints", 30000);
-        get_parameter("mappingFallbackIcpMaxTargetPoints", mappingFallbackIcpMaxTargetPoints);
-
-        declare_parameter("imuResetOnOptimizationFailure", true);
-        get_parameter("imuResetOnOptimizationFailure", imuResetOnOptimizationFailure);
-        declare_parameter("imuPoseFactorSkipMaxConsecutive", 20);
-        get_parameter("imuPoseFactorSkipMaxConsecutive", imuPoseFactorSkipMaxConsecutive);
-        declare_parameter("imuPoseFactorSkipMaxTime", 15.0);
-        get_parameter("imuPoseFactorSkipMaxTime", imuPoseFactorSkipMaxTime);
-        declare_parameter("imuFailureVelocityThreshold", 30.0);
-        get_parameter("imuFailureVelocityThreshold", imuFailureVelocityThreshold);
-        declare_parameter("imuFailureBiasThreshold", 1.0);
-        get_parameter("imuFailureBiasThreshold", imuFailureBiasThreshold);
-
         usleep(100);
     }
 
@@ -427,45 +332,11 @@ public:
         imu_out.angular_velocity.z = gyr.z();
         // rotate roll pitch yaw
         Eigen::Quaterniond q_from(imu_in.orientation.w, imu_in.orientation.x, imu_in.orientation.y, imu_in.orientation.z);
-        //Eigen::Quaterniond q_final = extQRPY ; // 0428
-        Eigen::Quaterniond q_final = q_from * extQRPY ; 
-        q_final.normalize(); //0428
-
+        Eigen::Quaterniond q_final = q_from * extQRPY;
         imu_out.orientation.x = q_final.x();
         imu_out.orientation.y = q_final.y();
         imu_out.orientation.z = q_final.z();
         imu_out.orientation.w = q_final.w();
-
-        static int imuConverterDebugCount = 0;
-        if (imuConverterDebugCount < 5)
-        {
-            double rawRoll, rawPitch, rawYaw;
-            double outRoll, outPitch, outYaw;
-            tf2::Quaternion rawOrientation;
-            tf2::Quaternion outOrientation;
-            tf2::fromMsg(imu_in.orientation, rawOrientation);
-            tf2::fromMsg(imu_out.orientation, outOrientation);
-            tf2::Matrix3x3(rawOrientation).getRPY(rawRoll, rawPitch, rawYaw);
-            tf2::Matrix3x3(outOrientation).getRPY(outRoll, outPitch, outYaw);
-            /* 0617 测试频率 故此注释掉
-            RCLCPP_WARN(get_logger(),
-                "[IMU_CONVERTER] raw_rpy=(%.2f %.2f %.2f) out_rpy=(%.2f %.2f %.2f) "
-                "raw_acc=(%.3f %.3f %.3f) out_acc=(%.3f %.3f %.3f)",
-                rawRoll * 180.0 / M_PI,
-                rawPitch * 180.0 / M_PI,
-                rawYaw * 180.0 / M_PI,
-                outRoll * 180.0 / M_PI,
-                outPitch * 180.0 / M_PI,
-                outYaw * 180.0 / M_PI,
-                imu_in.linear_acceleration.x,
-                imu_in.linear_acceleration.y,
-                imu_in.linear_acceleration.z,
-                imu_out.linear_acceleration.x,
-                imu_out.linear_acceleration.y,
-                imu_out.linear_acceleration.z);
-            */
-            imuConverterDebugCount++;
-        }
 
         if (sqrt(q_final.x()*q_final.x() + q_final.y()*q_final.y() + q_final.z()*q_final.z() + q_final.w()*q_final.w()) < 0.1)
         {
@@ -525,22 +396,6 @@ void imuRPY2rosRPY(sensor_msgs::msg::Imu *thisImuMsg, T *rosRoll, T *rosPitch, T
     *rosRoll = imuRoll;
     *rosPitch = imuPitch;
     *rosYaw = imuYaw;
-}
-
-template<typename T>
-bool imuAccel2rosRollPitch(sensor_msgs::msg::Imu *thisImuMsg, T *rosRoll, T *rosPitch)
-{
-    double ax = thisImuMsg->linear_acceleration.x;
-    double ay = thisImuMsg->linear_acceleration.y;
-    double az = thisImuMsg->linear_acceleration.z;
-    double accNorm = std::sqrt(ax * ax + ay * ay + az * az);
-
-    if (!std::isfinite(accNorm) || accNorm < 1.0)
-        return false;
-
-    *rosRoll = std::atan2(ay, az);
-    *rosPitch = std::atan2(-ax, std::sqrt(ay * ay + az * az));
-    return true;
 }
 
 
@@ -613,3 +468,4 @@ auto qos_lidar = rclcpp::QoS(
     qos_profile_lidar);
 
 #endif
+

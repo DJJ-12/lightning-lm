@@ -1,22 +1,23 @@
 #pragma once
 
-#include <chrono>
-#include <cstdint>
-#include <deque>
 #include <mutex>
+#include <functional>
+#include <memory>
+#include <string>
 
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+
+#include "common/eigen_types.h"
+#include "common/imu.h"
+#include "common/std_types.h"
+#include "core/localization/GlobalLocalizer/GlobalLocalizer.h"
+#include "core/localization/localization_result.h"
 #include "geometry_msgs/msg/transform_stamped.hpp"
+#include "livox_ros_driver2/msg/custom_msg.hpp"
+#include "sensor_msgs/msg/point_cloud2.hpp"
 #include "std_msgs/msg/int32.hpp"
 
-#include "common/imu.h"
-#include "common/nav_state.h"
-#include "core/lio/laser_mapping.h"
-#include "core/lio/lio_sam/lio_sam_mapping.h"
-#include "core/lio/pointcloud_preprocess.h"
-#include "core/localization/localization_result.h"
-#include "core/system/async_message_process.h"
-
-/// 预声明
 namespace lightning {
 namespace ui {
 class PangolinWindow;
@@ -24,169 +25,81 @@ class PangolinWindow;
 
 namespace loc {
 
-class LidarLoc;
-class PGO;
-
-/**
- * 实时定位接口实现
- */
 class Localization {
    public:
     struct Options {
-        Options() {}
-
-        bool online_mode_ = false;  // 在线模式还是离线模式
-        bool with_ui_ = false;      // 是否带ui
-
-        /// 参数
+        bool online_mode_ = false;
+        bool with_ui_ = false;
         SE3 T_base_lidar_ = SE3();
-
-        bool enable_lidar_odom_skip_ = false;  // 是否允许激光里程计跳帧
-        int lidar_odom_skip_num_ = 1;          // 如果允许跳帧，跳多少帧
-        bool enable_lidar_loc_skip_ = true;    // 是否允许激光定位跳帧
-        bool enable_lidar_loc_rviz_ = false;   // 是否允许调试用rviz
-        int lidar_loc_skip_num_ = 4;           // 如果允许跳帧，跳多少帧
-        bool loc_on_kf_ = false;
     };
 
-    Localization(Options options = Options());
+    explicit Localization(Options options);
     ~Localization() = default;
 
-    /**
-     * 初始化，读配置参数
-     * @param yaml_path
-     * @param global_map_path
-     * @param init_reloc_pose
-     */
     bool Init(const std::string& yaml_path, const std::string& global_map_path);
 
-    /// 处理lidar消息
     void ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPtr laser_msg);
     void ProcessLivoxLidarMsg(const livox_ros_driver2::msg::CustomMsg::SharedPtr laser_msg);
-
-    /// 处理IMU消息
     void ProcessIMUMsg(IMUPtr imu);
 
-    // void ProcessOdomMsg(const nav_msgs::msg::Odometry::SharedPtr odom_msg) override;
-
-    /// 由外部设置pose，适用于手动重定位
-    void SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vector3d& t);
-
-    /// TODO: 其他初始化逻辑
-
-    /// TODO: 处理odom消息
-
-    /// 结束，保存临时地图
+    bool SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vector3d& t);
     void Finish();
 
-    /// 异步处理函数
-    void LidarOdomProcCloud(CloudPtr);
-    void LidarLocProcCloud(CloudPtr);
-
-    void PublishLatestResult() ;
-    
     using TFCallback = std::function<void(const geometry_msgs::msg::TransformStamped& odom)>;
     using LocStateCallback = std::function<void(const std_msgs::msg::Int32& state)>;
-    using PointcloudBodyCallback = std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>;
-    using PointcloudWorldCallback = std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>;
 
     void SetTFCallback(TFCallback&& callback);
-
-    // void SetPathCallback(std::function<void(const nav_msgs::msg::Path& path)>&& callback);
-    // void SetPointcloudWorldCallback(std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>&& callback);
-    // void SetPointcloudBodyCallback(std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>&& callback);
-    // void SetLocStateCallback(std::function<void(const std_msgs::msg::Int32& state)>&& callback);
-    // void SetHealthDiagNormalCallback(interface::health_diag_normal_callback&& callback);
+    void SetLocStateCallback(LocStateCallback&& callback);
 
    private:
-    void UpdateMapOdomByPGOResult(const LocalizationResult& pgo_result);
-    void UpdateMapOdomByLidarLocResult(const LocalizationResult& loc_result);
-    void PublishHighFrequencyResultByLO(const NavState& lo_state);
-    bool ShouldRunLidarLocThisFrame();
+    struct LocCloudFrame {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = nullptr;
+        double timestamp = 0.0;
+    };
 
-    /// 模块  ========================================================================================================
-    std::mutex global_mutex_;  // 防止处理过程中被重复init
+    bool TryInitializeWithCurrentCloud();
+    pcl::PointCloud<pcl::PointXYZ>::Ptr ConvertToBaseCloud(
+        const sensor_msgs::msg::PointCloud2& msg,
+        const SE3& T_base_lidar,
+        const std::string& base_link_frame) const;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr ConvertToBaseCloud(
+        const livox_ros_driver2::msg::CustomMsg& msg,
+        const SE3& T_base_lidar,
+        const std::string& base_link_frame) const;
+    void HandleCloudFrame(const LocCloudFrame& frame);
+    void LidarLocProcCloud(const LocCloudFrame& frame);
+    void PublishResult(const LocalizationResult& result);
+    static SE3 Matrix4dToSE3(const Eigen::Matrix4d& pose);
+
+    std::mutex global_mutex_;
+    std::mutex lidar_loc_mutex_;
     Options options_;
 
-    /// 预处理
-    std::shared_ptr<PointCloudPreprocess> preprocess_ = nullptr;  // point cloud preprocess
+    robot_localizer::Localizer lidar_loc_;
 
-    /// 前端
-    bool use_lio_sam_ = false;
-    std::shared_ptr<LaserMapping> lio_ = nullptr;
-    std::shared_ptr<LioSamMapping> lio_sam_ = nullptr;
-    Keyframe::Ptr lio_kf_ = nullptr;
+    bool map_loaded_ = false;
+    bool lidar_loc_inited_ = false;
+    bool has_pending_initial_pose_ = false;
+    bool init_in_progress_ = false;
 
-    // ui
-    std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
+    Eigen::Matrix4d pending_initial_pose_ = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d latest_pose_ = Eigen::Matrix4d::Identity();
+    pcl::PointCloud<pcl::PointXYZ>::Ptr latest_cloud_ = nullptr;
+    double latest_cloud_timestamp_ = 0.0;
 
-    // pose graph
-    std::shared_ptr<PGO> pgo_ = nullptr;
+    std::mutex current_cloud_mutex_;
 
-    // lidar localization
-    std::shared_ptr<LidarLoc> lidar_loc_;
+    robot_localizer::QualityThresholds quality_thresholds_;
 
-    /// TODO async 处理
-    sys::AsyncMessageProcess<CloudPtr> lidar_odom_proc_cloud_;  // lidar odom 处理点云
-    sys::AsyncMessageProcess<CloudPtr> lidar_loc_proc_cloud_;   // lidar loc 处理点云
-
-    /// 结果数据 =====================================================================================================
     LocalizationResult loc_result_;
     std::mutex loc_result_mutex_;
-    std::mutex map_odom_mutex_;
-    SE3 map_odom_pose_;
-    std::mutex lo_pose_mutex_;
-    std::deque<NavState> lo_pose_queue_;
-    int lidar_loc_frame_count_ = 0;
 
-    std::uint64_t stat_ros_cloud_in_ = 0;
-    std::uint64_t stat_preprocess_ok_ = 0;
-    std::uint64_t stat_preprocess_fail_ = 0;
-    std::uint64_t stat_base_transform_ok_ = 0;
-    std::uint64_t stat_odom_queue_push_ = 0;
-    double stat_preprocess_total_ms_ = 0.0;
-    double stat_base_transform_total_ms_ = 0.0;
-    double stat_add_odom_queue_total_ms_ = 0.0;
-    double stat_process_lidar_total_ms_ = 0.0;
-    std::uint64_t stat_window_ros_cloud_in_ = 0;
-    std::uint64_t stat_window_preprocess_ok_ = 0;
-    std::uint64_t stat_window_preprocess_fail_ = 0;
-    std::uint64_t stat_window_base_transform_ok_ = 0;
-    std::uint64_t stat_window_odom_queue_push_ = 0;
-    double stat_window_preprocess_ms_ = 0.0;
-    double stat_window_base_transform_ms_ = 0.0;
-    double stat_window_add_odom_queue_ms_ = 0.0;
-    double stat_window_process_lidar_ms_ = 0.0;
-    std::chrono::steady_clock::time_point stat_input_last_log_time_ = std::chrono::steady_clock::now();
-
-    std::uint64_t stat_odom_proc_called_ = 0;
-    std::uint64_t stat_lio_process_cloud_called_ = 0;
-    std::uint64_t stat_lio_run_called_ = 0;
-    std::uint64_t stat_lio_run_success_ = 0;
-    std::uint64_t stat_lio_run_fail_ = 0;
-    std::uint64_t stat_lo_pose_published_ = 0;
-    std::uint64_t stat_lo_pose_not_ok_ = 0;
-    std::uint64_t stat_window_lo_run_ = 0;
-    std::uint64_t stat_window_lo_publish_ = 0;
-    double stat_latest_lo_timestamp_ = -1.0;
-    double stat_latest_publish_timestamp_ = -1.0;
-    std::chrono::steady_clock::time_point stat_odom_last_log_time_ = std::chrono::steady_clock::now();
-    std::uint64_t stat_need_loc_scan_true_ = 0;
-    std::uint64_t stat_need_loc_scan_false_ = 0;
-    std::uint64_t stat_ndt_scan_sent_ = 0;
-
-    /// 框架相关
     TFCallback tf_callback_;
     LocStateCallback loc_state_callback_;
-    PointcloudBodyCallback pointcloud_body_callback_;
-    PointcloudWorldCallback pointcloud_world_callback_;
+    std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
 
-    /// 输入检查
-    double last_imu_time_ = 0;
-    double last_odom_time_ = 0;
-    double last_cloud_time_ = 0;
     std::string base_link_frame_ = "base_link";
 };
-}  // namespace loc
 
+}  // namespace loc
 }  // namespace lightning

@@ -97,6 +97,7 @@ class LioSamMapping {
     }
     
     CloudPtr GetGlobalMap(bool use_lio_pose, bool use_voxel = true, float res = 0.1);
+    void SyncOptimizedKeyframePoses();
 
    private:
     struct SyncedPackage {
@@ -128,7 +129,7 @@ class LioSamMapping {
     std::deque<sensor_msgs::msg::Imu> imu_buffer_;
 
     //0603新增imu 预测
-    // LIO-SAM 分支给 PGO 高频发布用的 IMU/DR 状态
+    // LIO-SAM 内部 IMU/DR 状态
     ESKF kf_imu_;
     ESKF::ProcessNoiseType imu_Q_ = ESKF::ProcessNoiseType::Zero();
 

@@ -8,11 +8,11 @@ namespace lightning {
 bool PointCloudPreprocess::Init(const std::string& yaml_path) {
         /// 预处理器
     YAML_IO yaml(yaml_path);
-    blind_ = yaml.GetValue<double>("fasterlio", "blind");
-    time_scale_ = yaml.GetValue<double>("fasterlio", "time_scale");
-    int lidar_type = yaml.GetValue<int>("fasterlio", "lidar_type");
-    num_scans_ = yaml.GetValue<int>("fasterlio", "scan_line");
-    point_filter_num_ = yaml.GetValue<int>("fasterlio", "point_filter_num");
+    blind_ = yaml.GetValue<double>("common", "lidarMinRange");
+    time_scale_ = yaml.GetValue<double>("common", "time_scale");
+    int lidar_type = yaml.GetValue<int>("common", "lidar_type");
+    num_scans_ = yaml.GetValue<int>("common", "N_SCAN");
+    point_filter_num_ = yaml.GetValue<int>("common", "point_filter_num");
     height_max_ = yaml.GetValue<float>("roi", "height_max");
     height_min_ = yaml.GetValue<float>("roi", "height_min");
 

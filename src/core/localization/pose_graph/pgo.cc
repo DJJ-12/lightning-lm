@@ -335,11 +335,11 @@ void PGO::LogWindowState() {
     UL lock(impl_->data_mutex_);
     // 显示最近5个PGOFrame的信息
     auto& window = impl_->frames_;
-    int idx1 = (window.size() - 5) >= 0 ? (window.size() - 5) : -1;
-    int idx2 = (window.size() - 4) >= 0 ? (window.size() - 4) : -1;
-    int idx3 = (window.size() - 3) >= 0 ? (window.size() - 3) : -1;
-    int idx4 = (window.size() - 2) >= 0 ? (window.size() - 2) : -1;
-    int idx5 = (window.size() - 1) >= 0 ? (window.size() - 1) : -1;
+    int idx1 = window.size() >= 5 ? (window.size() - 5) : -1;
+    int idx2 = window.size() >= 4 ? (window.size() - 4) : -1;
+    int idx3 = window.size() >= 3 ? (window.size() - 3) : -1;
+    int idx4 = window.size() >= 2 ? (window.size() - 2) : -1;
+    int idx5 = window.size() >= 1 ? (window.size() - 1) : -1;
     boost::format fmt("--- %c --- %c --- %c --- %c --- %c ---");
     std::string lidar_info = idx1 >= 0 ? "info" : "empty";
     LOG(INFO) << "Show PGO window state: \n"

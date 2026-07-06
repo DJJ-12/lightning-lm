@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <utility>
 
 #include <pcl/common/transforms.h>
@@ -116,15 +117,15 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
         SetParamOverride(overrides, "useImuHeadingInitialization", params["useImuHeadingInitialization"].as<bool>());
         SetParamOverride(overrides, "useImuAccelRollPitchInitialization",
                          params["useImuAccelRollPitchInitialization"].as<bool>());
-        SetParamOverride(overrides, "N_SCAN", params["N_SCAN"].as<int>());
-        SetParamOverride(overrides, "Horizon_SCAN", params["Horizon_SCAN"].as<int>());
+        SetParamOverride(overrides, "N_SCAN", common["N_SCAN"].as<int>());
+        SetParamOverride(overrides, "Horizon_SCAN", common["Horizon_SCAN"].as<int>());
         SetParamOverride(overrides, "downsampleRate", params["downsampleRate"].as<int>());
-        SetParamOverride(overrides, "lidarMinRange", params["lidarMinRange"].as<double>());
-        SetParamOverride(overrides, "lidarMaxRange", params["lidarMaxRange"].as<double>());
-        SetParamOverride(overrides, "imuAccNoise", params["imuAccNoise"].as<double>());
-        SetParamOverride(overrides, "imuGyrNoise", params["imuGyrNoise"].as<double>());
-        SetParamOverride(overrides, "imuAccBiasN", params["imuAccBiasN"].as<double>());
-        SetParamOverride(overrides, "imuGyrBiasN", params["imuGyrBiasN"].as<double>());
+        SetParamOverride(overrides, "lidarMinRange", common["lidarMinRange"].as<double>());
+        SetParamOverride(overrides, "lidarMaxRange", common["lidarMaxRange"].as<double>());
+        SetParamOverride(overrides, "imuAccNoise", common["imuAccNoise"].as<double>());
+        SetParamOverride(overrides, "imuGyrNoise", common["imuGyrNoise"].as<double>());
+        SetParamOverride(overrides, "imuAccBiasN", common["imuAccBiasN"].as<double>());
+        SetParamOverride(overrides, "imuGyrBiasN", common["imuGyrBiasN"].as<double>());
         SetParamOverride(overrides, "imuGravity", params["imuGravity"].as<double>());
         SetParamOverride(overrides, "imuRPYWeight", params["imuRPYWeight"].as<double>());
         SetParamOverride(overrides, "extrinsicTrans", params["extrinsicTrans"].as<std::vector<double>>());
@@ -167,15 +168,13 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
                              : 900);
         SetParamOverride(overrides, "debugTiming",
                          params["debugTiming"] ? params["debugTiming"].as<bool>() : false);
-        SetParamOverride(overrides, "mappingLowSpeedMaxTranslationSpeed",
-                         params["mappingLowSpeedMaxTranslationSpeed"].as<double>());
         SetParamOverride(overrides, "surroundingkeyframeAddingDistThreshold",
-                         params["surroundingkeyframeAddingDistThreshold"].as<double>());
+                         common["surroundingkeyframeAddingDistThreshold"].as<double>());
         SetParamOverride(overrides, "surroundingkeyframeAddingAngleThreshold",
-                         params["surroundingkeyframeAddingAngleThreshold"].as<double>());
-        SetParamOverride(overrides, "surroundingKeyframeDensity", params["surroundingKeyframeDensity"].as<double>());
+                         common["surroundingkeyframeAddingAngleThreshold"].as<double>());
+        SetParamOverride(overrides, "surroundingKeyframeDensity", common["surroundingKeyframeDensity"].as<double>());
         SetParamOverride(overrides, "surroundingKeyframeSearchRadius",
-                         params["surroundingKeyframeSearchRadius"].as<double>());
+                         common["surroundingKeyframeSearchRadius"].as<double>());
         SetParamOverride(overrides, "loopClosureEnableFlag",
                          options_.is_in_slam_mode_ && params["loopClosureEnableFlag"].as<bool>());
         SetParamOverride(overrides, "surroundingKeyframeSize", params["surroundingKeyframeSize"].as<int>());
@@ -184,22 +183,12 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
                          params["historyKeyframeSearchTimeDiff"].as<double>());
         SetParamOverride(overrides, "historyKeyframeSearchNum", params["historyKeyframeSearchNum"].as<int>());
         SetParamOverride(overrides, "historyKeyframeFitnessScore", params["historyKeyframeFitnessScore"].as<double>());
-        SetParamOverride(overrides, "mappingMotionGateEnable", params["mappingMotionGateEnable"].as<bool>());
-        SetParamOverride(overrides, "mappingIcpFallbackEnable", params["mappingIcpFallbackEnable"].as<bool>());
-        SetParamOverride(overrides, "mappingMotionMaxSpeed", params["mappingMotionMaxSpeed"].as<double>());
-        SetParamOverride(overrides, "mappingMotionMaxAngularVelocity",
-                         params["mappingMotionMaxAngularVelocity"].as<double>());
-        SetParamOverride(overrides, "mappingMotionMaxCurvature", params["mappingMotionMaxCurvature"].as<double>());
-        SetParamOverride(overrides, "mappingMotionMaxRollPitchDeg", params["mappingMotionMaxRollPitchDeg"].as<double>());
-        SetParamOverride(overrides, "mappingFallbackIcpSkipOnBadLmMotion",
-                         params["mappingFallbackIcpSkipOnBadLmMotion"].as<bool>());
-        //0603新增imu 外推功能
-         // LIO-SAM 分支没有 p_imu_，所以这里直接构造给 ESKF::Predict 使用的 IMU 过程噪声 Q。
-        // 参数沿用 fasterlio 配置，和 LaserMapping 读取的字段保持一致。
-        float gyr_cov = yaml["fasterlio"]["gyr_cov"].as<float>();
-        float acc_cov = yaml["fasterlio"]["acc_cov"].as<float>();
-        float b_gyr_cov = yaml["fasterlio"]["b_gyr_cov"].as<float>();
-        float b_acc_cov = yaml["fasterlio"]["b_acc_cov"].as<float>();
+        // LIO-SAM does not own LaserMapping::p_imu_, so build the ESKF
+        // prediction noise matrix from the same common IMU noise parameters.
+        float gyr_cov = common["imuGyrNoise"].as<float>();
+        float acc_cov = common["imuAccNoise"].as<float>();
+        float b_gyr_cov = common["imuGyrBiasN"].as<float>();
+        float b_acc_cov = common["imuAccBiasN"].as<float>();
 
         imu_Q_.setZero();
         imu_Q_.block<3, 3>(0, 0).diagonal() = Vec3d(gyr_cov, gyr_cov, gyr_cov);
@@ -297,7 +286,7 @@ void LioSamMapping::ProcessIMU(const IMUPtr& input) {
                     input->linear_acceleration);
 
     // Predict() 已经更新 x_，这里不再 ChangeX()。
-    // 只显式更新时间，保证 PGO 插值用的 timestamp 正确。
+    // 只显式更新时间，保证关键帧时间戳正确。
     kf_imu_.SetTime(timestamp);
     last_dr_imu_time_ = timestamp;
 }
@@ -309,14 +298,34 @@ void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
     frontend_cloud->header = cloud->header;
     frontend_cloud->reserve(cloud->size());
 
+    // PointCloudPreprocess is the single lidar-format adapter in lightning.
+    // Its unified PointType::time contract is milliseconds:
+    //   Livox offset_time(ns) / 1e6 -> ms
+    //   Ouster t(ns) / 1e6 -> ms
+    //   RoboSense/Hesai absolute seconds - header seconds, then * 1e3 -> ms
+    //   Velodyne/CX16 raw point time * fasterlio.time_scale -> ms
+    // Native LIO-SAM uses per-point relative time in seconds, so this wrapper
+    // performs exactly one fixed ms -> s conversion. Do not auto-detect units here;
+    // set fasterlio.time_scale correctly for each lidar/bag.
+    float min_source_time_ms = std::numeric_limits<float>::max();
+    float max_source_time_ms = 0.0f;
     float max_point_time = 0.0f;
     for (const auto& source : cloud->points) {
+        min_source_time_ms = std::min(min_source_time_ms, static_cast<float>(source.time));
+        max_source_time_ms = std::max(max_source_time_ms, static_cast<float>(source.time));
+
         PointType point = source;
-        // PointCloudPreprocess keeps point.time in milliseconds for FastLIO compatibility.
-        // LIO-SAM deskew expects point.time in seconds, so convert only inside this wrapper.
         point.time = static_cast<float>(source.time * 1e-3);
         max_point_time = std::max(max_point_time, static_cast<float>(point.time));
         frontend_cloud->push_back(point);
+    }
+
+    static int lio_sam_time_log_count = 0;
+    if (!cloud->empty() && (++lio_sam_time_log_count <= 10 || lio_sam_time_log_count % 100 == 0)) {
+        LOG(INFO) << "[LIO_SAM_TIME] preprocess_time_ms_min=" << min_source_time_ms
+                  << " preprocess_time_ms_max=" << max_source_time_ms
+                  << " final_time_sec_max=" << max_point_time
+                  << " stamp=" << std::setprecision(14) << timestamp;
     }
 
     frontend_cloud->height = 1;
@@ -452,21 +461,26 @@ bool LioSamMapping::Run(bool need_output_cloud) {
             cloud_info)) {
         return false;
     }
+
+    // Match the supplied native LIO-SAM imageProjection.cpp behavior for mapping:
+    // initial_guess_* may exist in CloudInfo, but odom_available is false, so
+    // mapOptimization::updateInitialGuess() uses only IMU rotation increment.
+    // The lightning ESKF/DR state is kept for high-frequency external state/UI,
+    // but it must not act as native imuPreintegration odometry for offline mapping.
+    cloud_info.odom_available = false;
+    cloud_info.initial_guess_x = 0.0f;
+    cloud_info.initial_guess_y = 0.0f;
+    cloud_info.initial_guess_z = 0.0f;
+    cloud_info.initial_guess_roll = 0.0f;
+    cloud_info.initial_guess_pitch = 0.0f;
+    cloud_info.initial_guess_yaw = 0.0f;
+
     if (!map_optimization_->Run(cloud_info)) {
         return false;
     }
 
-    if (options_.is_in_slam_mode_) {
-        if (map_optimization_->CreatedNewKeyframe()) {
-            auto raw_cloud = deskew_feature_extractor_->BuildRawDeskewedCloudForLastFrame();
-            if (raw_cloud && !raw_cloud->empty()) {
-                map_optimization_->SetLatestRawCloudKeyFrame(std::move(raw_cloud));
-            }
-        }
-    } else {
-        if (map_optimization_->CreatedNewKeyframe()) {
-            map_optimization_->ClearCreatedNewKeyframe();
-        }
+    if (!options_.is_in_slam_mode_ && map_optimization_->CreatedNewKeyframe()) {
+        map_optimization_->ClearCreatedNewKeyframe();
     }
 
     const float* transform = map_optimization_->TransformTobeMapped();
@@ -620,6 +634,10 @@ void LioSamMapping::SyncLightningKeyframePoses() {
         all_keyframes_[i]->SetLIOPose(opt_pose);
         all_keyframes_[i]->SetOptPose(opt_pose);
     }
+}
+
+void LioSamMapping::SyncOptimizedKeyframePoses() {
+    SyncLightningKeyframePoses();
 }
 
 CloudPtr LioSamMapping::GetGlobalMap(bool use_lio_pose, bool use_voxel, float res) {

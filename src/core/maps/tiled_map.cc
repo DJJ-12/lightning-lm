@@ -22,15 +22,16 @@ bool TiledMap::ConvertFromFullPCD(CloudPtr map, const SE3& start_pose, const std
     for (const auto& pt : map->points) {
         Vec2i grid = Pos2Grid(math::ToEigen<float, 2, PointType>(pt));
         auto iter = static_chunks_.find(grid);
-        if (iter != static_chunks_.end()) {
-            iter->second->AddPoint(pt);
-        } else {
+        if (iter == static_chunks_.end()) {
             int id = chunk_id_;
             auto new_chunk = std::make_shared<MapChunk>(id, grid, "");
             static_chunks_.emplace(grid, new_chunk);
             id_to_grid_.emplace(id, grid);
             chunk_id_++;
+            iter = static_chunks_.find(grid);
         }
+
+        iter->second->AddPoint(pt);
     }
 
     SaveToBin(false);

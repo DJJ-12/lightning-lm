@@ -146,6 +146,14 @@ struct LioSamCloudInfo
     float imu_pitch_init = 0.0f;
     float imu_yaw_init = 0.0f;
 
+    bool odom_available = false;
+    float initial_guess_x = 0.0f;
+    float initial_guess_y = 0.0f;
+    float initial_guess_z = 0.0f;
+    float initial_guess_roll = 0.0f;
+    float initial_guess_pitch = 0.0f;
+    float initial_guess_yaw = 0.0f;
+
     std::vector<int> start_ring_index;
     std::vector<int> end_ring_index;
     std::vector<int> point_col_ind;
@@ -212,7 +220,6 @@ public:
     // CPU Params
     int numberOfCores;
     double mappingProcessInterval;
-    float mappingLowSpeedMaxTranslationSpeed;
     bool isInSlamMode;
     int maxOptimizationIterations = 30;
     int onlineMaxOptimizationIterations = 10;
@@ -230,29 +237,12 @@ public:
 
     // Loop closure
     bool  loopClosureEnableFlag;
+    float loopClosureFrequency;
     int   surroundingKeyframeSize;
     float historyKeyframeSearchRadius;
     float historyKeyframeSearchTimeDiff;
     int   historyKeyframeSearchNum;
     float historyKeyframeFitnessScore;
-
-    // Mapping robustness
-    bool mappingMotionGateEnable;
-    bool mappingIcpFallbackEnable;
-    float mappingMotionMaxSpeed;
-    float mappingMotionMaxAngularVelocity;
-    float mappingMotionMaxCurvature;
-    float mappingMotionMaxRollPitchDeg;
-    bool mappingFallbackIcpSkipOnBadLmMotion;
-    float mappingFallbackIcpMaxCorrespondenceDistance;
-    int mappingFallbackIcpMaxIterations;
-    float mappingFallbackIcpLeafSize;
-    float mappingFallbackIcpFitnessScore;
-    float mappingFallbackIcpFitnessScoreMaxRange;
-    int mappingFallbackIcpMinSourcePoints;
-    int mappingFallbackIcpMinTargetPoints;
-    int mappingFallbackIcpMaxSourcePoints;
-    int mappingFallbackIcpMaxTargetPoints;
 
     ParamServer(std::string node_name, const rclcpp::NodeOptions & options) : Node(node_name, options)
     {
@@ -295,7 +285,7 @@ public:
         get_parameter("imuGravity", imuGravity);
         declare_parameter("imuRPYWeight", 0.01);
         get_parameter("imuRPYWeight", imuRPYWeight);
-        declare_parameter("useImuAccelRollPitchInitialization", true);
+        declare_parameter("useImuAccelRollPitchInitialization", false);
         get_parameter("useImuAccelRollPitchInitialization", useImuAccelRollPitchInitialization);
 
         double ida[] = { 1.0,  0.0,  0.0,
@@ -341,8 +331,6 @@ public:
         get_parameter("numberOfCores", numberOfCores);
         declare_parameter("mappingProcessInterval", 0.1);
         get_parameter("mappingProcessInterval", mappingProcessInterval);
-        declare_parameter("mappingLowSpeedMaxTranslationSpeed", 0.8);
-        get_parameter("mappingLowSpeedMaxTranslationSpeed", mappingLowSpeedMaxTranslationSpeed);
         declare_parameter("isInSlamMode", true);
         get_parameter("isInSlamMode", isInSlamMode);
         declare_parameter("maxOptimizationIterations", 30);
@@ -369,6 +357,8 @@ public:
 
         declare_parameter("loopClosureEnableFlag", true);
         get_parameter("loopClosureEnableFlag", loopClosureEnableFlag);
+        declare_parameter("loopClosureFrequency", 1.0);
+        get_parameter("loopClosureFrequency", loopClosureFrequency);
         declare_parameter("surroundingKeyframeSize", 50);
         get_parameter("surroundingKeyframeSize", surroundingKeyframeSize);
         declare_parameter("historyKeyframeSearchRadius", 15.0);
@@ -379,39 +369,6 @@ public:
         get_parameter("historyKeyframeSearchNum", historyKeyframeSearchNum);
         declare_parameter("historyKeyframeFitnessScore", 0.3);
         get_parameter("historyKeyframeFitnessScore", historyKeyframeFitnessScore);
-
-        declare_parameter("mappingMotionGateEnable", true);
-        get_parameter("mappingMotionGateEnable", mappingMotionGateEnable);
-        declare_parameter("mappingIcpFallbackEnable", false);
-        get_parameter("mappingIcpFallbackEnable", mappingIcpFallbackEnable);
-        declare_parameter("mappingMotionMaxSpeed", 3.0);
-        get_parameter("mappingMotionMaxSpeed", mappingMotionMaxSpeed);
-        declare_parameter("mappingMotionMaxAngularVelocity", 90.0);
-        get_parameter("mappingMotionMaxAngularVelocity", mappingMotionMaxAngularVelocity);
-        declare_parameter("mappingMotionMaxCurvature", 2.0);
-        get_parameter("mappingMotionMaxCurvature", mappingMotionMaxCurvature);
-        declare_parameter("mappingMotionMaxRollPitchDeg", 20.0);
-        get_parameter("mappingMotionMaxRollPitchDeg", mappingMotionMaxRollPitchDeg);
-        declare_parameter("mappingFallbackIcpSkipOnBadLmMotion", true);
-        get_parameter("mappingFallbackIcpSkipOnBadLmMotion", mappingFallbackIcpSkipOnBadLmMotion);
-        declare_parameter("mappingFallbackIcpMaxCorrespondenceDistance", 2.0);
-        get_parameter("mappingFallbackIcpMaxCorrespondenceDistance", mappingFallbackIcpMaxCorrespondenceDistance);
-        declare_parameter("mappingFallbackIcpMaxIterations", 10);
-        get_parameter("mappingFallbackIcpMaxIterations", mappingFallbackIcpMaxIterations);
-        declare_parameter("mappingFallbackIcpLeafSize", 0.80);
-        get_parameter("mappingFallbackIcpLeafSize", mappingFallbackIcpLeafSize);
-        declare_parameter("mappingFallbackIcpFitnessScore", 0.14);
-        get_parameter("mappingFallbackIcpFitnessScore", mappingFallbackIcpFitnessScore);
-        declare_parameter("mappingFallbackIcpFitnessScoreMaxRange", 2.0);
-        get_parameter("mappingFallbackIcpFitnessScoreMaxRange", mappingFallbackIcpFitnessScoreMaxRange);
-        declare_parameter("mappingFallbackIcpMinSourcePoints", 300);
-        get_parameter("mappingFallbackIcpMinSourcePoints", mappingFallbackIcpMinSourcePoints);
-        declare_parameter("mappingFallbackIcpMinTargetPoints", 1000);
-        get_parameter("mappingFallbackIcpMinTargetPoints", mappingFallbackIcpMinTargetPoints);
-        declare_parameter("mappingFallbackIcpMaxSourcePoints", 8000);
-        get_parameter("mappingFallbackIcpMaxSourcePoints", mappingFallbackIcpMaxSourcePoints);
-        declare_parameter("mappingFallbackIcpMaxTargetPoints", 30000);
-        get_parameter("mappingFallbackIcpMaxTargetPoints", mappingFallbackIcpMaxTargetPoints);
 
         usleep(100);
     }
@@ -539,18 +496,18 @@ bool imuAccel2rosRollPitch(sensor_msgs::msg::Imu *thisImuMsg, T *rosRoll, T *ros
 }
 
 
-float pointDistance(PointType p)
+inline float pointDistance(PointType p)
 {
     return sqrt(p.x*p.x + p.y*p.y + p.z*p.z);
 }
 
 
-float pointDistance(PointType p1, PointType p2)
+inline float pointDistance(PointType p1, PointType p2)
 {
     return sqrt((p1.x-p2.x)*(p1.x-p2.x) + (p1.y-p2.y)*(p1.y-p2.y) + (p1.z-p2.z)*(p1.z-p2.z));
 }
 
-rmw_qos_profile_t qos_profile{
+inline rmw_qos_profile_t qos_profile{
     RMW_QOS_POLICY_HISTORY_KEEP_LAST,
     1,
     RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT,
@@ -562,14 +519,14 @@ rmw_qos_profile_t qos_profile{
     false
 };
 
-auto qos = rclcpp::QoS(
+inline auto qos = rclcpp::QoS(
     rclcpp::QoSInitialization(
         qos_profile.history,
         qos_profile.depth
     ),
     qos_profile);
 
-rmw_qos_profile_t qos_profile_imu{
+inline rmw_qos_profile_t qos_profile_imu{
     RMW_QOS_POLICY_HISTORY_KEEP_LAST,
     2000,
     RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT,
@@ -581,14 +538,14 @@ rmw_qos_profile_t qos_profile_imu{
     false
 };
 
-auto qos_imu = rclcpp::QoS(
+inline auto qos_imu = rclcpp::QoS(
     rclcpp::QoSInitialization(
         qos_profile_imu.history,
         qos_profile_imu.depth
     ),
     qos_profile_imu);
 
-rmw_qos_profile_t qos_profile_lidar{
+inline rmw_qos_profile_t qos_profile_lidar{
     RMW_QOS_POLICY_HISTORY_KEEP_LAST,
     5,
     RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT,
@@ -600,7 +557,7 @@ rmw_qos_profile_t qos_profile_lidar{
     false
 };
 
-auto qos_lidar = rclcpp::QoS(
+inline auto qos_lidar = rclcpp::QoS(
     rclcpp::QoSInitialization(
         qos_profile_lidar.history,
         qos_profile_lidar.depth

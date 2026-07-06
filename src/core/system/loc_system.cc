@@ -7,6 +7,10 @@
 #include "io/yaml_io.h"
 #include "wrapper/ros_utils.h"
 #include <iomanip>
+#include <csignal>
+#include <yaml-cpp/yaml.h>
+#include "common/options.h"
+#include "utils/timer.h"
 namespace lightning {
 
 LocSystem::LocSystem(LocSystem::Options options) : options_(options) {
@@ -14,75 +18,54 @@ LocSystem::LocSystem(LocSystem::Options options) : options_(options) {
     signal(SIGINT, lightning::debug::SigHandle);
 }
 
-LocSystem::~LocSystem() { loc_->Finish(); }
+LocSystem::~LocSystem() {
+    if (loc_) {
+        loc_->Finish();
+    }
+}
 
-bool LocSystem::Init(const std::string &yaml_path) {
+bool LocSystem::Init(const std::string &yaml_path, const std::string& map_path_override) {
     loc::Localization::Options opt;
     opt.online_mode_ = true;
     loc_ = std::make_shared<loc::Localization>(opt);
 
     YAML_IO yaml(yaml_path);
 
-    std::string map_path = yaml.GetValue<std::string>("system", "map_path");
+    YAML::Node yaml_node = YAML::LoadFile(yaml_path);
+    std::string map_path;
+    if (!map_path_override.empty()) {
+        map_path = map_path_override;
+    } else if (yaml_node["localization"] && yaml_node["localization"]["map_path"]) {
+        map_path = yaml_node["localization"]["map_path"].as<std::string>();
+    } else {
+        map_path = yaml.GetValue<std::string>("system", "map_path");
+    }
+
+    bool pub_tf = true;
+    if (yaml_node["system"] && yaml_node["system"]["pub_tf"]) {
+        pub_tf = yaml_node["system"]["pub_tf"].as<bool>();
+    } else if (yaml_node["pub_tf"]) {
+        pub_tf = yaml_node["pub_tf"].as<bool>();
+    }
+    options_.pub_tf_ = pub_tf;
+    LOG(INFO) << "[LOC_SYSTEM] pub_tf = " << options_.pub_tf_;
 
     LOG(INFO) << "online mode, creating ros2 node ... ";
 
     /// subscribers
     node_ = std::make_shared<rclcpp::Node>("lightning_slam");
 
-    imu_topic_ = yaml.GetValue<std::string>("common", "imu_topic");
     cloud_topic_ = yaml.GetValue<std::string>("common", "lidar_topic");
     livox_topic_ = yaml.GetValue<std::string>("common", "livox_lidar_topic");
-
-    auto imu_qos = rclcpp::QoS(rclcpp::KeepLast(2000));
-    imu_qos.best_effort();
-    imu_qos.durability_volatile();
 
     auto lidar_qos = rclcpp::QoS(rclcpp::KeepLast(10));
     lidar_qos.best_effort();
     lidar_qos.durability_volatile();
     // 在线定位模式下，稳定发布位姿
-    imu_cb_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     lidar_cb_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-    pub_timer_cb_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-
-    rclcpp::SubscriptionOptions imu_sub_options;
-    imu_sub_options.callback_group = imu_cb_group_;
-
     rclcpp::SubscriptionOptions lidar_sub_options;
     lidar_sub_options.callback_group = lidar_cb_group_;
 
-    using namespace std::chrono_literals;
-    /*
-    loc_pub_timer_ = node_->create_wall_timer(
-        100ms,
-        [this]() {
-            if (loc_started_ && loc_) {
-                loc_->PublishLatestResult();
-            }
-        },
-        pub_timer_cb_group_);
-    */
-    imu_sub_ = node_->create_subscription<sensor_msgs::msg::Imu>(
-        imu_topic_, imu_qos, [this](sensor_msgs::msg::Imu::SharedPtr msg) {
-            IMUPtr imu = std::make_shared<IMU>();
-            imu->timestamp = ToSec(msg->header.stamp);
-            imu->linear_acceleration =
-                Vec3d(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z);
-            imu->angular_velocity =
-                Vec3d(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z);
-            imu->orientation =
-                Quatd(msg->orientation.w, msg->orientation.x, msg->orientation.y, msg->orientation.z);
-
-            static int imu_count = 0;
-            if (++imu_count % 200 == 0) {
-                //LOG(INFO) << "[IMU_RECV] t=" << std::setprecision(14) << imu->timestamp;
-            }
-
-            ProcessIMU(imu);
-        },
-        imu_sub_options);
-        
     cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
         cloud_topic_, lidar_qos,
         [this](sensor_msgs::msg::PointCloud2::SharedPtr cloud) {
@@ -104,9 +87,38 @@ bool LocSystem::Init(const std::string &yaml_path) {
     loc_pose_pub_ = node_->create_publisher<geometry_msgs::msg::PoseStamped>(
         "/lightning/localization/pose", 10);    
 
-    if (options_.pub_tf_) {
-        tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(node_);
-    }
+    location_pose_pub_ = node_->create_publisher<geometry_msgs::msg::PoseStamped>(
+        "/lightning/localization_pose", rclcpp::QoS(10));
+
+    set_location_srv_ = node_->create_service<SetLocationService>(
+        "/lightning/set_location",
+        [this](const SetLocationService::Request::SharedPtr request,
+               SetLocationService::Response::SharedPtr response) {
+            if (!loc_ || !map_loaded_.load()) {
+                response->success = false;
+                response->initialized = false;
+                response->message = "localization map is not loaded";
+                return;
+            }
+
+            Eigen::AngleAxisd roll_angle(request->roll, Eigen::Vector3d::UnitX());
+            Eigen::AngleAxisd pitch_angle(request->pitch, Eigen::Vector3d::UnitY());
+            Eigen::AngleAxisd yaw_angle(request->yaw, Eigen::Vector3d::UnitZ());
+            Eigen::Quaterniond q(yaw_angle * pitch_angle * roll_angle);
+            q.normalize();
+            Eigen::Vector3d t(request->x, request->y, request->z);
+
+            const bool initialized_now = loc_->SetExternalPose(q, t);
+            loc_started_ = true;
+
+            response->success = true;
+            response->initialized = initialized_now;
+            response->message = initialized_now
+                                     ? "robot_localizer initialized successfully"
+                                     : "initial pose accepted, waiting for current cloud";
+        });
+
+    tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(node_);
 
     loc_->SetTFCallback([this](const geometry_msgs::msg::TransformStamped& tf_msg) {
         if (options_.pub_tf_ && tf_broadcaster_) {
@@ -124,6 +136,10 @@ bool LocSystem::Init(const std::string &yaml_path) {
             loc_pose_pub_->publish(pose_msg);
         }
 
+        if (location_pose_pub_) {
+            location_pose_pub_->publish(pose_msg);
+        }
+
         nav_msgs::msg::Odometry odom_msg;
         odom_msg.header = tf_msg.header;
         odom_msg.child_frame_id = tf_msg.child_frame_id;
@@ -135,6 +151,7 @@ bool LocSystem::Init(const std::string &yaml_path) {
     });
     
     bool ret = loc_->Init(yaml_path, map_path);
+    map_loaded_ = ret;
     if (ret) {
         LOG(INFO) << "online loc node has been created.";
     }
@@ -156,9 +173,7 @@ void LocSystem::Start() {
 }
 
 void LocSystem::ProcessIMU(const IMUPtr &imu) {
-    if (loc_started_) {
-        loc_->ProcessIMUMsg(imu);
-    }
+    (void)imu;
 }
 
 void LocSystem::ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr &cloud) {

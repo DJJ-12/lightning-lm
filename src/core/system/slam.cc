@@ -7,17 +7,23 @@
 #include "core/lio/laser_mapping.h"
 #include "core/lio/lio_sam/lio_sam_mapping.h"
 #include "core/lio/pointcloud_preprocess.h"
-#include "core/loop_closing/loop_closing.h"
 #include "core/maps/tiled_map.h"
 #include "ui/pangolin_window.h"
 #include "wrapper/ros_utils.h"
 
+#include <cmath>
+#include <pcl/common/point_tests.h>
 #include <pcl/common/transforms.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/io/pcd_io.h>
+#include <pcl/point_types.h>
 #include <yaml-cpp/yaml.h>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <opencv2/opencv.hpp>
+#include <sstream>
 
 namespace lightning {
 
@@ -82,24 +88,10 @@ bool SlamSystem::Init(const std::string& yaml_path) {
         }
     }
 
-    options_.with_loop_closing_ = yaml["system"]["with_loop_closing"].as<bool>();
     options_.with_visualization_ = yaml["system"]["with_ui"].as<bool>();
     options_.with_2dvisualization_ = yaml["system"]["with_2dui"].as<bool>();
     options_.with_gridmap_ = yaml["system"]["with_g2p5"].as<bool>();
     options_.step_on_kf_ = yaml["system"]["step_on_kf"].as<bool>();
-
-    if (use_lio_sam_ && options_.with_loop_closing_) {
-        LOG(INFO) << "LIO-SAM uses its own loop closure; disable lightning-lm LoopClosing";
-        options_.with_loop_closing_ = false;
-    }
-
-    if (options_.with_loop_closing_) {
-        LOG(INFO) << "slam with loop closing";
-        LoopClosing::Options options;
-        options.online_mode_ = options_.online_mode_;
-        lc_ = std::make_shared<LoopClosing>(options);
-        lc_->Init(yaml_path);
-    }
 
     if (options_.with_visualization_) {
         LOG(INFO) << "slam with 3D UI";
@@ -118,11 +110,6 @@ bool SlamSystem::Init(const std::string& yaml_path) {
 
         g2p5_ = std::make_shared<g2p5::G2P5>(opt);
         g2p5_->Init(yaml_path);
-
-        if (options_.with_loop_closing_) {
-            /// 当发生回环时，触发一次重绘
-            lc_->SetLoopClosedCB([this]() { g2p5_->RedrawGlobalMap(); });
-        }
 
         if (options_.with_2dvisualization_) {
             g2p5_->SetMapUpdateCallback([this](g2p5::G2P5MapPtr map) {
@@ -210,11 +197,12 @@ void SlamSystem::SaveMap(const std::string& path) {
         std::filesystem::create_directories(save_path);
     }
 
-    // auto global_map_no_loop = lio_->GetGlobalMap(true);
-    auto global_map =
-        use_lio_sam_ ? lio_sam_->GetGlobalMap(true) : lio_->GetGlobalMap(!options_.with_loop_closing_);
-    // auto global_map_raw = lio_->GetGlobalMap(!options_.with_loop_closing_, false, 0.1);
+    if (use_lio_sam_) {
+        lio_sam_->SyncOptimizedKeyframePoses();
+    }
 
+    // auto global_map_no_loop = lio_->GetGlobalMap(true);
+    auto global_map = use_lio_sam_ ? lio_sam_->GetGlobalMap(true) : lio_->GetGlobalMap(true);
     TiledMap::Options tm_options;
     tm_options.map_path_ = save_path;
 
@@ -224,15 +212,107 @@ void SlamSystem::SaveMap(const std::string& path) {
         LOG(WARNING) << "no keyframes, skip map saving";
         return;
     }
-    SE3 start_pose = keyframes.front()->GetOptPose();
+    SE3 start_pose = keyframes.front()->GetLIOPose();
     tm.ConvertFromFullPCD(global_map, start_pose, save_path);
 
     pcl::io::savePCDFileBinaryCompressed(save_path + "/global.pcd", *global_map);
+    {
+        const int block_resolution = 20;
+        const double voxel_size = 0.1;
+
+        const std::string block_map_dir = save_path + "/BlockMap";
+        const std::string pcd_dir = block_map_dir + "/pointcloud_map";
+        const std::string metadata_path =
+            block_map_dir + "/pointcloud_map_metadata.yaml";
+
+        std::filesystem::create_directories(block_map_dir);
+        std::filesystem::create_directories(pcd_dir);
+
+        using SegmentIndex = std::pair<int, int>;
+        std::map<SegmentIndex, pcl::PointCloud<pcl::PointXYZ>::Ptr> segment_clouds;
+
+        for (const auto& pt : global_map->points) {
+            if (!pcl::isFinite(pt)) {
+                continue;
+            }
+
+            const int seg_x =
+                static_cast<int>(
+                    std::floor(pt.x / static_cast<double>(block_resolution))) *
+                block_resolution;
+            const int seg_y =
+                static_cast<int>(
+                    std::floor(pt.y / static_cast<double>(block_resolution))) *
+                block_resolution;
+
+            SegmentIndex seg{seg_x, seg_y};
+            auto& segment_cloud = segment_clouds[seg];
+            if (!segment_cloud) {
+                segment_cloud.reset(new pcl::PointCloud<pcl::PointXYZ>());
+            }
+
+            pcl::PointXYZ p;
+            p.x = pt.x;
+            p.y = pt.y;
+            p.z = pt.z;
+            segment_cloud->push_back(p);
+        }
+
+        std::ofstream metadata_file(metadata_path);
+        if (!metadata_file.is_open()) {
+            LOG(ERROR) << "failed to open BlockMap metadata file: " << metadata_path;
+            return;
+        }
+
+        metadata_file << "x_resolution: " << block_resolution << "\n";
+        metadata_file << "y_resolution: " << block_resolution << "\n";
+
+        int segment_num = 0;
+        for (auto& item : segment_clouds) {
+            const SegmentIndex& seg = item.first;
+            auto& segment_cloud = item.second;
+            if (!segment_cloud || segment_cloud->empty()) {
+                continue;
+            }
+
+            pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud(
+                new pcl::PointCloud<pcl::PointXYZ>());
+            if (voxel_size > 0.0) {
+                pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+                voxel_filter.setLeafSize(voxel_size, voxel_size, voxel_size);
+                voxel_filter.setInputCloud(segment_cloud);
+                voxel_filter.filter(*filtered_cloud);
+            } else {
+                filtered_cloud = segment_cloud;
+            }
+
+            if (!filtered_cloud || filtered_cloud->empty()) {
+                continue;
+            }
+
+            filtered_cloud->width = filtered_cloud->size();
+            filtered_cloud->height = 1;
+            filtered_cloud->is_dense = false;
+
+            std::ostringstream filename_stream;
+            filename_stream << "seg_" << seg.first << "_" << seg.second << ".pcd";
+
+            const std::string filename = filename_stream.str();
+            const std::string pcd_path = pcd_dir + "/" + filename;
+            pcl::io::savePCDFileBinary(pcd_path, *filtered_cloud);
+
+            metadata_file << filename << ": [" << seg.first << ", " << seg.second
+                          << "]\n";
+            ++segment_num;
+        }
+
+        LOG(INFO) << "RobotLocalize BlockMap saved to " << block_map_dir
+                  << ", segment num: " << segment_num;
+    }
     std::ofstream pose_file(save_path + "/pose.txt");
     pose_file << "# id timestamp tx ty tz qx qy qz qw\n";
-    const bool use_lio_pose_for_map = use_lio_sam_ || !options_.with_loop_closing_;
     for (const auto& kf : keyframes) {
-        SE3 pose = use_lio_pose_for_map ? kf->GetLIOPose() : kf->GetOptPose();
+        SE3 pose = kf->GetLIOPose();
         NavState state = kf->GetState();
         Vec3d t = pose.translation();
         Quatd q = pose.unit_quaternion();
@@ -367,10 +447,6 @@ void SlamSystem::ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr& cl
         return;
     }
 
-    if (options_.with_loop_closing_) {
-        lc_->AddKF(cur_kf_);
-    }
-
     if (options_.with_gridmap_) {
         g2p5_->PushKeyframe(cur_kf_);
     }
@@ -415,10 +491,6 @@ void SlamSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr
 
     if (cur_kf_ == nullptr) {
         return;
-    }
-
-    if (options_.with_loop_closing_) {
-        lc_->AddKF(cur_kf_);
     }
 
     if (options_.with_gridmap_) {

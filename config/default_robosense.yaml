@@ -52,51 +52,13 @@ g2p5:
   grid_map_resolution: 0.2 # 栅格地图分辨率
 
 system:
-  with_loop_closing: true # 是否需要回环检测
   with_ui: true  # 是否需要3D UI
   with_2dui: true # 是否需要2D UI
   with_g2p5: true # 是否需要栅格地图
   step_on_kf: true # 是否在关键帧处暂停
 
-  enable_lidar_loc_skip: false
-  enable_lidar_loc_rviz: false
-  enable_lidar_odom_skip: false
-  lidar_loc_skip_num: 4
-  lidar_odom_skip_num: 0
-  map_path: ./data/new_map/
   pub_tf: true
 
-loop_closing:
-  loop_kf_gap: 20       # 每隔多少个关键帧检查一次
-  min_id_interval: 20   # 被检查的关键帧ID间隔
-  closest_id_th: 50     # 历史关键帧与当前帧的ID间隔
-  max_range: 30.0       # 候选帧的最大距离
-  ndt_score_th: 1.0     # ndt位姿分值
-  with_height: true
-
-
-### localization ================================================================================================
-lidar_loc:
-  enable_dynamic_polygon: false
-  enable_parking_static: true
-  enable_icp_adjust: false
-  filter_intensity_max: 100.0
-  filter_intensity_min: 10.0
-  filter_z_max: 30.0
-  filter_z_min: -1.0
-  force_2d: false
-  grid_search_angle_range: 90.0
-  grid_search_angle_step: 10
-  lidar_loc_odom_th: 0.5
-  init_with_fp: true
-  min_init_confidence: 0.8
-  update_dynamic_cloud: true
-  update_err_h: 0.2
-  update_err_v: 0.2
-  update_kf_dis: 2.0
-  update_lidar_loc_score: 2.5
-  loc_on_kf: true
-  try_self_extrap: false
 maps:
   delete_when_unload: false
   dyn_cloud_policy: persistent
@@ -107,24 +69,6 @@ maps:
   save_dyn_when_unload: false
   unload_map_size: 4
   with_dyn_area: false
-pgo:
-  dr_ang_noise: 0.5
-  dr_pos_noise: 1.0
-  dr_pos_noise_ratio: 1.0
-  lidar_loc_ang_noise: 1.0
-  lidar_loc_outlier_th: 5.0
-  lidar_loc_pos_noise: 0.3
-  lidar_odom_ang_noise: 1.0
-  lidar_odom_pos_noise: 0.3
-  pgo_frame_converge_ang_th: 1.0
-  pgo_frame_converge_pos_th: 0.05
-  rtk_fix_ang_noise: 2.0
-  rtk_fix_pos_noise: 1.0
-  rtk_height_noise_ratio: 10.0
-  rtk_other_ang_noise: 10.0
-  rtk_other_pos_noise: 5.0
-  rtk_outlier_th: 1.0
-  smooth_factor: 0.01
 roi:
   height_max: 10.0
   height_min: -10.0
@@ -135,3 +79,25 @@ ui:
   car_width: 1.6
   car_height: 1.7
   scans: 1
+
+localization:
+  map_path: ./data/new_map/
+
+  initial_pose:
+    use_initial_pose: false
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+
+  quality:
+    excellent_threshold: 4.0
+    good_threshold: 2.5
+    fair_threshold: 1.5
+    excellent_iteration_threshold: 20
+
+mapping:
+  block_map_resolution: 20
+  block_map_voxel_size: 0.1
