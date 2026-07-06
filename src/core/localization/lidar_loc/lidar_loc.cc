@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <execution>
 
+#include <Eigen/Cholesky>
+#include <Eigen/Eigenvalues>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/passthrough.h>
 #include <pcl/io/pcd_io.h>
@@ -21,6 +23,58 @@
 #include "utils/timer.h"
 
 namespace lightning::loc {
+
+namespace {
+
+bool BuildNdtPoseCovarianceFromHessian(const Eigen::Matrix<double, 6, 6>& hessian,
+                                       Eigen::Matrix<double, 6, 6>* covariance_rpyxyz) {
+    if (!covariance_rpyxyz || !hessian.allFinite()) {
+        return false;
+    }
+
+    Eigen::Matrix<double, 6, 6> info = -0.5 * (hessian + hessian.transpose());
+    info = 0.5 * (info + info.transpose());
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es(info);
+    if (es.info() != Eigen::Success) {
+        LOG(WARNING) << "[NDT_HESSIAN_COV] eigen decomposition failed";
+        return false;
+    }
+    const auto eig = es.eigenvalues();
+    const double min_eig = eig.minCoeff();
+    const double max_eig = eig.maxCoeff();
+    if (min_eig <= 1e-9 || max_eig / std::max(min_eig, 1e-12) > 1e12) {
+        LOG(WARNING) << "[NDT_HESSIAN_COV] bad information matrix, min_eig=" << min_eig
+                     << ", max_eig=" << max_eig
+                     << ", cond=" << max_eig / std::max(min_eig, 1e-12);
+        return false;
+    }
+
+    Eigen::Matrix<double, 6, 6> inv_diag = Eigen::Matrix<double, 6, 6>::Zero();
+    for (int i = 0; i < 6; ++i) {
+        inv_diag(i, i) = 1.0 / eig(i);
+    }
+    const Eigen::Matrix<double, 6, 6> cov_xyzrpy = es.eigenvectors() * inv_diag * es.eigenvectors().transpose();
+    if (!cov_xyzrpy.allFinite()) {
+        return false;
+    }
+
+    covariance_rpyxyz->setZero();
+    // pclomp NDT Hessian order is [x, y, z, roll, pitch, yaw].
+    // Fusion measurement covariance order is [roll, pitch, yaw, x, y, z].
+    const int map_to_rpyxyz[6] = {3, 4, 5, 0, 1, 2};
+    for (int r = 0; r < 6; ++r) {
+        for (int c = 0; c < 6; ++c) {
+            (*covariance_rpyxyz)(r, c) = cov_xyzrpy(map_to_rpyxyz[r], map_to_rpyxyz[c]);
+        }
+    }
+    *covariance_rpyxyz = 0.5 * (*covariance_rpyxyz + covariance_rpyxyz->transpose());
+    LOG(INFO) << "[NDT_HESSIAN_COV] valid=1, diag_rpyxyz="
+              << covariance_rpyxyz->diagonal().transpose();
+    return covariance_rpyxyz->allFinite();
+}
+
+}  // namespace
 
 LidarLoc::LidarLoc(LidarLoc::Options options) : options_(options) {
     pcl_ndt_.reset(new NDTType());
@@ -299,6 +353,8 @@ bool LidarLoc::InitWithFP(CloudPtr input, const SE3& fp_pose) {
     if (loc_inited_) {
         //current_timestamp_ = math::ToSec(input->header.stamp);
         localization_result_.confidence_ = fitness_score;
+        localization_result_.pose_covariance_ = last_ndt_pose_covariance_;
+        localization_result_.has_pose_covariance_ = last_ndt_pose_covariance_valid_;
         current_abs_pose_ = pose_esti;
         localization_result_.pose_ = pose_esti;
         localization_result_.timestamp_ = current_timestamp_;
@@ -712,6 +768,8 @@ void LidarLoc::Align(const CloudPtr& input) {
         UL lock(result_mutex_);
         localization_result_.timestamp_ = current_timestamp_;
         localization_result_.confidence_ = fitness_score;
+        localization_result_.pose_covariance_ = last_ndt_pose_covariance_;
+        localization_result_.has_pose_covariance_ = last_ndt_pose_covariance_valid_;
         if (loc_success) {
             localization_result_.lidar_loc_valid_ = true;
             localization_result_.status_ = LocalizationStatus::GOOD;
@@ -835,6 +893,8 @@ bool LidarLoc::Localize(SE3& pose, double& confidence, CloudPtr input, CloudPtr 
     Eigen::Matrix4f trans;
     bool loc_success = false;
     Eigen::Matrix4f guess_pose = pose.matrix().cast<float>();
+    last_ndt_pose_covariance_valid_ = false;
+    last_ndt_pose_covariance_ = Eigen::Matrix<double, 6, 6>::Identity() * 1e3;
 
     //LOG(INFO) << "loc from: " << pose.translation().transpose();
 
@@ -856,6 +916,8 @@ bool LidarLoc::Localize(SE3& pose, double& confidence, CloudPtr input, CloudPtr 
     ndt->align(*output, guess_pose);
     trans = ndt->getFinalTransformation();
     confidence = ndt->getTransformationProbability();
+    last_ndt_pose_covariance_valid_ =
+        BuildNdtPoseCovarianceFromHessian(ndt->getHessionMatrix(), &last_ndt_pose_covariance_);
     /* 0615
     auto tgt = ndt->getInputTarget();
     if (!tgt->empty()) {

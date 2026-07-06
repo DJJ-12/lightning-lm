@@ -59,6 +59,7 @@ class LioSamMapping {
     Keyframe::Ptr GetKeyframe() const { return last_kf_; }
     std::vector<Keyframe::Ptr> GetAllKeyframes() const { return all_keyframes_; }
     NavState GetState() const { return state_; }
+    bool GetLastScanToMapCovariance(Eigen::Matrix<double, 6, 6>* covariance) const;
     // 0603 新增imu 外推
     NavState GetIMUState() const {
         std::lock_guard<std::mutex> lock(mtx_buffer_);
