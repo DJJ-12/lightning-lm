@@ -48,7 +48,6 @@ find_package(OpenCV REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
-find_package(rosidl_default_generators REQUIRED)
 
 # OMP
 find_package(OpenMP)
@@ -88,6 +87,8 @@ include_directories(
 
 include_directories(
         ${CMAKE_CURRENT_BINARY_DIR}/thirdparty/livox_ros_driver/rosidl_generator_cpp
+        ${CMAKE_CURRENT_BINARY_DIR}/thirdparty/livox_ros_driver/rosidl_generator_c
+        ${CMAKE_CURRENT_BINARY_DIR}/thirdparty/livox_ros_driver
 )
 
 include_directories(

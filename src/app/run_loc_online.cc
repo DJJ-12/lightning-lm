@@ -10,7 +10,6 @@
 #include "wrapper/ros_utils.h"
 
 DEFINE_string(config, "./config/default.yaml", "config file");
-DEFINE_string(map_path, "", "map path override");
 
 /// Run online localization.
 int main(int argc, char** argv) {
@@ -26,8 +25,8 @@ int main(int argc, char** argv) {
     LocSystem::Options opt;
     LocSystem loc(opt);
 
-    if (!loc.Init(FLAGS_config, FLAGS_map_path)) {
-        LOG(ERROR) << "failed to init loc";
+    if (!loc.Init(FLAGS_config)) {
+        LOG(ERROR) << "failed to init loc system";
         return -1;
     }
 

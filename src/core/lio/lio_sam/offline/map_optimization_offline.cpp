@@ -1117,7 +1117,7 @@ void mapOptimization::downsampleCurrentScan(){
             laserCloudSurfLastDSNum = laserCloudSurfLastDS->size();
         }
 
-        if (!isInSlamMode && onlineLimitOptimizationPoints)
+        if (isOnlineMapping && onlineLimitOptimizationPoints)
         {
             limitPointCloudUniform(laserCloudSurfLastDS, onlineMaxSurfOptimizationPoints);
             laserCloudSurfLastDSNum = laserCloudSurfLastDS->size();
@@ -1458,7 +1458,7 @@ void mapOptimization::scan2MapOptimization(){
             int finalCoeffNum = 0;
             Eigen::Affine3f lmAffine = priorAffine;
             const int maxIterations =
-                isInSlamMode ? maxOptimizationIterations : onlineMaxOptimizationIterations;
+                isOnlineMapping ? onlineMaxOptimizationIterations : maxOptimizationIterations;
 
             if (laserCloudCornerLastDSNum > edgeFeatureMinValidNum &&
                 laserCloudSurfLastDSNum > surfFeatureMinValidNum)

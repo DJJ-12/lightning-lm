@@ -220,7 +220,7 @@ public:
     // CPU Params
     int numberOfCores;
     double mappingProcessInterval;
-    bool isInSlamMode;
+    bool isOnlineMapping = false;
     int maxOptimizationIterations = 30;
     int onlineMaxOptimizationIterations = 10;
     bool onlineLimitOptimizationPoints = true;
@@ -331,8 +331,8 @@ public:
         get_parameter("numberOfCores", numberOfCores);
         declare_parameter("mappingProcessInterval", 0.1);
         get_parameter("mappingProcessInterval", mappingProcessInterval);
-        declare_parameter("isInSlamMode", true);
-        get_parameter("isInSlamMode", isInSlamMode);
+        declare_parameter("isOnlineMapping", false);
+        get_parameter("isOnlineMapping", isOnlineMapping);
         declare_parameter("maxOptimizationIterations", 30);
         get_parameter("maxOptimizationIterations", maxOptimizationIterations);
         declare_parameter("onlineMaxOptimizationIterations", 10);

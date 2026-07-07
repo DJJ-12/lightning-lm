@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.16)
 
 project(lightning)
 
@@ -47,48 +47,21 @@ find_package(tf2_eigen REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(OpenMP REQUIRED)
+find_package(lightning_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
-
-# msg 和 srv
-set(MY_MSG_FILES "")
-set(MSG_DIR ${PROJECT_SOURCE_DIR}/msg)
-file(GLOB_RECURSE MSG_FILES ${MSG_DIR}/*.msg)
-foreach (MSG_FILE ${MSG_FILES})
-    file(RELATIVE_PATH REL_PATH ${MSG_DIR} ${MSG_FILE})
-    list(APPEND MY_MSG_FILES ${PROJECT_SOURCE_DIR}:msg/${REL_PATH})
-endforeach ()
-
-set(MY_ACTION_FILES "")
-
-set(MY_SRV_FILES
-        ${PROJECT_SOURCE_DIR}:srv/SetLocation.srv
-)
-set(SRV_DIR ${PROJECT_SOURCE_DIR}/srv)
-file(GLOB_RECURSE SRV_FILES ${SRV_DIR}/*.srv)
-foreach (SRV_FILE ${SRV_FILES})
-    file(RELATIVE_PATH REL_PATH ${SRV_DIR} ${SRV_FILE})
-    if (NOT REL_PATH STREQUAL "SetLocation.srv")
-        list(APPEND MY_SRV_FILES ${PROJECT_SOURCE_DIR}:srv/${REL_PATH})
-    endif ()
-endforeach ()
-
-rosidl_generate_interfaces(${PROJECT_NAME}
-        ${MY_SRV_FILES}
-        ${MY_MSG_FILES}
-        ${MY_ACTION_FILES}
-        DEPENDENCIES std_msgs geometry_msgs sensor_msgs nav_msgs
-)
-
 include_directories(
-        ${CMAKE_CURRENT_BINARY_DIR}/rosidl_generator_cpp
 )
 
 install(DIRECTORY config
         DESTINATION lib/${PROJECT_NAME}/
 )
 
+# 首先构建 livox_ros_driver2 子项目
 add_subdirectory(thirdparty/livox_ros_driver)
+
+# 添加对 livox_interfaces2 的依赖
+ament_export_dependencies(rosidl_default_runtime)
 
 add_subdirectory(src)
 

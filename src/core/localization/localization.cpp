@@ -106,34 +106,6 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
         ui_->Init();
     }
 
-    if (yaml_node["localization"] && yaml_node["localization"]["initial_pose"]) {
-        const auto initial_pose = yaml_node["localization"]["initial_pose"];
-        if (initial_pose["use_initial_pose"] &&
-            initial_pose["use_initial_pose"].as<bool>()) {
-            const double x = initial_pose["x"] ? initial_pose["x"].as<double>() : 0.0;
-            const double y = initial_pose["y"] ? initial_pose["y"].as<double>() : 0.0;
-            const double z = initial_pose["z"] ? initial_pose["z"].as<double>() : 0.0;
-            const double roll = initial_pose["roll"] ? initial_pose["roll"].as<double>() : 0.0;
-            const double pitch = initial_pose["pitch"] ? initial_pose["pitch"].as<double>() : 0.0;
-            const double yaw = initial_pose["yaw"] ? initial_pose["yaw"].as<double>() : 0.0;
-
-            Eigen::AngleAxisd roll_angle(roll, Eigen::Vector3d::UnitX());
-            Eigen::AngleAxisd pitch_angle(pitch, Eigen::Vector3d::UnitY());
-            Eigen::AngleAxisd yaw_angle(yaw, Eigen::Vector3d::UnitZ());
-            pending_initial_pose_.setIdentity();
-            pending_initial_pose_.block<3, 3>(0, 0) =
-                (yaw_angle * pitch_angle * roll_angle).toRotationMatrix();
-            pending_initial_pose_.block<3, 1>(0, 3) = Eigen::Vector3d(x, y, z);
-            has_pending_initial_pose_ = true;
-            lidar_loc_inited_ = false;
-            init_in_progress_ = false;
-
-            LOG(INFO) << "initial pose loaded from yaml: "
-                      << x << ", " << y << ", " << z
-                      << ", rpy=" << roll << ", " << pitch << ", " << yaw;
-        }
-    }
-
     return true;
 }
 
@@ -310,6 +282,11 @@ void Localization::LidarLocProcCloud(const LocCloudFrame& frame) {
     res.pose_ = Matrix4dToSE3(pose);
     res.confidence_ = quality.transform_probability;
     res.status_ = reliable ? LocalizationStatus::GOOD : LocalizationStatus::FAIL;
+    res.reliable_ = quality.is_reliable;
+    res.tp_ = quality.transform_probability;
+    res.nvtl_ = quality.nearest_voxel_likelihood;
+    res.iterations_ = quality.iteration_num;
+    res.message_ = reliable ? "localization reliable" : "localization not reliable";
 
     PublishResult(res);
 }
@@ -364,6 +341,8 @@ bool Localization::TryInitializeWithCurrentCloud() {
     res.pose_ = Matrix4dToSE3(aligned_pose);
     res.confidence_ = 1.0;
     res.status_ = LocalizationStatus::GOOD;
+    res.reliable_ = true;
+    res.message_ = "localization initialized";
 
     PublishResult(res);
     return true;
@@ -444,6 +423,10 @@ void Localization::PublishResult(const LocalizationResult& result) {
         loc_state.data = static_cast<int>(result.status_);
         loc_state_callback_(loc_state);
     }
+
+    if (result_callback_) {
+        result_callback_(result);
+    }
 }
 
 SE3 Localization::Matrix4dToSE3(const Eigen::Matrix4d& pose) {
@@ -459,6 +442,15 @@ void Localization::SetTFCallback(Localization::TFCallback&& callback) {
 
 void Localization::SetLocStateCallback(Localization::LocStateCallback&& callback) {
     loc_state_callback_ = std::move(callback);
+}
+
+void Localization::SetResultCallback(Localization::ResultCallback&& callback) {
+    result_callback_ = std::move(callback);
+}
+
+LocalizationResult Localization::GetLatestResult() const {
+    UL lock_result(loc_result_mutex_);
+    return loc_result_;
 }
 
 }  // namespace lightning::loc

@@ -9,11 +9,9 @@
 
     <buildtool_depend>ament_cmake</buildtool_depend>
     
-    <buildtool_depend>rosidl_default_generators</buildtool_depend>
-    <exec_depend>rosidl_default_runtime</exec_depend>
-    
     <depend>scrubber_common</depend>
     <depend>agibot_robot</depend>
+    <depend>lightning_interfaces</depend>
     <depend>rclcpp</depend>
     <depend>std_msgs</depend>
     <depend>geometry_msgs</depend>
@@ -29,9 +27,6 @@
     <depend>message_filters</depend>
     <depend>visualization_msgs</depend>
     <depend>gtsam</depend>
-    
-    <member_of_group>rosidl_interface_packages</member_of_group>
-
     <test_depend>ament_lint_auto</test_depend>
     <test_depend>ament_lint_common</test_depend>
 

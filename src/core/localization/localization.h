@@ -47,9 +47,12 @@ class Localization {
 
     using TFCallback = std::function<void(const geometry_msgs::msg::TransformStamped& odom)>;
     using LocStateCallback = std::function<void(const std_msgs::msg::Int32& state)>;
+    using ResultCallback = std::function<void(const LocalizationResult& result)>;
 
     void SetTFCallback(TFCallback&& callback);
     void SetLocStateCallback(LocStateCallback&& callback);
+    void SetResultCallback(ResultCallback&& callback);
+    LocalizationResult GetLatestResult() const;
 
    private:
     struct LocCloudFrame {
@@ -92,10 +95,11 @@ class Localization {
     robot_localizer::QualityThresholds quality_thresholds_;
 
     LocalizationResult loc_result_;
-    std::mutex loc_result_mutex_;
+    mutable std::mutex loc_result_mutex_;
 
     TFCallback tf_callback_;
     LocStateCallback loc_state_callback_;
+    ResultCallback result_callback_;
     std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
 
     std::string base_link_frame_ = "base_link";

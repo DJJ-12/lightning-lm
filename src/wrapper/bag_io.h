@@ -6,7 +6,9 @@
 #define LIGHTNING_BAG_IO_H
 
 #include <functional>
+#include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 
 #include <nav_msgs/msg/odometry.hpp>
@@ -59,6 +61,7 @@ class RosbagIO {
      * @param sleep_usec 每调用一个回调后的等待时间
      */
     void Go(int sleep_usec = 0);
+    uint64_t CountMessagesFromMetadata(const std::set<std::string>& topics) const;
 
     /// 通用处理函数
     RosbagIO &AddHandle(const std::string &topic_name, MessageProcessFunction func) {

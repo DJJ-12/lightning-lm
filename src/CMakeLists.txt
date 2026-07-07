@@ -12,6 +12,8 @@ find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(GTSAM REQUIRED)
+find_package(lightning_interfaces REQUIRED)
+find_package(rosidl_default_runtime REQUIRED)
 
 include_directories(${PROJECT_SOURCE_DIR}/src/core/localization)
 
@@ -78,20 +80,23 @@ ament_target_dependencies(
         "tf2"
         "tf2_geometry_msgs"
         "tf2_eigen"
+        "lightning_interfaces"
+        "rosidl_default_runtime"
 )
 
-add_dependencies(${PROJECT_NAME}.libs
-        livox_interfaces2__rosidl_typesupport_cpp
-        ${PROJECT_NAME}__rosidl_typesupport_cpp
-)
+# 添加对 livox 消息类型支持的依赖
+if(TARGET livox_interfaces2__rosidl_typesupport_cpp)
+  target_link_libraries(${PROJECT_NAME}.libs livox_interfaces2__rosidl_typesupport_cpp)
+else()
+  get_property(livox_interfaces2_generated TARGET livox_interfaces2__rosidl_generator_cpp PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
+  target_include_directories(${PROJECT_NAME}.libs PUBLIC ${livox_interfaces2_generated})
+endif()
 
 target_link_libraries(${PROJECT_NAME}.libs
         ${third_party_libs}
         ${PCL_LIBRARIES}
         OpenMP::OpenMP_CXX
         gtsam
-        livox_interfaces2__rosidl_typesupport_cpp
-        ${PROJECT_NAME}__rosidl_typesupport_cpp
 )
 
 install(TARGETS ${PROJECT_NAME}.libs

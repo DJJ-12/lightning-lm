@@ -33,7 +33,6 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    slam.StartSLAM("new_map");
     slam.Spin();
 
     Timer::PrintAll();

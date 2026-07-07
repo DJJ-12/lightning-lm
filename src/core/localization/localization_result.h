@@ -1,6 +1,7 @@
 #pragma once
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <string>
 
 #include "common/eigen_types.h"
 #include "common/nav_state.h"
@@ -23,6 +24,11 @@ struct LocalizationResult {
     LocalizationStatus status_ = LocalizationStatus::UNKNOWN;
 
     double confidence_ = 0.0;
+    bool reliable_ = false;
+    double tp_ = 0.0;
+    double nvtl_ = 0.0;
+    int iterations_ = 0;
+    std::string message_;
 
     // map -> base_link
     SE3 pose_;

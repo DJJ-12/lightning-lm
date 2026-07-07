@@ -24,6 +24,7 @@
 #include <map>
 #include <opencv2/opencv.hpp>
 #include <sstream>
+#include <system_error>
 
 namespace lightning {
 
@@ -75,7 +76,11 @@ bool SlamSystem::Init(const std::string& yaml_path) {
     }
 
     if (use_lio_sam_) {
-        lio_sam_ = std::make_shared<LioSamMapping>();
+        LioSamMapping::Options lio_options;
+        lio_options.mapping_mode_ = options_.online_mode_
+            ? LioSamMapping::MappingRuntimeMode::ONLINE_MAPPING
+            : LioSamMapping::MappingRuntimeMode::OFFLINE_MAPPING;
+        lio_sam_ = std::make_shared<LioSamMapping>(lio_options);
         if (!lio_sam_->Init(yaml_path)) {
             LOG(ERROR) << "failed to init lio_sam_ module";
             return false;
@@ -152,9 +157,83 @@ bool SlamSystem::Init(const std::string& yaml_path) {
                 Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", true);
             });
 
-        savemap_service_ = node_->create_service<SaveMapService>(
-            "lightning/save_map", [this](const SaveMapService::Request::SharedPtr& req,
-                                         SaveMapService::Response::SharedPtr res) { SaveMap(req, res); });
+        start_mapping_srv_ = node_->create_service<StartMappingService>(
+            "/lightning/start_mapping",
+            [this](const StartMappingService::Request::SharedPtr request,
+                   StartMappingService::Response::SharedPtr response) {
+                if (running_.load()) {
+                    response->success = false;
+                    response->message = "mapping already running";
+                    return;
+                }
+
+                if (mapping_has_started_.load()) {
+                    response->success = false;
+                    response->message =
+                        "mapping already completed once; restart node to start a new map";
+                    return;
+                }
+
+                const std::string map_id =
+                    request->map_id.empty() ? "new_map" : request->map_id;
+                mapping_has_started_ = true;
+                StartSLAM(map_id);
+
+                response->success = true;
+                response->message = "mapping started: " + map_id;
+            });
+
+        finish_mapping_srv_ = node_->create_service<FinishMappingService>(
+            "/lightning/finish_mapping",
+            [this](const FinishMappingService::Request::SharedPtr request,
+                   FinishMappingService::Response::SharedPtr response) {
+                if (!running_.load()) {
+                    response->success = false;
+                    response->message = "mapping is not running";
+                    return;
+                }
+
+                running_ = false;
+
+                if (!request->save_map) {
+                    response->success = true;
+                    response->message = "mapping finished without saving";
+                    return;
+                }
+
+                const std::string save_path =
+                    request->save_path.empty()
+                        ? "./data/" + map_name_ + "/"
+                        : request->save_path;
+
+                std::lock_guard<std::mutex> lock(map_save_mutex_);
+                const bool ok = SaveMap(save_path);
+                response->success = ok;
+                response->message = ok
+                    ? "mapping finished and map saved: " + save_path
+                    : "mapping finished but failed to save map";
+            });
+
+        get_grid_map_srv_ = node_->create_service<GetGridMapService>(
+            "/lightning/get_grid_map",
+            [this](const GetGridMapService::Request::SharedPtr request,
+                   GetGridMapService::Response::SharedPtr response) {
+                (void)request;
+                if (!g2p5_) {
+                    response->success = false;
+                    response->message = "2D grid map is disabled";
+                    return;
+                }
+                auto map = g2p5_->GetNewestMap();
+                if (!map) {
+                    response->success = false;
+                    response->message = "2D grid map is empty";
+                    return;
+                }
+                response->map = map->ToROS();
+                response->success = true;
+                response->message = "ok";
+            });
 
         LOG(INFO) << "online slam node has been created.";
     }
@@ -169,20 +248,12 @@ SlamSystem::~SlamSystem() {
 }
 
 void SlamSystem::StartSLAM(std::string map_name) {
-    map_name_ = map_name;
+    map_name_ = map_name.empty() ? "new_map" : map_name;
+    cur_kf_ = nullptr;
     running_ = true;
 }
 
-void SlamSystem::SaveMap(const SaveMapService::Request::SharedPtr request,
-                         SaveMapService::Response::SharedPtr response) {
-    map_name_ = request->map_id;
-    std::string save_path = "./data/" + map_name_ + "/";
-
-    SaveMap(save_path);
-    response->response = 0;
-}
-
-void SlamSystem::SaveMap(const std::string& path) {
+bool SlamSystem::SaveMap(const std::string& path) {
     std::string save_path = path;
     if (save_path.empty()) {
         save_path = "./data/" + map_name_ + "/";
@@ -190,28 +261,39 @@ void SlamSystem::SaveMap(const std::string& path) {
 
     LOG(INFO) << "slam map saving to " << save_path;
 
-    if (!std::filesystem::exists(save_path)) {
-        std::filesystem::create_directories(save_path);
-    } else {
-        std::filesystem::remove_all(save_path);
-        std::filesystem::create_directories(save_path);
-    }
-
     if (use_lio_sam_) {
         lio_sam_->SyncOptimizedKeyframePoses();
     }
 
-    // auto global_map_no_loop = lio_->GetGlobalMap(true);
-    auto global_map = use_lio_sam_ ? lio_sam_->GetGlobalMap(true) : lio_->GetGlobalMap(true);
-    TiledMap::Options tm_options;
-    tm_options.map_path_ = save_path;
-
-    TiledMap tm(tm_options);
     std::vector<Keyframe::Ptr> keyframes = use_lio_sam_ ? lio_sam_->GetAllKeyframes() : lio_->GetAllKeyframes();
     if (keyframes.empty()) {
         LOG(WARNING) << "no keyframes, skip map saving";
-        return;
+        return false;
     }
+
+    // auto global_map_no_loop = lio_->GetGlobalMap(true);
+    auto global_map = use_lio_sam_ ? lio_sam_->GetGlobalMap(true) : lio_->GetGlobalMap(true);
+    if (!global_map || global_map->empty()) {
+        LOG(WARNING) << "global map is empty, skip map saving";
+        return false;
+    }
+
+    if (std::filesystem::exists(save_path)) {
+        std::filesystem::remove_all(save_path);
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(save_path, ec);
+    if (ec) {
+        LOG(ERROR) << "failed to create save path: " << save_path
+                   << ", error: " << ec.message();
+        return false;
+    }
+
+    TiledMap::Options tm_options;
+    tm_options.map_path_ = save_path;
+    TiledMap tm(tm_options);
+
     SE3 start_pose = keyframes.front()->GetLIOPose();
     tm.ConvertFromFullPCD(global_map, start_pose, save_path);
 
@@ -261,7 +343,7 @@ void SlamSystem::SaveMap(const std::string& path) {
         std::ofstream metadata_file(metadata_path);
         if (!metadata_file.is_open()) {
             LOG(ERROR) << "failed to open BlockMap metadata file: " << metadata_path;
-            return;
+            return false;
         }
 
         metadata_file << "x_resolution: " << block_resolution << "\n";
@@ -323,62 +405,68 @@ void SlamSystem::SaveMap(const std::string& path) {
     // pcl::io::savePCDFileBinaryCompressed(save_path + "/global_no_loop.pcd", *global_map_no_loop);
     // pcl::io::savePCDFileBinaryCompressed(save_path + "/global_raw.pcd", *global_map_raw);
 
-    if (options_.with_gridmap_) {
+    if (options_.with_gridmap_ && g2p5_) {
         /// 存为ROS兼容的模式
-        auto map = g2p5_->GetNewestMap()->ToROS();
-        const int width = map.info.width;
-        const int height = map.info.height;
+        auto newest_map = g2p5_->GetNewestMap();
+        if (!newest_map) {
+            LOG(WARNING) << "grid map is empty, skip saving 2D map";
+        } else {
+            auto map = newest_map->ToROS();
+            const int width = map.info.width;
+            const int height = map.info.height;
 
-        cv::Mat nav_image(height, width, CV_8UC1);
-        for (int y = 0; y < height; ++y) {
-            const int rowStartIndex = y * width;
-            for (int x = 0; x < width; ++x) {
-                const int index = rowStartIndex + x;
-                int8_t data = map.data[index];
-                if (data == 0) {                                   // Free
-                    nav_image.at<uchar>(height - 1 - y, x) = 255;  // White
-                } else if (data == 100) {                          // Occupied
-                    nav_image.at<uchar>(height - 1 - y, x) = 0;    // Black
-                } else {                                           // Unknown
-                    nav_image.at<uchar>(height - 1 - y, x) = 128;  // Gray
+            cv::Mat nav_image(height, width, CV_8UC1);
+            for (int y = 0; y < height; ++y) {
+                const int rowStartIndex = y * width;
+                for (int x = 0; x < width; ++x) {
+                    const int index = rowStartIndex + x;
+                    int8_t data = map.data[index];
+                    if (data == 0) {                                   // Free
+                        nav_image.at<uchar>(height - 1 - y, x) = 255;  // White
+                    } else if (data == 100) {                          // Occupied
+                        nav_image.at<uchar>(height - 1 - y, x) = 0;    // Black
+                    } else {                                           // Unknown
+                        nav_image.at<uchar>(height - 1 - y, x) = 128;  // Gray
+                    }
                 }
             }
-        }
 
-        cv::imwrite(save_path + "/map.pgm", nav_image);
+            cv::imwrite(save_path + "/map.pgm", nav_image);
 
-        /// yaml
-        std::ofstream yamlFile(save_path + "/map.yaml");
-        if (!yamlFile.is_open()) {
-            LOG(ERROR) << "failed to write map.yaml";
-            return;  // 文件打开失败
-        }
+            /// yaml
+            std::ofstream yamlFile(save_path + "/map.yaml");
+            if (!yamlFile.is_open()) {
+                LOG(ERROR) << "failed to write map.yaml";
+                return false;
+            }
 
-        try {
-            YAML::Emitter emitter;
-            emitter << YAML::BeginMap;
-            emitter << YAML::Key << "image" << YAML::Value << "map.pgm";
-            emitter << YAML::Key << "mode" << YAML::Value << "trinary";
-            emitter << YAML::Key << "width" << YAML::Value << map.info.width;
-            emitter << YAML::Key << "height" << YAML::Value << map.info.height;
-            emitter << YAML::Key << "resolution" << YAML::Value << float(0.05);
-            std::vector<double> orig{map.info.origin.position.x, map.info.origin.position.y, 0};
-            emitter << YAML::Key << "origin" << YAML::Value << orig;
-            emitter << YAML::Key << "negate" << YAML::Value << 0;
-            emitter << YAML::Key << "occupied_thresh" << YAML::Value << 0.65;
-            emitter << YAML::Key << "free_thresh" << YAML::Value << 0.25;
+            try {
+                YAML::Emitter emitter;
+                emitter << YAML::BeginMap;
+                emitter << YAML::Key << "image" << YAML::Value << "map.pgm";
+                emitter << YAML::Key << "mode" << YAML::Value << "trinary";
+                emitter << YAML::Key << "width" << YAML::Value << map.info.width;
+                emitter << YAML::Key << "height" << YAML::Value << map.info.height;
+                emitter << YAML::Key << "resolution" << YAML::Value << float(0.05);
+                std::vector<double> orig{map.info.origin.position.x, map.info.origin.position.y, 0};
+                emitter << YAML::Key << "origin" << YAML::Value << orig;
+                emitter << YAML::Key << "negate" << YAML::Value << 0;
+                emitter << YAML::Key << "occupied_thresh" << YAML::Value << 0.65;
+                emitter << YAML::Key << "free_thresh" << YAML::Value << 0.25;
 
-            emitter << YAML::EndMap;
+                emitter << YAML::EndMap;
 
-            yamlFile << emitter.c_str();
-            yamlFile.close();
-        } catch (...) {
-            yamlFile.close();
-            return;
+                yamlFile << emitter.c_str();
+                yamlFile.close();
+            } catch (...) {
+                yamlFile.close();
+                return false;
+            }
         }
     }
 
-    LOG(INFO) << "map saved";
+    LOG(INFO) << "map saved to: " << save_path;
+    return true;
 }
 
 void SlamSystem::ProcessIMU(const sensor_msgs::msg::Imu::SharedPtr& imu) {

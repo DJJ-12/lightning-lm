@@ -79,12 +79,6 @@ bool LioSamMapping::Init(const std::string& config_yaml) {
         owns_rclcpp_context_ = true;
     }
 
-    ESKF::Options eskf_options;
-    eskf_options.max_iterations_ = 0;
-    eskf_options.epsi_ = ESKF::StateVecType::Zero();
-    eskf_options.use_aa_ = false;
-    kf_imu_.Init(eskf_options);
-
     frontend_cloud_info_ = std::make_unique<::LioSamCloudInfo>();
     deskew_feature_extractor_ = std::make_unique<::DeskewFeatureExtractor>(node_options_);
     map_optimization_ = std::make_unique<::mapOptimization>(node_options_);
@@ -142,10 +136,7 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
         SetParamOverride(overrides, "rotation_tollerance", params["rotation_tollerance"].as<double>());
         SetParamOverride(overrides, "numberOfCores", params["numberOfCores"].as<int>());
         SetParamOverride(overrides, "mappingProcessInterval", params["mappingProcessInterval"].as<double>());
-        if (!options_.is_in_slam_mode_) {
-            SetParamOverride(overrides, "mappingProcessInterval", 0.0);
-        }
-        SetParamOverride(overrides, "isInSlamMode", options_.is_in_slam_mode_);
+        SetParamOverride(overrides, "isOnlineMapping", IsOnlineMapping());
         SetParamOverride(overrides, "maxOptimizationIterations",
                          params["maxOptimizationIterations"]
                              ? params["maxOptimizationIterations"].as<int>()
@@ -175,26 +166,13 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
         SetParamOverride(overrides, "surroundingKeyframeDensity", common["surroundingKeyframeDensity"].as<double>());
         SetParamOverride(overrides, "surroundingKeyframeSearchRadius",
                          common["surroundingKeyframeSearchRadius"].as<double>());
-        SetParamOverride(overrides, "loopClosureEnableFlag",
-                         options_.is_in_slam_mode_ && params["loopClosureEnableFlag"].as<bool>());
+        SetParamOverride(overrides, "loopClosureEnableFlag", params["loopClosureEnableFlag"].as<bool>());
         SetParamOverride(overrides, "surroundingKeyframeSize", params["surroundingKeyframeSize"].as<int>());
         SetParamOverride(overrides, "historyKeyframeSearchRadius", params["historyKeyframeSearchRadius"].as<double>());
         SetParamOverride(overrides, "historyKeyframeSearchTimeDiff",
                          params["historyKeyframeSearchTimeDiff"].as<double>());
         SetParamOverride(overrides, "historyKeyframeSearchNum", params["historyKeyframeSearchNum"].as<int>());
         SetParamOverride(overrides, "historyKeyframeFitnessScore", params["historyKeyframeFitnessScore"].as<double>());
-        // LIO-SAM does not own LaserMapping::p_imu_, so build the ESKF
-        // prediction noise matrix from the same common IMU noise parameters.
-        float gyr_cov = common["imuGyrNoise"].as<float>();
-        float acc_cov = common["imuAccNoise"].as<float>();
-        float b_gyr_cov = common["imuGyrBiasN"].as<float>();
-        float b_acc_cov = common["imuAccBiasN"].as<float>();
-
-        imu_Q_.setZero();
-        imu_Q_.block<3, 3>(0, 0).diagonal() = Vec3d(gyr_cov, gyr_cov, gyr_cov);
-        imu_Q_.block<3, 3>(3, 3).diagonal() = Vec3d(acc_cov, acc_cov, acc_cov);
-        imu_Q_.block<3, 3>(6, 6).diagonal() = Vec3d(b_gyr_cov, b_gyr_cov, b_gyr_cov);
-        imu_Q_.block<3, 3>(9, 9).diagonal() = Vec3d(b_acc_cov, b_acc_cov, b_acc_cov);
         node_options_ = rclcpp::NodeOptions();
         node_options_.use_intra_process_comms(true);
         node_options_.parameter_overrides(overrides);
@@ -222,73 +200,11 @@ void LioSamMapping::ProcessIMU(const IMUPtr& input) {
     std::lock_guard<std::mutex> lock(mtx_buffer_);
     if (timestamp < last_timestamp_imu_) {
         LOG(WARNING) << "lio-sam imu loop back, clear buffer";
-
-        // LIO-SAM 原始 IMU buffer
         imu_buffer_.clear();
-
-        // 新增 DR buffer
-        imu_dr_buffer_.clear();
-
-        // DR 状态重新初始化
-        imu_dr_inited_ = false;
-        imu_mean_ready_ = false;
-        imu_init_count_ = 0;
-        imu_mean_acc_.setZero();
-        imu_mean_gyr_.setZero();
-        last_dr_imu_time_ = -1.0;
     }
 
     last_timestamp_imu_ = timestamp;
     imu_buffer_.push_back(imu);
-    // 0603新增imu外推
-    // 3. 给新增 ESKF / DR 高频预测使用
-    imu_dr_buffer_.push_back(input);
-    while (imu_dr_buffer_.size() > 2000) {
-        imu_dr_buffer_.pop_front();
-    }
-    // 4. 初始化阶段统计 IMU 均值，用于第一次设置 gravity / gyro bias
-    if (!imu_mean_ready_) {
-        imu_init_count_++;
-
-        if (imu_init_count_ == 1) {
-            imu_mean_acc_ = input->linear_acceleration;
-            imu_mean_gyr_ = input->angular_velocity;
-        } else {
-            imu_mean_acc_ += (input->linear_acceleration - imu_mean_acc_) / static_cast<double>(imu_init_count_);
-            imu_mean_gyr_ += (input->angular_velocity - imu_mean_gyr_) / static_cast<double>(imu_init_count_);
-        }
-
-        if (imu_init_count_ >= imu_init_min_count_) {
-            imu_mean_ready_ = true;
-        }
-    }
-
-    // 5. 高频 DR 预测：只有 LIO-SAM Run() 成功锚定过 kf_imu_ 后才允许 Predict
-    if (!imu_dr_inited_ || last_dr_imu_time_ <= 0.0) {
-        return;
-    }
-
-    const double dt = timestamp - last_dr_imu_time_;
-
-    if (dt <= 0.0) {
-        return;
-    }
-
-    if (dt > 0.1) {
-        imu_dr_inited_ = false;
-        last_dr_imu_time_ = -1.0;
-        return;
-    }
-
-    kf_imu_.Predict(dt,
-                    imu_Q_,
-                    input->angular_velocity,
-                    input->linear_acceleration);
-
-    // Predict() 已经更新 x_，这里不再 ChangeX()。
-    // 只显式更新时间，保证关键帧时间戳正确。
-    kf_imu_.SetTime(timestamp);
-    last_dr_imu_time_ = timestamp;
 }
 
 void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
@@ -344,18 +260,6 @@ void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
         lidar_pushed_ = false;
 
     }
-    //为了在线定位，不积攒旧帧，只处理最新的帧
-    // 只在 run_loc_online 这类在线定位模式丢旧雷达。
-    // run_loc_offline 离线定位不能丢，否则离线评估/回放不完整。
-    // run_slam_offline 建图也不能丢。
-    if (options_.online_mode_ && !options_.is_in_slam_mode_) {
-        lidar_buffer_.clear();
-        time_buffer_.clear();
-        scan_duration_buffer_.clear();
-        frame_id_buffer_.clear();
-        lidar_pushed_ = false;
-    }
-
     last_timestamp_lidar_ = timestamp;
     lidar_buffer_.push_back(frontend_cloud);
     time_buffer_.push_back(timestamp);
@@ -441,7 +345,7 @@ bool LioSamMapping::SyncPackages() {
     return true;
 }
 
-bool LioSamMapping::Run(bool need_output_cloud) {
+bool LioSamMapping::Run() {
     if (!map_optimization_ || !frontend_cloud_info_ || !deskew_feature_extractor_) {
         return false;
     }
@@ -457,16 +361,14 @@ bool LioSamMapping::Run(bool need_output_cloud) {
             measures_.lidar_begin_time,
             measures_.lidar_end_time,
             measures_.frame_id,
-            need_output_cloud,
+            true,
             cloud_info)) {
         return false;
     }
 
-    // Match the supplied native LIO-SAM imageProjection.cpp behavior for mapping:
-    // initial_guess_* may exist in CloudInfo, but odom_available is false, so
-    // mapOptimization::updateInitialGuess() uses only IMU rotation increment.
-    // The lightning ESKF/DR state is kept for high-frequency external state/UI,
-    // but it must not act as native imuPreintegration odometry for offline mapping.
+    // No external ESKF/DR odometry is used here.
+    // This matches native LIO-SAM mapping behavior: updateInitialGuess()
+    // uses IMU rotation increment when odom_available is false.
     cloud_info.odom_available = false;
     cloud_info.initial_guess_x = 0.0f;
     cloud_info.initial_guess_y = 0.0f;
@@ -479,113 +381,31 @@ bool LioSamMapping::Run(bool need_output_cloud) {
         return false;
     }
 
-    if (!options_.is_in_slam_mode_ && map_optimization_->CreatedNewKeyframe()) {
-        map_optimization_->ClearCreatedNewKeyframe();
-    }
-
     const float* transform = map_optimization_->TransformTobeMapped();
     state_.timestamp_ = measures_.lidar_end_time;
     state_.pos_ = Vec3d(transform[3], transform[4], transform[5]);
     state_.rot_ = RpyToSO3(transform[0], transform[1], transform[2]);
     state_.pose_is_ok_ = map_optimization_->mappingPoseReliable;
     state_.lidar_odom_reliable_ = map_optimization_->mappingPoseReliable;
-    //0603 imu外推,高频发布
-    if (state_.pose_is_ok_) {
-        std::lock_guard<std::mutex> lock(mtx_buffer_);
-        NavState x;
 
-        if (imu_dr_inited_) {
-            x = kf_imu_.GetX();
-        } else {
-            x = NavState();
-
-            if (imu_mean_ready_ && imu_mean_acc_.norm() > 1e-3) {
-                x.grav_ = -imu_mean_acc_ / imu_mean_acc_.norm() * 9.81;
-                x.bg_ = imu_mean_gyr_;
-            } else {
-                x.grav_ = Vec3d(0.0, 0.0, -9.81);
-                x.bg_ = Vec3d::Zero();
-            }
-
-            x.vel_ = Vec3d::Zero();
-        }
-
-        // LIO-SAM 只给 pose，不给速度。
-        // 所以速度用相邻 LIO-SAM pose 估一个，作为 IMU 外推初值。
-        if (last_lio_anchor_time_ > 0.0) {
-            const double dt_lio = state_.timestamp_ - last_lio_anchor_time_;
-            if (dt_lio > 0.02 && dt_lio < 1.0) {
-                Vec3d v_lio = (state_.pos_ - last_lio_anchor_pos_) / dt_lio;
-                if (v_lio.norm() < 5.0) {
-                    x.vel_ = v_lio;
-                }
-            }
-        }
-
-        // 用 LIO-SAM 低频优化位姿重置 DR 锚点
-        x.timestamp_ = state_.timestamp_;
-        x.pos_ = state_.pos_;
-        x.rot_ = state_.rot_;
-        x.pose_is_ok_ = true;
-        x.lidar_odom_reliable_ = state_.lidar_odom_reliable_;
-
-        kf_imu_.ChangeX(x);
-        kf_imu_.ChangeP(ESKF::CovType::Identity()); // 0616 日志出现eskf.cc:27 find nan or inf in P: inf
-        kf_imu_.SetTime(state_.timestamp_);
-
-        imu_dr_inited_ = true;
-        last_dr_imu_time_ = state_.timestamp_;
-        last_lio_anchor_time_ = state_.timestamp_;
-        last_lio_anchor_pos_ = state_.pos_;
-
-        // replay scan end 之后已经收到的 IMU，把 kf_imu_ 追到最新 IMU 时刻
-        double t = state_.timestamp_;
-        for (const auto& imu_ptr : imu_dr_buffer_) {
-            if (imu_ptr->timestamp <= t) {
-                continue;
-            }
-
-            const double dt = imu_ptr->timestamp - t;
-            if (dt <= 0.0) {
-                continue;
-            }
-            if (dt > 0.1) {
-                break;
-            }
-
-            kf_imu_.Predict(dt, imu_Q_, imu_ptr->angular_velocity, imu_ptr->linear_acceleration);
-            t = imu_ptr->timestamp;
-        }
-
-        kf_imu_.SetTime(t);
-        last_dr_imu_time_ = t;
-
-    }
-
-    if (need_output_cloud) {
-        scan_undistort_.reset(new PointCloudType(*cloud_info.cloud_deskewed));
-
+    scan_undistort_ = cloud_info.cloud_deskewed;
+    if (scan_undistort_) {
         scan_undistort_->header.stamp = static_cast<std::uint64_t>(std::llround(state_.timestamp_ * 1e9));
         scan_undistort_->header.frame_id = measures_.frame_id;
         scan_undistort_->height = 1;
         scan_undistort_->width = scan_undistort_->size();
         scan_undistort_->is_dense = true;
-        recent_cloud_ = scan_undistort_;
-    } else {
-        scan_undistort_.reset();
-        recent_cloud_.reset();
     }
+    recent_cloud_ = scan_undistort_;
 
     if (ui_) {
         ui_->UpdateNavState(state_);
-        if (need_output_cloud && scan_undistort_) {
+        if (scan_undistort_) {
             ui_->UpdateScan(scan_undistort_, state_.GetPose());
         }
     }
 
-    if (options_.is_in_slam_mode_) {
-        MakeLightningKeyframeIfNeeded();
-    }
+    MakeLightningKeyframeIfNeeded();
     return true;
 }
 

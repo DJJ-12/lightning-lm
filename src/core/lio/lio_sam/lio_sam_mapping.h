@@ -2,8 +2,8 @@
 #define LIGHTNING_LIO_SAM_MAPPING_H
 
 #include <deque>
-#include <cmath>
 #include <cstdint>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -18,7 +18,6 @@
 #include "common/imu.h"
 #include "common/nav_state.h"
 #include "common/options.h"
-#include "core/lio/eskf.hpp"
 
 struct LioSamCloudInfo;
 
@@ -33,13 +32,13 @@ class PangolinWindow;
 
 class LioSamMapping {
    public:
-    struct Options {
-        Options() : is_in_slam_mode_(true),online_mode_(false), kf_dis_th_(2.0), kf_angle_th_(15.0 * M_PI / 180.0) {}
+    enum class MappingRuntimeMode {
+        OFFLINE_MAPPING = 0,
+        ONLINE_MAPPING = 1
+    };
 
-        bool is_in_slam_mode_;
-        bool online_mode_;
-        double kf_dis_th_;
-        double kf_angle_th_;
+    struct Options {
+        MappingRuntimeMode mapping_mode_ = MappingRuntimeMode::OFFLINE_MAPPING;
     };
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -49,7 +48,7 @@ class LioSamMapping {
     ~LioSamMapping();
 
     bool Init(const std::string& config_yaml);
-    bool Run(bool need_output_cloud = true);
+    bool Run();
 
     void ProcessIMU(const IMUPtr& imu);
     void ProcessPointCloud2(CloudPtr cloud);
@@ -59,19 +58,6 @@ class LioSamMapping {
     Keyframe::Ptr GetKeyframe() const { return last_kf_; }
     std::vector<Keyframe::Ptr> GetAllKeyframes() const { return all_keyframes_; }
     NavState GetState() const { return state_; }
-    // 0603 新增imu 外推
-    NavState GetIMUState() const {
-        std::lock_guard<std::mutex> lock(mtx_buffer_);
-        if (!imu_dr_inited_) {
-            NavState s;
-            s.pose_is_ok_ = false;
-            return s;
-        }
-
-        NavState s = kf_imu_.GetX();
-        s.pose_is_ok_ = true;
-        return s;
-    }
 
     CloudPtr GetScanUndist() const {
         if (!recent_cloud_) {
@@ -112,6 +98,12 @@ class LioSamMapping {
     bool SyncPackages();
     bool MakeLightningKeyframeIfNeeded();
     void SyncLightningKeyframePoses();
+    bool IsOnlineMapping() const {
+        return options_.mapping_mode_ == MappingRuntimeMode::ONLINE_MAPPING;
+    }
+    bool IsOfflineMapping() const {
+        return options_.mapping_mode_ == MappingRuntimeMode::OFFLINE_MAPPING;
+    }
 
     Options options_;
     rclcpp::NodeOptions node_options_;
@@ -127,26 +119,6 @@ class LioSamMapping {
     std::deque<double> scan_duration_buffer_;
     std::deque<std::string> frame_id_buffer_;
     std::deque<sensor_msgs::msg::Imu> imu_buffer_;
-
-    //0603新增imu 预测
-    // LIO-SAM 内部 IMU/DR 状态
-    ESKF kf_imu_;
-    ESKF::ProcessNoiseType imu_Q_ = ESKF::ProcessNoiseType::Zero();
-
-    bool imu_dr_inited_ = false;
-    bool imu_mean_ready_ = false;
-
-    int imu_init_count_ = 0;
-    int imu_init_min_count_ = 100;
-
-    Vec3d imu_mean_acc_ = Vec3d::Zero();
-    Vec3d imu_mean_gyr_ = Vec3d::Zero();
-
-    double last_dr_imu_time_ = -1.0;
-    double last_lio_anchor_time_ = -1.0;
-    Vec3d last_lio_anchor_pos_ = Vec3d::Zero();
-    //给 ESKF::Predict() 用的 lightning 原始 IMUPtr。
-    std::deque<IMUPtr> imu_dr_buffer_;
 
     SyncedPackage measures_;
     CloudPtr scan_undistort_{new PointCloudType()};

@@ -5,12 +5,17 @@
 #ifndef LIGHTNING_SLAM_H
 #define LIGHTNING_SLAM_H
 
+#include <atomic>
+#include <mutex>
 #include <rclcpp/rclcpp.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <string>
 
-#include "lightning/srv/save_map.hpp"
+#include "lightning_interfaces/srv/finish_mapping.hpp"
+#include "lightning_interfaces/srv/get_grid_map.hpp"
+#include "lightning_interfaces/srv/start_mapping.hpp"
 #include "livox_ros_driver2/msg/custom_msg.hpp"
 
 #include "common/eigen_types.h"
@@ -49,7 +54,9 @@ class SlamSystem {
         bool step_on_kf_ = true;  // 是否在关键帧处暂停p
     };
 
-    using SaveMapService = srv::SaveMap;
+    using StartMappingService = lightning_interfaces::srv::StartMapping;
+    using FinishMappingService = lightning_interfaces::srv::FinishMapping;
+    using GetGridMapService = lightning_interfaces::srv::GetGridMap;
 
     SlamSystem(Options options);
     ~SlamSystem();
@@ -62,7 +69,7 @@ class SlamSystem {
     void StartSLAM(std::string map_name);
 
     /// 保存地图，默认保存至./data/地图名/ 下方
-    void SaveMap(const std::string& path = "");
+    bool SaveMap(const std::string& path = "");
 
     /// 处理IMU
     void ProcessIMU(const sensor_msgs::msg::Imu::SharedPtr& imu);
@@ -76,15 +83,16 @@ class SlamSystem {
     void Spin();
 
    private:
-    /// ros端保存地图的实现
-    void SaveMap(const SaveMapService::Request::SharedPtr request, SaveMapService::Response::SharedPtr response);
-
     Options options_;
     std::atomic_bool running_ = false;
+    std::atomic_bool mapping_has_started_{false};
     bool use_lio_sam_ = false;
     SE3 T_base_lidar_ = SE3();
 
-    rclcpp::Service<SaveMapService>::SharedPtr savemap_service_ = nullptr;
+    rclcpp::Service<StartMappingService>::SharedPtr start_mapping_srv_ = nullptr;
+    rclcpp::Service<FinishMappingService>::SharedPtr finish_mapping_srv_ = nullptr;
+    rclcpp::Service<GetGridMapService>::SharedPtr get_grid_map_srv_ = nullptr;
+    std::mutex map_save_mutex_;
 
     std::string map_name_;  // 地图名
     std::string base_link_frame_ = "base_link";
