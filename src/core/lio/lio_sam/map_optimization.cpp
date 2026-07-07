@@ -1,4 +1,4 @@
-#include "core/lio/lio_sam/offline/map_optimization_offline.h"
+#include "core/lio/lio_sam/map_optimization.h"
 
 mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamServer("lio_sam_mapOptimization", options){
         cout << "------------build version - 20260516-1739 -------------------\n" << endl;

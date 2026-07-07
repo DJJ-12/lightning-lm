@@ -29,8 +29,8 @@ add_library(${PROJECT_NAME}.libs SHARED
         core/lio/eskf.cc
         core/lio/laser_mapping.cc
         core/lio/lio_sam/lio_sam_mapping.cc
-        core/lio/lio_sam/offline/deskew_feature_extractor.cpp
-        core/lio/lio_sam/offline/map_optimization_offline.cpp
+        core/lio/lio_sam/deskew_feature_extractor.cpp
+        core/lio/lio_sam/map_optimization.cpp
         core/lio/pointcloud_preprocess.cc
 
         core/g2p5/g2p5_map.cc

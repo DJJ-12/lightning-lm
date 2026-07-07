@@ -15,8 +15,8 @@
 #include "core/lightning_math.hpp"
 #include "wrapper/ros_utils.h"
 
-#include "core/lio/lio_sam/offline/deskew_feature_extractor.h"
-#include "core/lio/lio_sam/offline/map_optimization_offline.h"
+#include "core/lio/lio_sam/deskew_feature_extractor.h"
+#include "core/lio/lio_sam/map_optimization.h"
 
 namespace {
 

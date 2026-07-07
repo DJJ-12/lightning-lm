@@ -747,7 +747,7 @@ RTK 应作为 keyframe-level position factor，而不是作为前端强先验。
 
 ```text
 deskew_feature_extractor.h / .cc
-map_optimization_offline.h / .cc
+map_optimization.h / .cpp
 ```
 
 ---

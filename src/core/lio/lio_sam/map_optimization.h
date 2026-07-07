@@ -1,6 +1,6 @@
 #pragma once
 
-#include "utility_offline.hpp"
+#include "core/lio/lio_sam/utility.hpp"
 
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/geometry/Pose3.h>

@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "core/lio/lio_sam/offline/utility_offline.hpp"
+#include "core/lio/lio_sam/utility.hpp"
 
 class DeskewFeatureExtractor : public ParamServer
 {
