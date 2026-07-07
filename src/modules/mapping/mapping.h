@@ -1,0 +1,78 @@
+#pragma once
+
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <livox_ros_driver2/msg/custom_msg.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+
+#include "common/eigen_types.h"
+#include "common/imu.h"
+#include "common/keyframe.h"
+#include "common/point_def.h"
+
+namespace lightning {
+class LaserMapping;
+class LioSamMapping;
+class PointCloudPreprocess;
+namespace ui { class PangolinWindow; }
+namespace g2p5 { class G2P5; }
+namespace modules {
+
+struct MappingOptions {
+    bool online_input = false;
+    bool with_ui = false;
+    bool with_2dui = false;
+    bool with_gridmap = false;
+    bool step_on_kf = false;
+};
+
+struct MappingResult {
+    bool valid = false;
+    std::vector<Keyframe::Ptr> keyframes;
+    CloudPtr global_map;
+    std::shared_ptr<nav_msgs::msg::OccupancyGrid> grid_map;
+};
+
+class Mapping {
+   public:
+    Mapping() = default;
+    ~Mapping();
+
+    bool Init(const std::string& yaml_path, const MappingOptions& options);
+    bool Start();
+    void Stop();
+    void Reset();
+
+    void ProcessIMU(const sensor_msgs::msg::Imu::SharedPtr& imu);
+    void ProcessIMU(const IMUPtr& imu);
+    void ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud);
+    void ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud);
+
+    MappingResult GetResult();
+
+   private:
+    bool BuildInputCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud, CloudPtr& input);
+    bool BuildInputCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud, CloudPtr& input);
+    void HandleProcessedKeyframe(const Keyframe::Ptr& kf);
+
+    MappingOptions options_;
+    bool running_ = false;
+    bool use_lio_sam_ = false;
+    std::string yaml_path_;
+    std::string base_link_frame_ = "base_link";
+    SE3 T_base_lidar_ = SE3();
+
+    std::shared_ptr<PointCloudPreprocess> preprocess_;
+    std::shared_ptr<LioSamMapping> lio_sam_;
+    std::shared_ptr<LaserMapping> lio_;
+    std::shared_ptr<ui::PangolinWindow> ui_;
+    std::shared_ptr<g2p5::G2P5> g2p5_;
+    Keyframe::Ptr cur_kf_;
+};
+
+}  // namespace modules
+}  // namespace lightning

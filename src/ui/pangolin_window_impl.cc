@@ -431,7 +431,6 @@ void PangolinWindowImpl::Render() {
 
     // unset the current context from the main thread
     pangolin::GetBoundWindow()->RemoveCurrent();
-    pangolin::DestroyWindow(GetWindowName());
 }
 
 std::string PangolinWindowImpl::GetWindowName() const { return win_name_; }

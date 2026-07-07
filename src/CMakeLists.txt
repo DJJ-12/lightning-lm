@@ -63,6 +63,17 @@ add_library(${PROJECT_NAME}.libs SHARED
         core/system/loc_system.cc
 
         wrapper/bag_io.cc
+
+        runtime/mode.cc
+        runtime/task.cc
+        runtime/topic_input.cc
+        runtime/bag_input.cc
+        runtime/lightning.cc
+        runtime/service.cc
+
+        modules/mapping/mapping.cc
+        modules/mapping/save_map.cc
+        modules/localization/localization.cc
 )
 
 ament_target_dependencies(

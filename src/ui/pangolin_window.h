@@ -3,7 +3,7 @@
 #include <map>
 #include <memory>
 #include <queue>
-
+#include <atomic>
 #include "common/eigen_types.h"
 #include "common/keyframe.h"
 #include "common/loop_candidate.h"
@@ -64,5 +64,6 @@ class PangolinWindow {
 
    private:
     std::shared_ptr<PangolinWindowImpl> impl_ = nullptr;
+    std::atomic_bool closed_{false};
 };
 }  // namespace lightning::ui

@@ -6,6 +6,7 @@ PangolinWindow::PangolinWindow() { impl_ = std::make_shared<PangolinWindowImpl>(
 PangolinWindow::~PangolinWindow() { Quit(); }
 
 bool PangolinWindow::Init() {
+    closed_.store(false);
     impl_->cloud_global_need_update_.store(false);
     impl_->kf_result_need_update_.store(false);
     impl_->lidarloc_need_update_.store(false);
@@ -22,9 +23,17 @@ bool PangolinWindow::Init() {
 void PangolinWindow::Reset(const std::vector<Keyframe::Ptr>& keyframes) { impl_->Reset(keyframes); }
 
 void PangolinWindow::Quit() {
+    // 防止重复 Quit
+    if (closed_.exchange(true)) {
+        return;
+    }
+    impl_->exit_flag_.store(true);
     if (impl_->render_thread_.joinable()) {
-        impl_->exit_flag_.store(true);
-        impl_->render_thread_.join();
+        if (impl_->render_thread_.get_id() != std::this_thread::get_id()) {
+            impl_->render_thread_.join();
+        } else {
+            impl_->render_thread_.detach();
+        }
     }
     impl_->DeInit();
 }

@@ -1,0 +1,290 @@
+#include "modules/mapping/mapping.h"
+
+#include <glog/logging.h>
+#include <pcl/common/transforms.h>
+#include <yaml-cpp/yaml.h>
+
+#include "core/g2p5/g2p5.h"
+#include "core/lio/laser_mapping.h"
+#include "core/lio/lio_sam/lio_sam_mapping.h"
+#include "core/lio/pointcloud_preprocess.h"
+#include "core/lightning_math.hpp"
+#include "ui/pangolin_window.h"
+#include "wrapper/ros_utils.h"
+
+namespace lightning::modules {
+
+Mapping::~Mapping() {
+    Reset();
+}
+
+bool Mapping::Init(const std::string& yaml_path, const MappingOptions& options) {
+    Reset();
+    yaml_path_ = yaml_path;
+    options_ = options;
+
+    YAML::Node yaml = YAML::LoadFile(yaml_path);
+    std::string frontend = "laser_mapping";
+    if (yaml["system"] && yaml["system"]["frontend"]) {
+        frontend = yaml["system"]["frontend"].as<std::string>();
+    }
+    use_lio_sam_ = frontend == "lio_sam" || frontend == "liosam";
+
+    if (yaml["system"]) {
+        if (yaml["system"]["with_ui"]) options_.with_ui = yaml["system"]["with_ui"].as<bool>();
+        if (yaml["system"]["with_2dui"]) options_.with_2dui = yaml["system"]["with_2dui"].as<bool>();
+        if (yaml["system"]["with_g2p5"]) options_.with_gridmap = yaml["system"]["with_g2p5"].as<bool>();
+        if (yaml["system"]["step_on_kf"]) options_.step_on_kf = yaml["system"]["step_on_kf"].as<bool>();
+    }
+    if (yaml["common"] && yaml["common"]["base_link_frame"]) {
+        base_link_frame_ = yaml["common"]["base_link_frame"].as<std::string>();
+    }
+
+    std::vector<double> base_lidar_t{0.0, 0.0, 0.0};
+    std::vector<double> base_lidar_R{1.0, 0.0, 0.0,
+                                     0.0, 1.0, 0.0,
+                                     0.0, 0.0, 1.0};
+    if (yaml["extrinsicBaseLidarTrans"]) {
+        base_lidar_t = yaml["extrinsicBaseLidarTrans"].as<std::vector<double>>();
+    } else if (yaml["common"] && yaml["common"]["extrinsicBaseLidarTrans"]) {
+        base_lidar_t = yaml["common"]["extrinsicBaseLidarTrans"].as<std::vector<double>>();
+    }
+    if (yaml["extrinsicBaseLidarRot"]) {
+        base_lidar_R = yaml["extrinsicBaseLidarRot"].as<std::vector<double>>();
+    } else if (yaml["common"] && yaml["common"]["extrinsicBaseLidarRot"]) {
+        base_lidar_R = yaml["common"]["extrinsicBaseLidarRot"].as<std::vector<double>>();
+    }
+    CHECK_EQ(base_lidar_t.size(), 3);
+    CHECK_EQ(base_lidar_R.size(), 9);
+    Mat3d R_base_lidar;
+    R_base_lidar << base_lidar_R[0], base_lidar_R[1], base_lidar_R[2],
+        base_lidar_R[3], base_lidar_R[4], base_lidar_R[5],
+        base_lidar_R[6], base_lidar_R[7], base_lidar_R[8];
+    Quatd q_base_lidar(R_base_lidar);
+    q_base_lidar.normalize();
+    T_base_lidar_ = SE3(q_base_lidar, Vec3d(base_lidar_t[0], base_lidar_t[1], base_lidar_t[2]));
+    LOG(INFO) << "[Mapping][BASE_LIDAR] T_base_lidar trans=" << T_base_lidar_.translation().transpose();
+
+    preprocess_ = std::make_shared<PointCloudPreprocess>();
+    if (!preprocess_->Init(yaml_path)) {
+        LOG(ERROR) << "failed to init point cloud preprocess";
+        return false;
+    }
+
+    if (use_lio_sam_) {
+        LioSamMapping::Options lio_options;
+        lio_options.mapping_mode_ = options_.online_input
+            ? LioSamMapping::MappingRuntimeMode::ONLINE_MAPPING
+            : LioSamMapping::MappingRuntimeMode::OFFLINE_MAPPING;
+        lio_sam_ = std::make_shared<LioSamMapping>(lio_options);
+        if (!lio_sam_->Init(yaml_path)) {
+            LOG(ERROR) << "failed to init LIO-SAM mapping";
+            return false;
+        }
+    } else {
+        lio_ = std::make_shared<LaserMapping>();
+        if (!lio_->Init(yaml_path)) {
+            LOG(ERROR) << "failed to init laser mapping";
+            return false;
+        }
+    }
+
+    if (options_.with_ui) {
+        ui_ = std::make_shared<ui::PangolinWindow>();
+        ui_->Init();
+        if (use_lio_sam_) {
+            lio_sam_->SetUI(ui_);
+        } else {
+            lio_->SetUI(ui_);
+        }
+    }
+
+    if (options_.with_gridmap) {
+        g2p5::G2P5::Options opt;
+        opt.online_mode_ = options_.online_input;
+        g2p5_ = std::make_shared<g2p5::G2P5>(opt);
+        g2p5_->Init(yaml_path);
+    }
+
+    return true;
+}
+
+bool Mapping::Start() {
+    cur_kf_.reset();
+    running_ = true;
+    return true;
+}
+
+void Mapping::Stop() {
+    running_ = false;
+}
+
+void Mapping::Reset() {
+    running_ = false;
+    cur_kf_.reset();
+
+    // 先让算法对象断开 UI，避免 LIO-SAM / LaserMapping 析构时再次持有 UI
+    if (use_lio_sam_ && lio_sam_) {
+        lio_sam_->SetUI(nullptr);
+    }
+    if (!use_lio_sam_ && lio_) {
+        lio_->SetUI(nullptr);
+    }
+
+    // 先取出来，再 reset 成员，避免 shared_ptr 析构顺序混乱
+    auto ui = ui_;
+    ui_.reset();
+
+    if (ui) {
+        ui->Quit();
+    }
+
+    if (g2p5_) {
+        g2p5_->Quit();
+    }
+
+    g2p5_.reset();
+    lio_sam_.reset();
+    lio_.reset();
+    preprocess_.reset();
+}
+
+void Mapping::ProcessIMU(const sensor_msgs::msg::Imu::SharedPtr& imu) {
+    if (!running_ || !imu) {
+        return;
+    }
+    IMUPtr input = std::make_shared<IMU>();
+    input->timestamp = ToSec(imu->header.stamp);
+    input->angular_velocity = Vec3d(imu->angular_velocity.x, imu->angular_velocity.y, imu->angular_velocity.z);
+    input->linear_acceleration = Vec3d(imu->linear_acceleration.x, imu->linear_acceleration.y, imu->linear_acceleration.z);
+    input->orientation = Quatd(imu->orientation.w, imu->orientation.x, imu->orientation.y, imu->orientation.z);
+    ProcessIMU(input);
+}
+
+void Mapping::ProcessIMU(const IMUPtr& imu) {
+    if (!running_ || !imu) {
+        return;
+    }
+    if (use_lio_sam_ && lio_sam_) {
+        lio_sam_->ProcessIMU(imu);
+    } else if (lio_) {
+        lio_->ProcessIMU(imu);
+    }
+}
+
+bool Mapping::BuildInputCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud, CloudPtr& input) {
+    if (!preprocess_ || !cloud) {
+        return false;
+    }
+    CloudPtr pcl_input(new PointCloudType);
+    preprocess_->Process(cloud, pcl_input);
+    CloudPtr input_base(new PointCloudType);
+    pcl::transformPointCloud(*pcl_input, *input_base, T_base_lidar_.matrix().cast<float>());
+    input_base->header = pcl_input->header;
+    input_base->header.frame_id = base_link_frame_;
+    input = input_base;
+    return input && !input->empty();
+}
+
+bool Mapping::BuildInputCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud, CloudPtr& input) {
+    if (!preprocess_ || !cloud) {
+        return false;
+    }
+    CloudPtr pcl_input(new PointCloudType);
+    preprocess_->Process(cloud, pcl_input);
+    CloudPtr input_base(new PointCloudType);
+    pcl::transformPointCloud(*pcl_input, *input_base, T_base_lidar_.matrix().cast<float>());
+    input_base->header = pcl_input->header;
+    input_base->header.frame_id = base_link_frame_;
+    input = input_base;
+    return input && !input->empty();
+}
+
+void Mapping::ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
+    if (!running_) {
+        return;
+    }
+    CloudPtr input;
+    if (!BuildInputCloud(cloud, input)) {
+        return;
+    }
+
+    Keyframe::Ptr kf;
+    if (use_lio_sam_ && lio_sam_) {
+        lio_sam_->ProcessPointCloud2(input);
+        if (!lio_sam_->Run()) {
+            return;
+        }
+        kf = lio_sam_->GetKeyframe();
+    } else if (lio_) {
+        lio_->ProcessPointCloud2(input);
+        if (!lio_->Run()) {
+            return;
+        }
+        kf = lio_->GetKeyframe();
+    }
+    HandleProcessedKeyframe(kf);
+}
+
+void Mapping::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
+    if (!running_) {
+        return;
+    }
+    CloudPtr input;
+    if (!BuildInputCloud(cloud, input)) {
+        return;
+    }
+
+    Keyframe::Ptr kf;
+    if (use_lio_sam_ && lio_sam_) {
+        lio_sam_->ProcessPointCloud2(input);
+        if (!lio_sam_->Run()) {
+            return;
+        }
+        kf = lio_sam_->GetKeyframe();
+    } else if (lio_) {
+        lio_->ProcessPointCloud2(input);
+        if (!lio_->Run()) {
+            return;
+        }
+        kf = lio_->GetKeyframe();
+    }
+    HandleProcessedKeyframe(kf);
+}
+
+void Mapping::HandleProcessedKeyframe(const Keyframe::Ptr& kf) {
+    if (!kf || kf == cur_kf_) {
+        return;
+    }
+    cur_kf_ = kf;
+    if (g2p5_) {
+        g2p5_->PushKeyframe(cur_kf_);
+    }
+    if (ui_) {
+        ui_->UpdateKF(cur_kf_);
+    }
+}
+
+MappingResult Mapping::GetResult() {
+    MappingResult result;
+    if (use_lio_sam_ && lio_sam_) {
+        lio_sam_->SyncOptimizedKeyframePoses();
+        result.keyframes = lio_sam_->GetAllKeyframes();
+        result.global_map = lio_sam_->GetGlobalMap(true);
+    } else if (lio_) {
+        result.keyframes = lio_->GetAllKeyframes();
+        result.global_map = lio_->GetGlobalMap(true);
+    }
+
+    if (g2p5_) {
+        auto newest_map = g2p5_->GetNewestMap();
+        if (newest_map) {
+            result.grid_map = std::make_shared<nav_msgs::msg::OccupancyGrid>(newest_map->ToROS());
+        }
+    }
+
+    result.valid = result.global_map && !result.global_map->empty() && !result.keyframes.empty();
+    return result;
+}
+
+}  // namespace lightning::modules

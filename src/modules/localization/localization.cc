@@ -1,0 +1,162 @@
+#include "modules/localization/localization.h"
+
+#include <algorithm>
+#include <glog/logging.h>
+#include <rclcpp/node.hpp>
+#include <tf2_ros/transform_broadcaster.h>
+
+#include "core/localization/localization.h"
+
+namespace lightning::modules {
+
+Localization::Localization(LocalizationOptions options) : options_(options) {}
+
+Localization::~Localization() {
+    Reset();
+}
+
+bool Localization::Init(const std::string& yaml_path, rclcpp::Node::SharedPtr node) {
+    Reset();
+    yaml_path_ = yaml_path;
+    loc::Localization::Options loc_options;
+    loc_options.online_mode_ = true;
+    loc_ = std::make_shared<loc::Localization>(loc_options);
+    if (node) {
+        SetupPublishers(node);
+    }
+    return true;
+}
+
+void Localization::SetupPublishers(rclcpp::Node::SharedPtr node) {
+    if (!node) {
+        return;
+    }
+    tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(node);
+    loc_odom_pub_ = node->create_publisher<nav_msgs::msg::Odometry>("/lightning/localization/odom", 10);
+    loc_pose_pub_ = node->create_publisher<geometry_msgs::msg::PoseStamped>("/lightning/localization/pose", 10);
+    loc_pose_quality_pub_ = node->create_publisher<lightning_interfaces::msg::LocalizationPose>(
+        "/lightning/localization/pose_with_quality", rclcpp::QoS(10));
+
+    loc_->SetTFCallback([this](const geometry_msgs::msg::TransformStamped& tf_msg) {
+        if (options_.pub_tf && tf_broadcaster_) {
+            tf_broadcaster_->sendTransform(tf_msg);
+        }
+
+        geometry_msgs::msg::PoseStamped pose_msg;
+        pose_msg.header = tf_msg.header;
+        pose_msg.pose.position.x = tf_msg.transform.translation.x;
+        pose_msg.pose.position.y = tf_msg.transform.translation.y;
+        pose_msg.pose.position.z = tf_msg.transform.translation.z;
+        pose_msg.pose.orientation = tf_msg.transform.rotation;
+        if (loc_pose_pub_) {
+            loc_pose_pub_->publish(pose_msg);
+        }
+
+        nav_msgs::msg::Odometry odom_msg;
+        odom_msg.header = tf_msg.header;
+        odom_msg.child_frame_id = tf_msg.child_frame_id;
+        odom_msg.pose.pose = pose_msg.pose;
+        if (loc_odom_pub_) {
+            loc_odom_pub_->publish(odom_msg);
+        }
+    });
+
+    loc_->SetResultCallback([this](const loc::LocalizationResult& result) {
+        if (!loc_pose_quality_pub_ || !result.valid_) {
+            return;
+        }
+        auto tf_msg = result.ToGeoMsg();
+        lightning_interfaces::msg::LocalizationPose msg;
+        msg.header = tf_msg.header;
+        msg.pose.position.x = tf_msg.transform.translation.x;
+        msg.pose.position.y = tf_msg.transform.translation.y;
+        msg.pose.position.z = tf_msg.transform.translation.z;
+        msg.pose.orientation = tf_msg.transform.rotation;
+        msg.valid = result.valid_;
+        msg.reliable = result.reliable_;
+        msg.status = static_cast<uint8_t>(result.status_);
+        msg.confidence = result.confidence_;
+        msg.tp = result.tp_;
+        msg.nvtl = result.nvtl_;
+        msg.iterations = static_cast<uint32_t>(std::max(0, result.iterations_));
+        msg.message = result.message_;
+        loc_pose_quality_pub_->publish(msg);
+    });
+}
+
+bool Localization::SetMapPath(const std::string& map_path) {
+    if (!loc_) {
+        LOG(ERROR) << "Localization is not initialized";
+        return false;
+    }
+    if (map_path.empty()) {
+        LOG(ERROR) << "map path is empty";
+        return false;
+    }
+    map_path_ = map_path;
+    map_ready_ = loc_->Init(yaml_path_, map_path_);
+    has_initial_guess_ = false;
+    return map_ready_;
+}
+
+void Localization::PoseToQuaternionAndTranslation(const SE3& pose, Eigen::Quaterniond& q, Eigen::Vector3d& t) {
+    q = pose.unit_quaternion();
+    q.normalize();
+    t = pose.translation();
+}
+
+bool Localization::SetInitialGuess(const SE3& init_pose, bool* initialized_now) {
+    if (initialized_now) {
+        *initialized_now = false;
+    }
+    if (!loc_ || !map_ready_) {
+        LOG(ERROR) << "cannot set initial guess before map path is set";
+        return false;
+    }
+    Eigen::Quaterniond q;
+    Eigen::Vector3d t;
+    PoseToQuaternionAndTranslation(init_pose, q, t);
+    const bool ok = loc_->SetExternalPose(q, t);
+    has_initial_guess_ = true;
+    if (initialized_now) {
+        *initialized_now = ok;
+    }
+    return true;
+}
+
+void Localization::ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
+    if (!loc_ || !map_ready_ || !has_initial_guess_) {
+        return;
+    }
+    loc_->ProcessLidarMsg(cloud);
+}
+
+void Localization::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
+    if (!loc_ || !map_ready_ || !has_initial_guess_) {
+        return;
+    }
+    loc_->ProcessLivoxLidarMsg(cloud);
+}
+
+loc::LocalizationResult Localization::GetLatestResult() const {
+    if (!loc_) {
+        return loc::LocalizationResult();
+    }
+    return loc_->GetLatestResult();
+}
+
+void Localization::Reset() {
+    if (loc_) {
+        loc_->Finish();
+    }
+    loc_.reset();
+    tf_broadcaster_.reset();
+    loc_odom_pub_.reset();
+    loc_pose_pub_.reset();
+    loc_pose_quality_pub_.reset();
+    map_ready_ = false;
+    has_initial_guess_ = false;
+    map_path_.clear();
+}
+
+}  // namespace lightning::modules

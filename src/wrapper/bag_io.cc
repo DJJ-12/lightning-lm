@@ -22,7 +22,11 @@ void RosbagIO::Go(int sleep_usec) {
         auto msg = reader.read_next();
         auto iter = process_func_.find(msg->topic_name);
         if (iter != process_func_.end()) {
-            iter->second(msg);
+            const bool keep_running = iter->second(msg);
+            if (!keep_running) {
+                LOG(INFO) << "bag processing stopped by callback.";
+                return;
+            }
         }
 
         if (sleep_usec > 0) {
