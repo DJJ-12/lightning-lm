@@ -31,6 +31,8 @@ class Localization {
         bool online_mode_ = false;
         bool with_ui_ = false;
         SE3 T_base_lidar_ = SE3();
+        bool pub_tf_ = false;
+        
     };
 
     explicit Localization(Options options);

@@ -24,6 +24,7 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
 
     YAML::Node yaml_node = YAML::LoadFile(yaml_path);
     options_.with_ui_ = false;
+    options_.pub_tf_ = yaml_node["system"]["pub_tf"]
     if (yaml_node["system"] && yaml_node["system"]["with_ui"]) {
         options_.with_ui_ = yaml_node["system"]["with_ui"].as<bool>();
     }
