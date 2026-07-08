@@ -34,26 +34,38 @@ Eigen::Vector3d getRPYFromEigenMatrix(const Eigen::Matrix3d& R) {
 
 pclomp::NdtResult Localizer::AlignPose(const Eigen::Matrix4d &initial_pose_with_cov)
 {
-    // 获取初始位姿的RPY角度
+    // 获取初始位姿的RPY角度。
+    // 2.5D 重定位约束：粗搜索阶段只允许 x / y / yaw 撒种子；
+    // z / roll / pitch 必须固定为输入初值，避免地面机器人产生几十米高度或大姿态角的无效候选。
     const auto base_rpy = getRPYFromEigenMatrix(initial_pose_with_cov.block<3, 3>(0, 0));
-    const double stddev_x = 3.0;
-    const double stddev_y = 3.0;
-    const double stddev_z = 10.0;
-    const double stddev_roll = 0.01;
-    const double stddev_pitch = 0.01;
+    const double fixed_z = initial_pose_with_cov(2, 3);
+    const double fixed_roll = base_rpy.x();
+    const double fixed_pitch = base_rpy.y();
+    const double fixed_yaw = base_rpy.z();
 
-    // 定义采样均值和标准差（仅yaw角度均匀采样，其他参数使用正态分布）
+    constexpr double kSearchStddevX = 3.0;
+    constexpr double kSearchStddevY = 3.0;
+    constexpr double kSearchStddevYaw = 0.17453;  // 约 10 deg
+
+    // 定义采样均值和标准差：只对 x / y / yaw 采样；z / roll / pitch 固定。
     const std::vector<double> sample_mean{
         initial_pose_with_cov(0,3), // trans_x
         initial_pose_with_cov(1,3), // trans_y
-        initial_pose_with_cov(2,3), // trans_z
-        base_rpy.x(),                                 // angle_x
-        base_rpy.y(),                                 // angle_y
-        base_rpy.z(),                                 // angle_z
+        fixed_z,                    // trans_z，2.5D 固定
+        fixed_roll,                 // roll，2.5D 固定
+        fixed_pitch,                // pitch，2.5D 固定
+        fixed_yaw,                  // yaw
     };
-    const std::vector<double> sample_stddev{3.0, 3.0, stddev_z, stddev_roll, stddev_pitch, 0.17453};
+    const std::vector<double> sample_stddev{
+        kSearchStddevX,
+        kSearchStddevY,
+        0.0,                        // trans_z 不撒种子
+        0.0,                        // roll 不撒种子
+        0.0,                        // pitch 不撒种子
+        kSearchStddevYaw,
+    };
 
-    // 创建树结构帕尔森估计器，优化6个维度 (x, y, z, roll, pitch, yaw)
+    // 2.5D 粗搜索：优化 x / y / yaw；z / roll / pitch 由下面的固定约束强制锁定。
     TreeStructuredParzenEstimator tpe(TreeStructuredParzenEstimator::Direction::MAXIMIZE, 100, sample_mean, sample_stddev);
 
     auto output_cloud = std::make_shared<pcl::PointCloud<PointSource> >();
@@ -61,14 +73,22 @@ pclomp::NdtResult Localizer::AlignPose(const Eigen::Matrix4d &initial_pose_with_
 
     for (int64_t i = 0; i < 200; i++)
     {
-        const TreeStructuredParzenEstimator::Input input = tpe.get_next_input();
+        // 第 0 个候选直接使用用户输入初值；后续候选再围绕 x / y / yaw 做 2.5D 搜索。
+        TreeStructuredParzenEstimator::Input input = (i == 0) ? sample_mean : tpe.get_next_input();
 
-        Eigen::Matrix3d rot = Eigen::AngleAxisd(input[5], Eigen::Vector3d::UnitZ())
-                            * Eigen::AngleAxisd(input[4], Eigen::Vector3d::UnitY())
-                            * Eigen::AngleAxisd(input[3], Eigen::Vector3d::UnitX()).matrix();
+        // 双保险：即使 TPE 内部以后被改动，这里仍强制 2.5D 候选种子。
+        input[TreeStructuredParzenEstimator::TRANS_Z] = fixed_z;
+        input[TreeStructuredParzenEstimator::ANGLE_X] = fixed_roll;
+        input[TreeStructuredParzenEstimator::ANGLE_Y] = fixed_pitch;
+
+        Eigen::Matrix3d rot = Eigen::AngleAxisd(input[TreeStructuredParzenEstimator::ANGLE_Z], Eigen::Vector3d::UnitZ())
+                            * Eigen::AngleAxisd(input[TreeStructuredParzenEstimator::ANGLE_Y], Eigen::Vector3d::UnitY())
+                            * Eigen::AngleAxisd(input[TreeStructuredParzenEstimator::ANGLE_X], Eigen::Vector3d::UnitX()).matrix();
         Eigen::Matrix4d init_pose_matrix = Eigen::Matrix4d::Identity();
         init_pose_matrix.block<3, 3>(0, 0) = rot;
-        init_pose_matrix.block<3, 1>(0, 3) = Eigen::Vector3d(input[0], input[1], input[2]);
+        init_pose_matrix.block<3, 1>(0, 3) = Eigen::Vector3d(input[TreeStructuredParzenEstimator::TRANS_X],
+                                                            input[TreeStructuredParzenEstimator::TRANS_Y],
+                                                            input[TreeStructuredParzenEstimator::TRANS_Z]);
 
         LOG(INFO) << "Initial Pose: " <<  "x: " << input[0] << ", y: " << input[1] << ", z: " << input[2] << ", roll: " << input[3] << ", pitch: " << input[4] << ", yaw: " << input[5] << std::endl;
         
@@ -157,7 +177,12 @@ bool Localizer::GetInitPose(const Eigen::Matrix4d &init_guess, Eigen::Matrix4d &
         LOG(INFO) << "Localizer initialized";
     }
 
-
+    if (!pc || pc->empty()) {
+        LOG(WARNING) << "GetInitPose failed: input cloud is empty";
+        quality.quality_level = "poor";
+        quality.is_reliable = false;
+        return false;
+    }
 
     MapManager::DiffMapReqInfo req;
     req.center_x = init_guess(0,3);
@@ -196,6 +221,12 @@ bool Localizer::GetInitPose(const Eigen::Matrix4d &init_guess, Eigen::Matrix4d &
     voxel_filter.setInputCloud(pc);
     voxel_filter.filter(*input_cloud);
 
+    if (!input_cloud || input_cloud->empty()) {
+        LOG(WARNING) << "GetInitPose failed: filtered input cloud is empty";
+        quality.quality_level = "poor";
+        quality.is_reliable = false;
+        return false;
+    }
 
     ndt_ptr_->createVoxelKdtree();
     ndt_ptr_->setInputSource(pc);
@@ -260,7 +291,12 @@ bool Localizer::RegisterFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr &pc, pcl
     // 评估定位质量（使用配置的阈值）
     quality.evaluate(quality_thresholds_);
 
-    const double tracking_min_tp = 0.5;  
+    // Tracking and publishing use different gates:
+    // - return value still means "reliable enough to publish/use as a trusted localization result";
+    // - last_pose_ may be updated for tracking when the score is not completely unusable,
+    //   otherwise a single poor frame can freeze the constant-velocity predictor and cause
+    //   a domino failure in the following frames.
+    const double tracking_min_tp = 0.5;  // conservative fallback gate; keep publish gate stricter.
     const bool acceptable_for_tracking =
         quality.is_reliable || quality.transform_probability > tracking_min_tp;
 
