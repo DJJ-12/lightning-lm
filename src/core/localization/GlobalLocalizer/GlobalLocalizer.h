@@ -20,11 +20,11 @@ struct QualityThresholds {
 
 // 定位结果质量结构体
 struct LocalizationQuality {
-    double transform_probability;           // 变换概率
-    double nearest_voxel_likelihood;        // 最近体素似然度
-    int iteration_num;                      // 迭代次数
-    bool is_reliable;                       // 是否可靠
-    std::string quality_level;              // 质量等级：excellent/good/fair/poor
+    double transform_probability = 0.0;           // 变换概率
+    double nearest_voxel_likelihood = 0.0;        // 最近体素似然度
+    int iteration_num = 0;                        // 迭代次数
+    bool is_reliable = false;                     // 是否可靠
+    std::string quality_level = "unknown";       // 质量等级：excellent/good/fair/poor
 
     // 评估定位质量（使用默认阈值）
     void evaluate() {
@@ -81,6 +81,9 @@ public:
     }
 
     void GetInitPose(const Eigen::Matrix4d& init_guess, Eigen::Matrix4d& align_pose, const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud);
+
+    bool GetInitPose(const Eigen::Matrix4d& init_guess, Eigen::Matrix4d& align_pose, const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud, LocalizationQuality& quality);
+
     void ResetLocalizationState();
 
     // 原有接口（保持兼容性）

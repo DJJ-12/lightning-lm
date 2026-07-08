@@ -1,6 +1,9 @@
 #include "GlobalLocalizer/GlobalLocalizer.h"
 #include "GlobalLocalizer/tree_structured_parzen_estimator.hpp"
 #include <glog/logging.h>
+#include <pcl/filters/voxel_grid.h>
+#include <algorithm>
+#include <chrono>
 #include "GlobalLocalizer.h"
 
 namespace robot_localizer
@@ -124,6 +127,14 @@ Localizer::Localizer()
 
 void Localizer::GetInitPose(const Eigen::Matrix4d &init_guess, Eigen::Matrix4d &align_pose, const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud)
 {
+    LocalizationQuality quality;
+    (void)GetInitPose(init_guess, align_pose, pc, output_cloud, quality);
+}
+
+bool Localizer::GetInitPose(const Eigen::Matrix4d &init_guess, Eigen::Matrix4d &align_pose, const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud, LocalizationQuality& quality)
+{
+    quality = LocalizationQuality();
+
     if(!ndt_ptr_ || !ndt_rough_ptr_)
     {
         ndt_ptr_ = std::make_shared<NormalDistributionsTransform>();
@@ -146,6 +157,8 @@ void Localizer::GetInitPose(const Eigen::Matrix4d &init_guess, Eigen::Matrix4d &
         LOG(INFO) << "Localizer initialized";
     }
 
+
+
     MapManager::DiffMapReqInfo req;
     req.center_x = init_guess(0,3);
     req.center_y = init_guess(1,3);
@@ -161,11 +174,7 @@ void Localizer::GetInitPose(const Eigen::Matrix4d &init_guess, Eigen::Matrix4d &
     if (maps_to_add.empty() && map_ids_to_remove.empty())
     {
         LOG(INFO) << "No map to add or remove";
-        //return; 
     }
-
-    const auto exe_start_time = std::chrono::system_clock::now();
-    // Perform heavy processing outside of the lock scope
 
     // Add pcd
     for (auto& map : maps_to_add)
@@ -186,24 +195,40 @@ void Localizer::GetInitPose(const Eigen::Matrix4d &init_guess, Eigen::Matrix4d &
     voxel_filter.setLeafSize(2.0, 2.0, 2.0);
     voxel_filter.setInputCloud(pc);
     voxel_filter.filter(*input_cloud);
-    
+
+
     ndt_ptr_->createVoxelKdtree();
     ndt_ptr_->setInputSource(pc);
 
     ndt_rough_ptr_->createVoxelKdtree();
     ndt_rough_ptr_->setInputSource(input_cloud);
 
-    pclomp::NdtResult ndt_res =  AlignPose(init_guess);
+    pclomp::NdtResult ndt_res = AlignPose(init_guess);
     align_pose = ndt_res.pose.cast<double>();
 
     ndt_ptr_->align(*output_cloud, align_pose.cast<float>());
 
     ndt_res = ndt_ptr_->getResult();
     align_pose = ndt_res.pose.cast<double>();
-    LOG(INFO) << "precise NDT alignment completed - score: " << ndt_res.transform_probability;
 
-    last_last_pose_= align_pose;
+    quality.transform_probability = ndt_res.transform_probability;
+    quality.nearest_voxel_likelihood = ndt_res.nearest_voxel_transformation_likelihood;
+    quality.iteration_num = ndt_res.iteration_num;
+    quality.evaluate(quality_thresholds_);
+
+    LOG(INFO) << "precise NDT alignment completed - score: " << ndt_res.transform_probability
+              << ", NVTL: " << ndt_res.nearest_voxel_transformation_likelihood
+              << ", quality: " << quality.quality_level
+              << ", reliable: " << (quality.is_reliable ? "yes" : "no");
+
+    if (!quality.is_reliable) {
+        LOG(WARNING) << "initial localization rejected by quality gate; last pose is not updated";
+        return false;
+    }
+
+    last_last_pose_ = align_pose;
     last_pose_ = align_pose;
+    return true;
 }
 
 void Localizer::ResetLocalizationState()
@@ -212,24 +237,10 @@ void Localizer::ResetLocalizationState()
     last_pose_ = Eigen::Matrix4d::Identity();
 }
 
-bool Localizer::RegisterFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr &pc, pcl::PointCloud<pcl::PointXYZ>::Ptr &output_cloud, Eigen::Matrix4d &align_pose) 
+bool Localizer::RegisterFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr &pc, pcl::PointCloud<pcl::PointXYZ>::Ptr &output_cloud, Eigen::Matrix4d &align_pose)
 {
-    Eigen::Matrix4d init_guess = last_pose_ * last_last_pose_.inverse() * last_pose_;
-
-    ndt_ptr_->setInputSource(pc);
-    ndt_ptr_->align(*output_cloud, init_guess.cast<float>());
-    pclomp::NdtResult ndt_res = ndt_ptr_->getResult();
-    align_pose = ndt_res.pose.cast<double>();
-
-    last_last_pose_ = last_pose_;
-    last_pose_ = align_pose;
-
-    //LOG(INFO) << "ndt_res.iteration_num: " << ndt_res.iteration_num;
-    //std::cout << "pose: " << align_pose.topLeftCorner<3, 1>().transpose() << std::endl;
-
-    //LOG(INFO) << "precise NDT alignment completed - score: " << ndt_res.transform_probability;
-
-    return true; 
+    LocalizationQuality quality;
+    return RegisterFrame(pc, output_cloud, align_pose, quality);
 }
 
 bool Localizer::RegisterFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr &pc, pcl::PointCloud<pcl::PointXYZ>::Ptr &output_cloud, Eigen::Matrix4d &align_pose, LocalizationQuality& quality) 
@@ -249,16 +260,24 @@ bool Localizer::RegisterFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr &pc, pcl
     // 评估定位质量（使用配置的阈值）
     quality.evaluate(quality_thresholds_);
 
-    last_last_pose_ = last_pose_;
-    last_pose_ = align_pose;
+    const double tracking_min_tp = 0.5;  
+    const bool acceptable_for_tracking =
+        quality.is_reliable || quality.transform_probability > tracking_min_tp;
 
-    LOG(INFO) << "Localization quality: " << quality.quality_level 
+    if (acceptable_for_tracking) {
+        last_last_pose_ = last_pose_;
+        last_pose_ = align_pose;
+    } else {
+        LOG(WARNING) << "RegisterFrame rejected by tracking gate; last pose is not updated";
+    }
+
+    LOG(INFO) << "Localization quality: " << quality.quality_level
               << ", TP: " << quality.transform_probability
               << ", NVTL: " << quality.nearest_voxel_likelihood
               << ", iterations: " << quality.iteration_num
               << ", reliable: " << (quality.is_reliable ? "yes" : "no");
 
-    return quality.is_reliable; 
+    return quality.is_reliable;
 }
 
 void Localizer::UpdateMap(const Eigen::Vector2d &pose) 
