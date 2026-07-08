@@ -2,7 +2,7 @@
 
 #include <string>
 
-#include "modules/mapping/mapping.h"
+#include "modules/mappingSystem/mapping_system.h"
 
 namespace lightning::modules {
 
@@ -14,7 +14,7 @@ struct SaveMapOptions {
 
 class SaveMap {
    public:
-    bool Save(const std::string& save_path, const MappingResult& result,
+    bool Save(const std::string& save_path, const MappingSystemResult& result,
               const SaveMapOptions& options = SaveMapOptions()) const;
 
    private:

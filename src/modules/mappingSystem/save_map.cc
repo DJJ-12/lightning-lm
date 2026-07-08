@@ -1,4 +1,4 @@
-#include "modules/mapping/save_map.h"
+#include "modules/mappingSystem/save_map.h"
 
 #include <cmath>
 #include <filesystem>
@@ -20,7 +20,7 @@
 
 namespace lightning::modules {
 
-bool SaveMap::Save(const std::string& save_path, const MappingResult& result,
+bool SaveMap::Save(const std::string& save_path, const MappingSystemResult& result,
                    const SaveMapOptions& options) const {
     if (save_path.empty()) {
         LOG(ERROR) << "SaveMap failed: save_path is empty";

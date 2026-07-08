@@ -20,14 +20,14 @@ namespace lightning::loc { class Localization; }
 
 namespace lightning::modules {
 
-struct LocalizationOptions {
-    bool pub_tf = true;
+struct LocalizationSystemOptions {
+    bool pub_tf_ = true;
 };
 
-class Localization {
+class LocalizationSystem {
    public:
-    explicit Localization(LocalizationOptions options = LocalizationOptions());
-    ~Localization();
+    explicit LocalizationSystem(LocalizationSystemOptions options = LocalizationSystemOptions());
+    ~LocalizationSystem();
 
     bool Init(const std::string& yaml_path, rclcpp::Node::SharedPtr node = nullptr);
     bool SetMapPath(const std::string& map_path);
@@ -41,7 +41,7 @@ class Localization {
     void SetupPublishers(rclcpp::Node::SharedPtr node);
     static void PoseToQuaternionAndTranslation(const SE3& pose, Eigen::Quaterniond& q, Eigen::Vector3d& t);
 
-    LocalizationOptions options_;
+    LocalizationSystemOptions options_;
     std::string yaml_path_;
     std::string map_path_;
     bool map_ready_ = false;

@@ -1,4 +1,4 @@
-#include "modules/mapping/mapping.h"
+#include "modules/mappingSystem/mapping_system.h"
 
 #include <glog/logging.h>
 #include <pcl/common/transforms.h>
@@ -14,11 +14,11 @@
 
 namespace lightning::modules {
 
-Mapping::~Mapping() {
+MappingSystem::~MappingSystem() {
     Reset();
 }
 
-bool Mapping::Init(const std::string& yaml_path, const MappingOptions& options) {
+bool MappingSystem::Init(const std::string& yaml_path, const MappingSystemOptions& options) {
     Reset();
     yaml_path_ = yaml_path;
     options_ = options;
@@ -109,17 +109,17 @@ bool Mapping::Init(const std::string& yaml_path, const MappingOptions& options) 
     return true;
 }
 
-bool Mapping::Start() {
+bool MappingSystem::Start() {
     cur_kf_.reset();
     running_ = true;
     return true;
 }
 
-void Mapping::Stop() {
+void MappingSystem::Stop() {
     running_ = false;
 }
 
-void Mapping::Reset() {
+void MappingSystem::Reset() {
     running_ = false;
     cur_kf_.reset();
 
@@ -149,7 +149,7 @@ void Mapping::Reset() {
     preprocess_.reset();
 }
 
-void Mapping::ProcessIMU(const sensor_msgs::msg::Imu::SharedPtr& imu) {
+void MappingSystem::ProcessIMU(const sensor_msgs::msg::Imu::SharedPtr& imu) {
     if (!running_ || !imu) {
         return;
     }
@@ -161,7 +161,7 @@ void Mapping::ProcessIMU(const sensor_msgs::msg::Imu::SharedPtr& imu) {
     ProcessIMU(input);
 }
 
-void Mapping::ProcessIMU(const IMUPtr& imu) {
+void MappingSystem::ProcessIMU(const IMUPtr& imu) {
     if (!running_ || !imu) {
         return;
     }
@@ -172,7 +172,7 @@ void Mapping::ProcessIMU(const IMUPtr& imu) {
     }
 }
 
-bool Mapping::BuildInputCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud, CloudPtr& input) {
+bool MappingSystem::BuildInputCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud, CloudPtr& input) {
     if (!preprocess_ || !cloud) {
         return false;
     }
@@ -186,7 +186,7 @@ bool Mapping::BuildInputCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cl
     return input && !input->empty();
 }
 
-bool Mapping::BuildInputCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud, CloudPtr& input) {
+bool MappingSystem::BuildInputCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud, CloudPtr& input) {
     if (!preprocess_ || !cloud) {
         return false;
     }
@@ -200,7 +200,7 @@ bool Mapping::BuildInputCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr
     return input && !input->empty();
 }
 
-void Mapping::ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
+void MappingSystem::ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
     if (!running_) {
         return;
     }
@@ -226,7 +226,7 @@ void Mapping::ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud
     HandleProcessedKeyframe(kf);
 }
 
-void Mapping::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
+void MappingSystem::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
     if (!running_) {
         return;
     }
@@ -252,7 +252,7 @@ void Mapping::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& c
     HandleProcessedKeyframe(kf);
 }
 
-void Mapping::HandleProcessedKeyframe(const Keyframe::Ptr& kf) {
+void MappingSystem::HandleProcessedKeyframe(const Keyframe::Ptr& kf) {
     if (!kf || kf == cur_kf_) {
         return;
     }
@@ -265,8 +265,8 @@ void Mapping::HandleProcessedKeyframe(const Keyframe::Ptr& kf) {
     }
 }
 
-MappingResult Mapping::GetResult() {
-    MappingResult result;
+MappingSystemResult MappingSystem::GetResult() {
+    MappingSystemResult result;
     if (use_lio_sam_ && lio_sam_) {
         lio_sam_->SyncOptimizedKeyframePoses();
         result.keyframes = lio_sam_->GetAllKeyframes();

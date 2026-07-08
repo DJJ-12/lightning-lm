@@ -27,14 +27,6 @@ LocSystem::~LocSystem() {
 
 bool LocSystem::Init(const std::string &yaml_path) {
     yaml_path_ = yaml_path;
-    loc::Localization::Options opt;
-    opt.online_mode_ = true;
-    loc_ = std::make_shared<loc::Localization>(opt);
-    map_loaded_ = false;
-    loc_started_ = false;
-
-    YAML_IO yaml(yaml_path);
-
     YAML::Node yaml_node = YAML::LoadFile(yaml_path);
     bool pub_tf = true;
     if (yaml_node["system"] && yaml_node["system"]["pub_tf"]) {
@@ -44,6 +36,15 @@ bool LocSystem::Init(const std::string &yaml_path) {
     }
     options_.pub_tf_ = pub_tf;
     LOG(INFO) << "[LOC_SYSTEM] pub_tf = " << options_.pub_tf_;
+
+    loc::Localization::Options opt;
+    opt.online_mode_ = true;
+    opt.pub_tf_ = options_.pub_tf_;
+    loc_ = std::make_shared<loc::Localization>(opt);
+    map_loaded_ = false;
+    loc_started_ = false;
+
+    YAML_IO yaml(yaml_path);
 
     LOG(INFO) << "online mode, creating ros2 node ... ";
 

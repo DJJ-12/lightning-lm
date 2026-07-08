@@ -10,9 +10,9 @@
 
 #include "common/eigen_types.h"
 #include "core/localization/localization_result.h"
-#include "modules/localization/localization.h"
-#include "modules/mapping/mapping.h"
-#include "modules/mapping/save_map.h"
+#include "modules/localizationSystem/localization_system.h"
+#include "modules/mappingSystem/mapping_system.h"
+#include "modules/mappingSystem/save_map.h"
 #include "runtime/bag_input.h"
 #include "runtime/mode.h"
 #include "runtime/task.h"
@@ -63,8 +63,8 @@ class Lightning {
     Mode mode_ = Mode::IDLE;
     Task task_;
 
-    std::unique_ptr<modules::Mapping> mapping_;
-    std::unique_ptr<modules::Localization> localization_;
+    std::unique_ptr<modules::MappingSystem> mapping_system_;
+    std::unique_ptr<modules::LocalizationSystem> localization_system_;
     std::unique_ptr<TopicInput> topic_input_;
     modules::SaveMap save_map_;
 

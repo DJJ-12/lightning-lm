@@ -120,6 +120,17 @@ pclomp::NdtResult Localizer::AlignPose(const Eigen::Matrix4d &initial_pose_with_
 
     LOG(INFO) << "rough NDT alignment completed - best particle score: " << best_particle_ptr->nearest_voxel_transformation_likelihood;
     
+    const auto best_rpy = getRPYFromEigenMatrix(best_particle_ptr->pose.block<3, 3>(0, 0).cast<double>());
+    LOG(INFO) << "[INIT_2_5D] rough best pose: x: "
+            << best_particle_ptr->pose(0, 3)
+            << ", y: " << best_particle_ptr->pose(1, 3)
+            << ", z: " << best_particle_ptr->pose(2, 3)
+            << ", roll: " << best_rpy.x()
+            << ", pitch: " << best_rpy.y()
+            << ", yaw: " << best_rpy.z()
+            << ", NVTL: " << best_particle_ptr->nearest_voxel_transformation_likelihood
+            << ", TP: " << best_particle_ptr->transform_probability;
+
     return *best_particle_ptr;
 }
 

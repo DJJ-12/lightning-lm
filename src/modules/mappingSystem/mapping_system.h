@@ -22,7 +22,7 @@ namespace ui { class PangolinWindow; }
 namespace g2p5 { class G2P5; }
 namespace modules {
 
-struct MappingOptions {
+struct MappingSystemOptions {
     bool online_input = false;
     bool with_ui = false;
     bool with_2dui = false;
@@ -30,19 +30,19 @@ struct MappingOptions {
     bool step_on_kf = false;
 };
 
-struct MappingResult {
+struct MappingSystemResult {
     bool valid = false;
     std::vector<Keyframe::Ptr> keyframes;
     CloudPtr global_map;
     std::shared_ptr<nav_msgs::msg::OccupancyGrid> grid_map;
 };
 
-class Mapping {
+class MappingSystem {
    public:
-    Mapping() = default;
-    ~Mapping();
+    MappingSystem() = default;
+    ~MappingSystem();
 
-    bool Init(const std::string& yaml_path, const MappingOptions& options);
+    bool Init(const std::string& yaml_path, const MappingSystemOptions& options);
     bool Start();
     void Stop();
     void Reset();
@@ -52,14 +52,14 @@ class Mapping {
     void ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud);
     void ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud);
 
-    MappingResult GetResult();
+    MappingSystemResult GetResult();
 
    private:
     bool BuildInputCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud, CloudPtr& input);
     bool BuildInputCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud, CloudPtr& input);
     void HandleProcessedKeyframe(const Keyframe::Ptr& kf);
 
-    MappingOptions options_;
+    MappingSystemOptions options_;
     bool running_ = false;
     bool use_lio_sam_ = false;
     std::string yaml_path_;

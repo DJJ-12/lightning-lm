@@ -1,25 +1,36 @@
-#include "modules/localization/localization.h"
+#include "modules/localizationSystem/localization_system.h"
 
 #include <algorithm>
 #include <glog/logging.h>
 #include <rclcpp/node.hpp>
 #include <tf2_ros/transform_broadcaster.h>
+#include <yaml-cpp/yaml.h>
 
 #include "core/localization/localization.h"
 
 namespace lightning::modules {
 
-Localization::Localization(LocalizationOptions options) : options_(options) {}
+LocalizationSystem::LocalizationSystem(LocalizationSystemOptions options) : options_(options) {}
 
-Localization::~Localization() {
+LocalizationSystem::~LocalizationSystem() {
     Reset();
 }
 
-bool Localization::Init(const std::string& yaml_path, rclcpp::Node::SharedPtr node) {
+bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::SharedPtr node) {
     Reset();
     yaml_path_ = yaml_path;
+
+    YAML::Node yaml_node = YAML::LoadFile(yaml_path);
+    if (yaml_node["system"] && yaml_node["system"]["pub_tf"]) {
+        options_.pub_tf_ = yaml_node["system"]["pub_tf"].as<bool>();
+    } else if (yaml_node["pub_tf"]) {
+        options_.pub_tf_ = yaml_node["pub_tf"].as<bool>();
+    }
+    LOG(INFO) << "[LOCALIZATION_SYSTEM] pub_tf = " << options_.pub_tf_;
+
     loc::Localization::Options loc_options;
     loc_options.online_mode_ = true;
+    loc_options.pub_tf_ = options_.pub_tf_;
     loc_ = std::make_shared<loc::Localization>(loc_options);
     if (node) {
         SetupPublishers(node);
@@ -27,7 +38,7 @@ bool Localization::Init(const std::string& yaml_path, rclcpp::Node::SharedPtr no
     return true;
 }
 
-void Localization::SetupPublishers(rclcpp::Node::SharedPtr node) {
+void LocalizationSystem::SetupPublishers(rclcpp::Node::SharedPtr node) {
     if (!node) {
         return;
     }
@@ -38,7 +49,7 @@ void Localization::SetupPublishers(rclcpp::Node::SharedPtr node) {
         "/lightning/localization/pose_with_quality", rclcpp::QoS(10));
 
     loc_->SetTFCallback([this](const geometry_msgs::msg::TransformStamped& tf_msg) {
-        if (options_.pub_tf && tf_broadcaster_) {
+        if (options_.pub_tf_ && tf_broadcaster_) {
             tf_broadcaster_->sendTransform(tf_msg);
         }
 
@@ -84,7 +95,7 @@ void Localization::SetupPublishers(rclcpp::Node::SharedPtr node) {
     });
 }
 
-bool Localization::SetMapPath(const std::string& map_path) {
+bool LocalizationSystem::SetMapPath(const std::string& map_path) {
     if (!loc_) {
         LOG(ERROR) << "Localization is not initialized";
         return false;
@@ -99,13 +110,13 @@ bool Localization::SetMapPath(const std::string& map_path) {
     return map_ready_;
 }
 
-void Localization::PoseToQuaternionAndTranslation(const SE3& pose, Eigen::Quaterniond& q, Eigen::Vector3d& t) {
+void LocalizationSystem::PoseToQuaternionAndTranslation(const SE3& pose, Eigen::Quaterniond& q, Eigen::Vector3d& t) {
     q = pose.unit_quaternion();
     q.normalize();
     t = pose.translation();
 }
 
-bool Localization::SetInitialGuess(const SE3& init_pose, bool* initialized_now) {
+bool LocalizationSystem::SetInitialGuess(const SE3& init_pose, bool* initialized_now) {
     if (initialized_now) {
         *initialized_now = false;
     }
@@ -124,28 +135,28 @@ bool Localization::SetInitialGuess(const SE3& init_pose, bool* initialized_now) 
     return true;
 }
 
-void Localization::ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
+void LocalizationSystem::ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
     if (!loc_ || !map_ready_ || !has_initial_guess_) {
         return;
     }
     loc_->ProcessLidarMsg(cloud);
 }
 
-void Localization::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
+void LocalizationSystem::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
     if (!loc_ || !map_ready_ || !has_initial_guess_) {
         return;
     }
     loc_->ProcessLivoxLidarMsg(cloud);
 }
 
-loc::LocalizationResult Localization::GetLatestResult() const {
+loc::LocalizationResult LocalizationSystem::GetLatestResult() const {
     if (!loc_) {
         return loc::LocalizationResult();
     }
     return loc_->GetLatestResult();
 }
 
-void Localization::Reset() {
+void LocalizationSystem::Reset() {
     if (loc_) {
         loc_->Finish();
     }

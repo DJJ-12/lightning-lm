@@ -1,5 +1,6 @@
 #include "core/localization/localization.h"
 
+#include <glog/logging.h>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/filter.h>
 #include <pcl/filters/voxel_grid.h>
@@ -24,7 +25,12 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
 
     YAML::Node yaml_node = YAML::LoadFile(yaml_path);
     options_.with_ui_ = false;
-    options_.pub_tf_ = yaml_node["system"]["pub_tf"]
+    if (yaml_node["system"] && yaml_node["system"]["pub_tf"]) {
+        options_.pub_tf_ = yaml_node["system"]["pub_tf"].as<bool>();
+    } else if (yaml_node["pub_tf"]) {
+        options_.pub_tf_ = yaml_node["pub_tf"].as<bool>();
+    }
+    LOG(INFO) << "[LOCALIZATION_CORE] pub_tf = " << options_.pub_tf_;
     if (yaml_node["system"] && yaml_node["system"]["with_ui"]) {
         options_.with_ui_ = yaml_node["system"]["with_ui"].as<bool>();
     }

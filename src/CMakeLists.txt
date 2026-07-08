@@ -71,9 +71,9 @@ add_library(${PROJECT_NAME}.libs SHARED
         runtime/lightning.cc
         runtime/service.cc
 
-        modules/mapping/mapping.cc
-        modules/mapping/save_map.cc
-        modules/localization/localization.cc
+        modules/mappingSystem/mapping_system.cc
+        modules/mappingSystem/save_map.cc
+        modules/localizationSystem/localization_system.cc
 )
 
 ament_target_dependencies(

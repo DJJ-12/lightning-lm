@@ -64,17 +64,17 @@ Mode Lightning::CurrentMode() const {
 }
 
 void Lightning::ClearMappingLocked() {
-    if (mapping_) {
-        mapping_->Reset();
+    if (mapping_system_) {
+        mapping_system_->Reset();
     }
-    mapping_.reset();
+    mapping_system_.reset();
 }
 
 void Lightning::ClearLocalizationLocked() {
-    if (localization_) {
-        localization_->Reset();
+    if (localization_system_) {
+        localization_system_->Reset();
     }
-    localization_.reset();
+    localization_system_.reset();
 }
 
 void Lightning::StopTopicInputLocked() {
@@ -106,25 +106,25 @@ ServiceResult Lightning::StartOfflineMapping(const std::string& bag_path, const 
     }
 
     offline_thread_ = std::thread([this, bag_path, save_path]() {
-        auto mapping = std::make_unique<modules::Mapping>();
-        modules::MappingOptions mapping_options;
+        auto mapping_system = std::make_unique<modules::MappingSystem>();
+        modules::MappingSystemOptions mapping_options;
         mapping_options.online_input = false;
-        if (!mapping->Init(yaml_path_, mapping_options) || !mapping->Start()) {
-            task_.SetFinished(false, "failed to initialize Mapping");
+        if (!mapping_system->Init(yaml_path_, mapping_options) || !mapping_system->Start()) {
+            task_.SetFinished(false, "failed to initialize MappingSystem");
             return;
         }
 
         BagInput bag_input;
         const bool bag_ok = bag_input.Run(
             bag_path, yaml_path_,
-            [mapping_ptr = mapping.get()](const sensor_msgs::msg::Imu::SharedPtr& imu) {
-                mapping_ptr->ProcessIMU(imu);
+            [mapping_system_ptr = mapping_system.get()](const sensor_msgs::msg::Imu::SharedPtr& imu) {
+                mapping_system_ptr->ProcessIMU(imu);
             },
-            [mapping_ptr = mapping.get()](const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
-                mapping_ptr->ProcessCloud(cloud);
+            [mapping_system_ptr = mapping_system.get()](const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
+                mapping_system_ptr->ProcessCloud(cloud);
             },
-            [mapping_ptr = mapping.get()](const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
-                mapping_ptr->ProcessCloud(cloud);
+            [mapping_system_ptr = mapping_system.get()](const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
+                mapping_system_ptr->ProcessCloud(cloud);
             },
             [this](const BagInputProgress& progress) {
                 task_.SetProgress(progress.processed_frames, progress.total_frames, "offline mapping running");
@@ -132,13 +132,13 @@ ServiceResult Lightning::StartOfflineMapping(const std::string& bag_path, const 
             &offline_cancel_);
 
         if (!bag_ok || offline_cancel_.load()) {
-            mapping->Reset();
+            mapping_system->Reset();
             task_.SetState(TaskState::CANCELLED, "offline mapping cancelled");
             return;
         }
 
         task_.SetState(TaskState::SAVING, "saving offline map");
-        const auto result = mapping->GetResult();
+        const auto result = mapping_system->GetResult();
         const bool save_ok = save_map_.Save(save_path, result);
         // 保存完地图后，等待用户关闭UI窗口或取消任务
         if (save_ok) {
@@ -148,7 +148,7 @@ ServiceResult Lightning::StartOfflineMapping(const std::string& bag_path, const 
             }
         }
         // 等待完后再清理
-        mapping->Reset();
+        mapping_system->Reset();
         task_.SetFinished(save_ok, save_ok ? "offline mapping finished" : "failed to save offline map");
     });
 
@@ -171,13 +171,13 @@ ServiceResult Lightning::StartMapping(const std::string& map_id) {
     StopTopicInputLocked();
     ClearMappingLocked();
 
-    mapping_ = std::make_unique<modules::Mapping>();
-    modules::MappingOptions mapping_options;
+    mapping_system_ = std::make_unique<modules::MappingSystem>();
+    modules::MappingSystemOptions mapping_options;
     mapping_options.online_input = true;
-    if (!mapping_->Init(yaml_path_, mapping_options) || !mapping_->Start()) {
+    if (!mapping_system_->Init(yaml_path_, mapping_options) || !mapping_system_->Start()) {
         ClearMappingLocked();
-        task_.SetFinished(false, "failed to initialize Mapping");
-        return {false, "failed to initialize Mapping"};
+        task_.SetFinished(false, "failed to initialize MappingSystem");
+        return {false, "failed to initialize MappingSystem"};
     }
 
     topic_input_ = std::make_unique<TopicInput>();
@@ -185,15 +185,15 @@ ServiceResult Lightning::StartMapping(const std::string& map_id) {
         node_, yaml_path_,
         [this](const sensor_msgs::msg::Imu::SharedPtr& imu) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (mapping_) mapping_->ProcessIMU(imu);
+            if (mapping_system_) mapping_system_->ProcessIMU(imu);
         },
         [this](const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (mapping_) mapping_->ProcessCloud(cloud);
+            if (mapping_system_) mapping_system_->ProcessCloud(cloud);
         },
         [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (mapping_) mapping_->ProcessCloud(cloud);
+            if (mapping_system_) mapping_system_->ProcessCloud(cloud);
         },
         true);
     if (!ok) {
@@ -207,11 +207,11 @@ ServiceResult Lightning::StartMapping(const std::string& map_id) {
 }
 
 ServiceResult Lightning::SaveMappingLocked(const std::string& save_path) {
-    if (!mapping_) {
-        return {false, "Mapping is not running"};
+    if (!mapping_system_) {
+        return {false, "MappingSystem is not running"};
     }
     task_.SetState(TaskState::SAVING, "saving map");
-    const auto result = mapping_->GetResult();
+    const auto result = mapping_system_->GetResult();
     const bool ok = save_map_.Save(save_path, result);
     return {ok, ok ? "map saved" : "failed to save map"};
 }
@@ -221,11 +221,11 @@ ServiceResult Lightning::FinishMapping(bool save_map, const std::string& save_pa
     if (mode_ != Mode::ONLINE_MAPPING) {
         return {false, "finish_mapping is only allowed in online_mapping mode"};
     }
-    if (!mapping_) {
+    if (!mapping_system_) {
         return {false, "no online mapping task"};
     }
     StopTopicInputLocked();
-    mapping_->Stop();
+    mapping_system_->Stop();
 
     ServiceResult result{true, "online mapping finished without saving"};
     if (save_map && !save_path.empty()) {
@@ -238,8 +238,8 @@ ServiceResult Lightning::FinishMapping(bool save_map, const std::string& save_pa
 
 ServiceResult Lightning::SaveCurrentMap(const std::string& save_path) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (mode_ != Mode::ONLINE_MAPPING || !mapping_) {
-        return {false, "save_map is only allowed while online Mapping exists"};
+    if (mode_ != Mode::ONLINE_MAPPING || !mapping_system_) {
+        return {false, "save_map is only allowed while online MappingSystem exists"};
     }
     if (save_path.empty()) {
         return {false, "save_path is empty"};
@@ -258,13 +258,13 @@ ServiceResult Lightning::SetMapPath(const std::string& map_path) {
 
     StopTopicInputLocked();
     ClearLocalizationLocked();
-    localization_ = std::make_unique<modules::Localization>();
-    if (!localization_->Init(yaml_path_, node_)) {
+    localization_system_ = std::make_unique<modules::LocalizationSystem>();
+    if (!localization_system_->Init(yaml_path_, node_)) {
         ClearLocalizationLocked();
-        task_.SetFinished(false, "failed to initialize Localization");
-        return {false, "failed to initialize Localization"};
+        task_.SetFinished(false, "failed to initialize LocalizationSystem");
+        return {false, "failed to initialize LocalizationSystem"};
     }
-    if (!localization_->SetMapPath(map_path)) {
+    if (!localization_system_->SetMapPath(map_path)) {
         ClearLocalizationLocked();
         task_.SetFinished(false, "failed to set map path: " + map_path);
         return {false, "failed to set map path: " + map_path};
@@ -279,11 +279,11 @@ ServiceResult Lightning::SetLocation(const SE3& init_pose, bool* initialized_now
     if (mode_ != Mode::LOCALIZATION) {
         return {false, "set_location is only allowed in localization mode"};
     }
-    if (!localization_) {
+    if (!localization_system_) {
         return {false, "map path is not set"};
     }
     bool initialized = false;
-    if (!localization_->SetInitialGuess(init_pose, &initialized)) {
+    if (!localization_system_->SetInitialGuess(init_pose, &initialized)) {
         return {false, "failed to set initial pose"};
     }
     if (initialized_now) {
@@ -297,11 +297,11 @@ ServiceResult Lightning::SetLocation(const SE3& init_pose, bool* initialized_now
             nullptr,
             [this](const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (localization_) localization_->ProcessCloud(cloud);
+                if (localization_system_) localization_system_->ProcessCloud(cloud);
             },
             [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (localization_) localization_->ProcessCloud(cloud);
+                if (localization_system_) localization_system_->ProcessCloud(cloud);
             },
             false);
         if (!ok) {
@@ -315,10 +315,10 @@ ServiceResult Lightning::SetLocation(const SE3& init_pose, bool* initialized_now
 
 loc::LocalizationResult Lightning::GetLocalizationQuality() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!localization_) {
+    if (!localization_system_) {
         return loc::LocalizationResult();
     }
-    return localization_->GetLatestResult();
+    return localization_system_->GetLatestResult();
 }
 
 ServiceResult Lightning::CancelTask() {
