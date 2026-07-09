@@ -71,7 +71,7 @@ g2p5:
 
 system:
   frontend: "lio_sam"
-  with_ui: true
+  with_ui: false
   with_2dui: false
   with_g2p5: false
   step_on_kf: false
