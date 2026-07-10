@@ -16,7 +16,6 @@
 #include "lightning_interfaces/srv/set_map_path.hpp"
 #include "lightning_interfaces/srv/set_mode.hpp"
 #include "lightning_interfaces/srv/start_mapping.hpp"
-#include "lightning_interfaces/srv/start_offline_mapping.hpp"
 
 #include "runtime/lightning.h"
 
@@ -33,7 +32,6 @@ class Service {
     rclcpp::Service<lightning_interfaces::srv::SetMode>::SharedPtr set_mode_srv_;
     rclcpp::Service<lightning_interfaces::srv::GetStatus>::SharedPtr get_status_srv_;
     rclcpp::Service<lightning_interfaces::srv::CancelTask>::SharedPtr cancel_task_srv_;
-    rclcpp::Service<lightning_interfaces::srv::StartOfflineMapping>::SharedPtr start_offline_mapping_srv_;
     rclcpp::Service<lightning_interfaces::srv::GetOfflineMappingProgress>::SharedPtr get_offline_progress_srv_;
     rclcpp::Service<lightning_interfaces::srv::StartMapping>::SharedPtr start_mapping_srv_;
     rclcpp::Service<lightning_interfaces::srv::FinishMapping>::SharedPtr finish_mapping_srv_;

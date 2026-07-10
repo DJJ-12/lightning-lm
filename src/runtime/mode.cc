@@ -1,11 +1,22 @@
 #include "runtime/mode.h"
 
 #include <algorithm>
+#include <cctype>
 
 namespace lightning::runtime {
 
 namespace {
 std::string Normalize(std::string value) {
+    const auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char c) {
+        return std::isspace(c);
+    });
+    const auto last = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) {
+        return std::isspace(c);
+    }).base();
+    if (first >= last) {
+        return "";
+    }
+    value = std::string(first, last);
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
     });

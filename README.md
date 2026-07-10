@@ -52,7 +52,6 @@ localization   : TopicInput -> Localization
 /lightning/get_status
 /lightning/cancel_task
 
-/lightning/start_offline_mapping
 /lightning/get_offline_mapping_progress
 
 /lightning/start_mapping
@@ -78,7 +77,7 @@ ros2 run lightning run_lightning --config /home/mt/workspace/src/lightning-lm/co
 
 ```bash
 ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'offline_mapping'}"
-ros2 service call /lightning/start_offline_mapping lightning_interfaces/srv/StartOfflineMapping "{bag_path: '/home/mt/dataset/20260329', save_path: '/home/mt/maps/cx16_map'}"
+ros2 service call /lightning/start_mapping lightning_interfaces/srv/StartMapping "{bag_path: '/home/mt/dataset/20260329', save_path: '/home/mt/maps/cx16_map'}"
 ros2 service call /lightning/get_offline_mapping_progress lightning_interfaces/srv/GetOfflineMappingProgress "{}"
 ```
 
@@ -86,8 +85,8 @@ ros2 service call /lightning/get_offline_mapping_progress lightning_interfaces/s
 
 ```bash
 ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'online_mapping'}"
-ros2 service call /lightning/start_mapping lightning_interfaces/srv/StartMapping "{map_path: 'map_001'}"
-ros2 service call /lightning/finish_mapping lightning_interfaces/srv/FinishMapping "{save_map: true, save_path: '/home/mt/maps/online_map'}"
+ros2 service call /lightning/start_mapping lightning_interfaces/srv/StartMapping "{bag_path: '', save_path: '/home/mt/maps/cx16_map'}"
+ros2 service call /lightning/finish_mapping lightning_interfaces/srv/FinishMapping "{}"
 ```
 
 ### 在线定位

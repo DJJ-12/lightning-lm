@@ -66,15 +66,6 @@ bool Service::Init(rclcpp::Node::SharedPtr node, std::shared_ptr<Lightning> ligh
             response->message = result.message;
         });
 
-    start_offline_mapping_srv_ = node_->create_service<lightning_interfaces::srv::StartOfflineMapping>(
-        "/lightning/start_offline_mapping",
-        [this](const lightning_interfaces::srv::StartOfflineMapping::Request::SharedPtr request,
-               lightning_interfaces::srv::StartOfflineMapping::Response::SharedPtr response) {
-            auto result = lightning_->StartOfflineMapping(request->bag_path, request->save_path);
-            response->success = result.success;
-            response->message = result.message;
-        });
-
     get_offline_progress_srv_ = node_->create_service<lightning_interfaces::srv::GetOfflineMappingProgress>(
         "/lightning/get_offline_mapping_progress",
         [this](const lightning_interfaces::srv::GetOfflineMappingProgress::Request::SharedPtr,
@@ -93,16 +84,16 @@ bool Service::Init(rclcpp::Node::SharedPtr node, std::shared_ptr<Lightning> ligh
         "/lightning/start_mapping",
         [this](const lightning_interfaces::srv::StartMapping::Request::SharedPtr request,
                lightning_interfaces::srv::StartMapping::Response::SharedPtr response) {
-            auto result = lightning_->StartMapping(request->map_path);
+            auto result = lightning_->StartMapping(request->bag_path, request->save_path);
             response->success = result.success;
             response->message = result.message;
         });
 
     finish_mapping_srv_ = node_->create_service<lightning_interfaces::srv::FinishMapping>(
         "/lightning/finish_mapping",
-        [this](const lightning_interfaces::srv::FinishMapping::Request::SharedPtr request,
+        [this](const lightning_interfaces::srv::FinishMapping::Request::SharedPtr,
                lightning_interfaces::srv::FinishMapping::Response::SharedPtr response) {
-            auto result = lightning_->FinishMapping(request->save_map, request->save_path);
+            auto result = lightning_->FinishMapping();
             response->success = result.success;
             response->message = result.message;
         });

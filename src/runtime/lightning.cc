@@ -82,7 +82,7 @@ void Lightning::ClearMappingLocked() {
         mapping_system_->Reset();
     }
     mapping_system_.reset();
-    online_mapping_map_path_.clear();
+    mapping_save_path_.clear();
 }
 
 void Lightning::ClearLocalizationLocked() {
@@ -100,11 +100,11 @@ void Lightning::StopTopicInputLocked() {
     topic_input_.reset();
 }
 
-ServiceResult Lightning::StartOfflineMapping(const std::string& bag_path, const std::string& save_path) {
+ServiceResult Lightning::StartBagMappingTask(const std::string& bag_path, const std::string& save_path) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (mode_ != Mode::OFFLINE_MAPPING) {
-            return {false, "start_offline_mapping is only allowed in offline_mapping mode"};
+            return {false, "start_mapping is only allowed in offline_mapping mode for offline mapping"};
         }
         if (task_.State() == TaskState::RUNNING || task_.State() == TaskState::SAVING) {
             return {false, "offline mapping is already running"};
@@ -175,17 +175,38 @@ TaskSnapshot Lightning::GetOfflineMappingProgress() const {
     return task_.Snapshot();
 }
 
-ServiceResult Lightning::StartMapping(const std::string& map_path) {
+ServiceResult Lightning::StartMapping(const std::string& bag_path, const std::string& save_path) {
+    Mode current_mode = Mode::IDLE;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        current_mode = mode_;
+        if (current_mode == Mode::OFFLINE_MAPPING) {
+            // Bag mapping has its own locking because it starts a worker thread.
+        } else if (current_mode != Mode::ONLINE_MAPPING) {
+            return {false, "start_mapping is only allowed in offline_mapping or online_mapping mode"};
+        }
+    }
+
+    if (current_mode == Mode::OFFLINE_MAPPING) {
+        return StartBagMappingTask(bag_path, save_path);
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
     if (mode_ != Mode::ONLINE_MAPPING) {
-        return {false, "start_mapping is only allowed in online_mapping mode"};
+        return {false, "mode changed before online mapping started"};
     }
     if (task_.State() == TaskState::RUNNING || task_.State() == TaskState::SAVING) {
         return {false, "online mapping is already running"};
     }
+    if (save_path.empty()) {
+        return {false, "save_path must not be empty for online mapping"};
+    }
+    if (!bag_path.empty()) {
+        LOG(INFO) << "online mapping ignores bag_path: " << bag_path;
+    }
     StopTopicInputLocked();
     ClearMappingLocked();
-    online_mapping_map_path_ = map_path;
+    mapping_save_path_ = save_path;
 
     mapping_system_ = std::make_unique<modules::MappingSystem>();
     modules::MappingSystemOptions mapping_options;
@@ -219,7 +240,7 @@ ServiceResult Lightning::StartMapping(const std::string& map_path) {
         return {false, "failed to start TopicInput"};
     }
     task_.Reset(TaskState::RUNNING, "online mapping running");
-    return {true, map_path.empty() ? "online mapping started" : "online mapping started: " + map_path};
+    return {true, "online mapping started, save_path: " + save_path};
 }
 
 ServiceResult Lightning::SaveMappingLocked(const std::string& save_path) {
@@ -232,7 +253,7 @@ ServiceResult Lightning::SaveMappingLocked(const std::string& save_path) {
     return {ok, ok ? "map saved" : "failed to save map"};
 }
 
-ServiceResult Lightning::FinishMapping(bool save_map, const std::string& save_path) {
+ServiceResult Lightning::FinishMapping() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (mode_ != Mode::ONLINE_MAPPING) {
         return {false, "finish_mapping is only allowed in online_mapping mode"};
@@ -243,14 +264,9 @@ ServiceResult Lightning::FinishMapping(bool save_map, const std::string& save_pa
     StopTopicInputLocked();
     mapping_system_->Stop();
 
-    ServiceResult result{true, "online mapping finished without saving"};
-    if (save_map) {
-        const std::string target_save_path = save_path.empty() ? online_mapping_map_path_ : save_path;
-        if (target_save_path.empty()) {
-            result = {false, "save_path is empty"};
-        } else {
-            result = SaveMappingLocked(target_save_path);
-        }
+    ServiceResult result{false, "save_path is empty"};
+    if (!mapping_save_path_.empty()) {
+        result = SaveMappingLocked(mapping_save_path_);
     }
     ClearMappingLocked();
     task_.SetFinished(result.success, result.message);
