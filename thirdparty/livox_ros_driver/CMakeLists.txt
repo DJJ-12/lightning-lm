@@ -30,6 +30,9 @@ message(STATUS "${PROJECT_NAME} version: ${LIVOX_ROS_DRIVER2_VERSION}")
 #---------------------------------------------------------------------------------------
 add_definitions(-DBUILDING_ROS2)
 
+# 抑制开发警告
+set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS ON)
+
 # find dependencies
 # uncomment the following section in order to fill in
 # further dependencies manually.

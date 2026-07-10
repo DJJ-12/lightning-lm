@@ -31,6 +31,9 @@ else()
   message(STATUS "glog found by CMake package")
 endif()
 
+# 抑制开发警告
+set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS ON)
+
 find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED)
 find_package(yaml-cpp REQUIRED)

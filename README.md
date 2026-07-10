@@ -97,6 +97,8 @@ ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: '
 ros2 service call /lightning/set_map_path lightning_interfaces/srv/SetMapPath "{map_path: '/home/mt/maps/cx16_map'}"
 ros2 service call /lightning/set_location lightning_interfaces/srv/SetLocation "{x: 0.0, y: 0.0, z: 0.0, roll: 0.0, pitch: 0.0, yaw: 0.0}"
 ros2 service call /lightning/get_localization_quality lightning_interfaces/srv/GetLocalizationQuality "{}"
+
+ros2 service call /lightning/cancel_task
 ```
 ### 取消任务
 
