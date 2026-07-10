@@ -1,7 +1,66 @@
 #include "core/lio/lio_sam/map_optimization.h"
 
+#include <array>
+#include <unordered_map>
+
+namespace {
+struct HybridTrustedPoseState {
+    bool has_last = false;
+    bool has_prev = false;
+    bool has_last_imu = false;
+    double last_time = -1.0;
+    double prev_time = -1.0;
+    std::array<float, 6> last{};
+    std::array<float, 6> prev{};
+    std::array<float, 6> last_imu{};
+};
+
+std::unordered_map<const mapOptimization*, HybridTrustedPoseState> g_hybrid_trusted_pose;
+
+HybridTrustedPoseState& HybridTrustedPose(const mapOptimization* owner) {
+    return g_hybrid_trusted_pose[owner];
+}
+
+bool HybridFinite6(const std::array<float, 6>& transform) {
+    for (float v : transform) {
+        if (!std::isfinite(static_cast<double>(v)))
+            return false;
+    }
+    return true;
+}
+
+constexpr double kHybridTrustedExtrapolateMaxDt = 0.50;
+constexpr double kHybridLowSpeedMaxTranslationSpeed = 0.80;
+constexpr float kHybridFallbackMaxTranslationStep = 0.30f;
+
+Eigen::Affine3f BuildFallbackHybridAffine(
+    const Eigen::Affine3f& priorAffine,
+    const Eigen::Affine3f& lmAffine,
+    float* rawDeltaNorm,
+    float* usedDeltaNorm) {
+    Eigen::Affine3f hybridAffine = priorAffine;
+
+    Eigen::Vector3f delta = lmAffine.translation() - priorAffine.translation();
+    const float deltaNorm = delta.norm();
+    if (rawDeltaNorm)
+        *rawDeltaNorm = deltaNorm;
+
+    if (std::isfinite(static_cast<double>(deltaNorm)) &&
+        deltaNorm > kHybridFallbackMaxTranslationStep &&
+        deltaNorm > 1e-6f) {
+        delta *= kHybridFallbackMaxTranslationStep / deltaNorm;
+    }
+
+    if (usedDeltaNorm)
+        *usedDeltaNorm = delta.norm();
+
+    // Keep prior rotation. Only borrow the bounded LM translation trend.
+    hybridAffine.translation() = priorAffine.translation() + delta;
+    return hybridAffine;
+}
+}  // namespace
+
 mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamServer("lio_sam_mapOptimization", options){
-        cout << "------------build version - 20260516-1739 -------------------\n" << endl;
         ISAM2Params parameters;
         parameters.relinearizeThreshold = 0.1;
         parameters.relinearizeSkip = 1;
@@ -35,6 +94,8 @@ mapOptimization::~mapOptimization() {
     loopClosureThreadRunning_.store(false);
     if (loopClosureThread_.joinable())
         loopClosureThread_.join();
+
+    g_hybrid_trusted_pose.erase(this);
 
     if (isam != nullptr) {
         delete isam;
@@ -679,6 +740,41 @@ bool mapOptimization::acceptMappingPose(const std::string& source){
         mappingFailureCount = 0;
         mappingFirstFailureTime = -1.0;
         surroundingKeyFrameIndices.clear();
+
+        // Hybrid rule:
+        // Only reliable INIT/LM/ICP poses update the trusted pose cache used in normal tracking.
+        // Unreliable fallback poses are published by scan2MapOptimization(), but never enter this cache.
+        HybridTrustedPoseState& trusted = HybridTrustedPose(this);
+        if (transformIsFinite(transformTobeMapped))
+        {
+            if (trusted.has_last && timeLaserInfoCur > trusted.last_time + 1e-3)
+            {
+                trusted.prev = trusted.last;
+                trusted.prev_time = trusted.last_time;
+                trusted.has_prev = true;
+            }
+
+            for (int i = 0; i < 6; ++i)
+                trusted.last[i] = transformTobeMapped[i];
+            trusted.last_time = timeLaserInfoCur;
+            trusted.has_last = true;
+
+            if (cloudInfoPtr && cloudInfoPtr->imu_available)
+            {
+                trusted.last_imu[0] = cloudInfoPtr->imu_roll_init;
+                trusted.last_imu[1] = cloudInfoPtr->imu_pitch_init;
+                trusted.last_imu[2] = cloudInfoPtr->imu_yaw_init;
+                trusted.last_imu[3] = 0.0f;
+                trusted.last_imu[4] = 0.0f;
+                trusted.last_imu[5] = 0.0f;
+                trusted.has_last_imu = HybridFinite6(trusted.last_imu);
+            }
+            else
+            {
+                trusted.has_last_imu = false;
+            }
+        }
+
         return true;
     }
 
@@ -851,15 +947,13 @@ void mapOptimization::updateInitialGuess(){
 
         if (cloudKeyPoses3D->points.empty())
         {
-            transformTobeMapped[0] = 0.0f;
-            transformTobeMapped[1] = 0.0f;
-            transformTobeMapped[2] = 0.0f;
-
-            if (!useImuHeadingInitialization)
-                transformTobeMapped[2] = 0.0f;
-
+            // Old-version advantage: initialize the first map pose with IMU roll/pitch/yaw.
+            // If heading initialization is disabled, only yaw is reset to zero.
             if (cloudInfoPtr && cloudInfoPtr->imu_available)
             {
+                transformTobeMapped[0] = cloudInfoPtr->imu_roll_init;
+                transformTobeMapped[1] = cloudInfoPtr->imu_pitch_init;
+                transformTobeMapped[2] = cloudInfoPtr->imu_yaw_init;
                 lastImuTransformation = pcl::getTransformation(
                     0.0f, 0.0f, 0.0f,
                     cloudInfoPtr->imu_roll_init,
@@ -868,12 +962,86 @@ void mapOptimization::updateInitialGuess(){
             }
             else
             {
+                transformTobeMapped[0] = 0.0f;
+                transformTobeMapped[1] = 0.0f;
+                transformTobeMapped[2] = 0.0f;
                 lastImuTransformation = Eigen::Affine3f::Identity();
             }
+
+            if (!useImuHeadingInitialization)
+                transformTobeMapped[2] = 0.0f;
+
+            transformTobeMapped[3] = 0.0f;
+            transformTobeMapped[4] = 0.0f;
+            transformTobeMapped[5] = 0.0f;
             lastImuPreTransAvailable = false;
 
             copyTransform(transformTobeMapped, frameInitialGuessTransform);
             return;
+        }
+
+        HybridTrustedPoseState& trusted = HybridTrustedPose(this);
+        if (mappingFailureCount == 0 && trusted.has_last && HybridFinite6(trusted.last))
+        {
+            Eigen::Affine3f initialGuessAffine = pcl::getTransformation(
+                trusted.last[3], trusted.last[4], trusted.last[5],
+                trusted.last[0], trusted.last[1], trusted.last[2]);
+
+            if (cloudInfoPtr && cloudInfoPtr->imu_available && trusted.has_last_imu)
+            {
+                Eigen::Affine3f acceptedImuAffine = pcl::getTransformation(
+                    0.0f, 0.0f, 0.0f,
+                    trusted.last_imu[0], trusted.last_imu[1], trusted.last_imu[2]);
+                Eigen::Affine3f currentImuAffine = pcl::getTransformation(
+                    0.0f, 0.0f, 0.0f,
+                    cloudInfoPtr->imu_roll_init,
+                    cloudInfoPtr->imu_pitch_init,
+                    cloudInfoPtr->imu_yaw_init);
+                initialGuessAffine = initialGuessAffine * acceptedImuAffine.inverse() * currentImuAffine;
+                lastImuTransformation = currentImuAffine;
+            }
+
+            const double dtAccepted = timeLaserInfoCur - trusted.last_time;
+            if (trusted.has_prev &&
+                std::isfinite(dtAccepted) &&
+                dtAccepted > 0.0 &&
+                dtAccepted <= kHybridTrustedExtrapolateMaxDt)
+            {
+                const double dtHist = trusted.last_time - trusted.prev_time;
+                if (std::isfinite(dtHist) && dtHist > 1e-3)
+                {
+                    double vx = (trusted.last[3] - trusted.prev[3]) / dtHist;
+                    double vy = (trusted.last[4] - trusted.prev[4]) / dtHist;
+                    double vz = (trusted.last[5] - trusted.prev[5]) / dtHist;
+                    const double speed = std::sqrt(vx * vx + vy * vy + vz * vz);
+                    if (speed > kHybridLowSpeedMaxTranslationSpeed)
+                    {
+                        const double scale = kHybridLowSpeedMaxTranslationSpeed / std::max(speed, 1e-6);
+                        vx *= scale;
+                        vy *= scale;
+                        vz *= scale;
+                    }
+                    initialGuessAffine.translation().x() += static_cast<float>(vx * dtAccepted);
+                    initialGuessAffine.translation().y() += static_cast<float>(vy * dtAccepted);
+                    initialGuessAffine.translation().z() += static_cast<float>(vz * dtAccepted);
+                }
+            }
+
+            setTransformFromAffine(initialGuessAffine);
+            copyTransform(transformTobeMapped, frameInitialGuessTransform);
+            return;
+        }
+
+        if (mappingFailureCount > 0 && debugTiming)
+        {
+            static int recovery_guess_log_count = 0;
+            if (++recovery_guess_log_count % 20 == 0)
+            {
+                RCLCPP_INFO(get_logger(),
+                    "[INIT_GUESS][RECOVERY] failureCount=%d. Use new-version fallback/prior propagation, "
+                    "not frozen last-trusted pose, so mapping can recover after weak geometry.",
+                    mappingFailureCount);
+            }
         }
 
         if (cloudInfoPtr && cloudInfoPtr->odom_available)
@@ -1582,13 +1750,19 @@ void mapOptimization::scan2MapOptimization(){
 
             if (lmRan && lmFinite)
             {
-                setTransformFromAffine(lmAffine);
+                
+                float rawDeltaNorm = 0.0f;
+                float usedDeltaNorm = 0.0f;
+                Eigen::Affine3f hybridAffine = BuildFallbackHybridAffine(
+                    priorAffine, lmAffine, &rawDeltaNorm, &usedDeltaNorm);
+
+                setTransformFromAffine(hybridAffine);
                 transformUpdate();
                 currentOdomCov = lmMotionOk ? 1 : 2;
                 isDegenerate = true;
                 mappingPoseReliable = false;
                 lidarCorrectionFlag = 2;
-                mappingPoseSource = "FALLBACK_LM";
+                mappingPoseSource = "FALLBACK_HYBRID";
                 mappingTrackingState = MappingTrackingState::LOST;
                 if (mappingFailureCount == 0)
                     mappingFirstFailureTime = timeLaserInfoCur;
@@ -1597,8 +1771,11 @@ void mapOptimization::scan2MapOptimization(){
                 if (logThisFrame)
                 {
                     RCLCPP_INFO(get_logger(),
-                        "[FALLBACK][PUBLISH_LM] ICP failed. lmMotionOK=%d cov=%d save=no",
+                        "[FALLBACK][PUBLISH_HYBRID] ICP failed. Use bounded LM translation + prior rotation. "
+                        "lmMotionOK=%d rawDelta=%.3f usedDelta=%.3f cov=%d save=no",
                         int(lmMotionOk),
+                        rawDeltaNorm,
+                        usedDeltaNorm,
                         currentOdomCov);
                 }
                 return;
@@ -1919,3 +2096,4 @@ void mapOptimization::updateOdometryState(){
 
         updateOutputTrajectoryHistory(trans2Affine3f(transformTobeMapped));
     }
+

@@ -365,7 +365,24 @@ bool Localization::TryInitializeWithCurrentCloud() {
         PublishResult(res);
         return false;
     }
+    const Eigen::Matrix4d T_map_base_init = aligned_pose;
 
+    LOG(INFO) << "[INIT_2_5D] T_map_base_init: x="
+            << T_map_base_init(0, 3)
+            << ", y=" << T_map_base_init(1, 3)
+            << ", z=" << T_map_base_init(2, 3);
+
+    LOG(INFO) << "[INIT_2_5D] init_guess: x="
+            << init_guess(0, 3)
+            << ", y=" << init_guess(1, 3)
+            << ", z=" << init_guess(2, 3);
+
+    LOG(INFO) << "[INIT_2_5D] quality: TP="
+            << quality.transform_probability
+            << ", NVTL=" << quality.nearest_voxel_likelihood
+            << ", iterations=" << quality.iteration_num
+            << ", level=" << quality.quality_level
+            << ", reliable=" << quality.is_reliable;
     {
         UL lock(global_mutex_);
         latest_pose_ = aligned_pose;
