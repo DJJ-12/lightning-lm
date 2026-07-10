@@ -78,7 +78,7 @@ system:
   with_2dui: false
   with_g2p5: false
   step_on_kf: false
-  pub_tf: true
+  pub_tf: false
 
 maps:
   delete_when_unload: false
@@ -152,15 +152,6 @@ lio_sam:
 
 localization:
   map_path: "./data/cx16_map/"
-
-  initial_pose:
-    use_initial_pose: false
-    x: 0.0
-    y: 0.0
-    z: 0.0
-    roll: 0.0
-    pitch: 0.0
-    yaw: 0.0
 
   quality:
     excellent_threshold: 4.0

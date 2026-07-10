@@ -73,18 +73,18 @@ class Localization {
         const SE3& T_base_lidar,
         const std::string& base_link_frame) const;
     void HandleCloudFrame(const LocCloudFrame& frame);
-    void LidarLocProcCloud(const LocCloudFrame& frame);
+    void ProcessLocalizationCloud(const LocCloudFrame& frame);
     void PublishResult(const LocalizationResult& result);
     static SE3 Matrix4dToSE3(const Eigen::Matrix4d& pose);
 
     std::mutex global_mutex_;
-    std::mutex lidar_loc_mutex_;
+    std::mutex localizer_mutex_;
     Options options_;
 
-    robot_localizer::Localizer lidar_loc_;
+    robot_localizer::Localizer localizer_;
 
     bool map_loaded_ = false;
-    bool lidar_loc_inited_ = false;
+    bool localization_inited_ = false;
     bool has_pending_initial_pose_ = false;
     bool init_in_progress_ = false;
 

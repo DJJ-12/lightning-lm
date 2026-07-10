@@ -20,7 +20,7 @@ Localization::Localization(Options options) : options_(options) {}
 bool Localization::Init(const std::string& yaml_path, const std::string& global_map_path) {
     Finish();
 
-    std::lock_guard<std::mutex> loc_lock(lidar_loc_mutex_);
+    std::lock_guard<std::mutex> loc_lock(localizer_mutex_);
     UL lock(global_mutex_);
 
     YAML::Node yaml_node = YAML::LoadFile(yaml_path);
@@ -88,13 +88,13 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
         global_map_path + "/BlockMap/pointcloud_map_metadata.yaml";
     const std::string pcd_directory = global_map_path + "/BlockMap/pointcloud_map";
 
-    lidar_loc_.MapReset();
-    lidar_loc_.SetStaticMap(metadata_path, pcd_directory);
-    lidar_loc_.SetQualityThresholds(quality_thresholds_);
-    lidar_loc_.ResetLocalizationState();
+    localizer_.MapReset();
+    localizer_.SetStaticMap(metadata_path, pcd_directory);
+    localizer_.SetQualityThresholds(quality_thresholds_);
+    localizer_.ResetLocalizationState();
 
     map_loaded_ = true;
-    lidar_loc_inited_ = false;
+    localization_inited_ = false;
     has_pending_initial_pose_ = false;
     init_in_progress_ = false;
     pending_initial_pose_ = Eigen::Matrix4d::Identity();
@@ -226,7 +226,7 @@ void Localization::HandleCloudFrame(const LocCloudFrame& frame) {
     bool initializing = false;
     {
         UL lock(global_mutex_);
-        initialized = lidar_loc_inited_;
+        initialized = localization_inited_;
         has_init_pose = has_pending_initial_pose_;
         initializing = init_in_progress_;
     }
@@ -242,19 +242,19 @@ void Localization::HandleCloudFrame(const LocCloudFrame& frame) {
         return;
     }
 
-    LidarLocProcCloud(frame);
+    ProcessLocalizationCloud(frame);
 }
 
-void Localization::LidarLocProcCloud(const LocCloudFrame& frame) {
+void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
     if (!frame.cloud || frame.cloud->empty()) {
         return;
     }
 
-    std::lock_guard<std::mutex> loc_lock(lidar_loc_mutex_);
+    std::lock_guard<std::mutex> loc_lock(localizer_mutex_);
 
     {
         UL lock(global_mutex_);
-        if (!lidar_loc_inited_ || init_in_progress_) {
+        if (!localization_inited_ || init_in_progress_) {
             return;
         }
     }
@@ -275,7 +275,7 @@ void Localization::LidarLocProcCloud(const LocCloudFrame& frame) {
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_reg(new pcl::PointCloud<pcl::PointXYZ>());
     robot_localizer::LocalizationQuality quality;
 
-    const bool reliable = lidar_loc_.RegisterFrame(current_cloud, cloud_reg, pose, quality);
+    const bool reliable = localizer_.RegisterFrame(current_cloud, cloud_reg, pose, quality);
 
     {
         UL lock(global_mutex_);
@@ -285,7 +285,7 @@ void Localization::LidarLocProcCloud(const LocCloudFrame& frame) {
     LocalizationResult res;
     res.timestamp_ = frame.timestamp;
     res.valid_ = true;
-    res.lidar_loc_valid_ = reliable;
+    res.localization_valid_ = reliable;
     res.pose_ = Matrix4dToSE3(pose);
     res.confidence_ = quality.transform_probability;
     res.status_ = reliable ? LocalizationStatus::GOOD : LocalizationStatus::FAIL;
@@ -311,14 +311,14 @@ bool Localization::TryInitializeWithCurrentCloud() {
         timestamp = latest_cloud_timestamp_;
     }
 
-    std::lock_guard<std::mutex> loc_lock(lidar_loc_mutex_);
+    std::lock_guard<std::mutex> loc_lock(localizer_mutex_);
 
     Eigen::Matrix4d init_guess = Eigen::Matrix4d::Identity();
     {
         UL lock(global_mutex_);
         if (!map_loaded_ ||
             !has_pending_initial_pose_ ||
-            lidar_loc_inited_ ||
+            localization_inited_ ||
             init_in_progress_) {
             return false;
         }
@@ -336,14 +336,14 @@ bool Localization::TryInitializeWithCurrentCloud() {
         new pcl::PointCloud<pcl::PointXYZ>());
     robot_localizer::LocalizationQuality quality;
 
-    const bool ok = lidar_loc_.GetInitPose(
+    const bool ok = localizer_.GetInitPose(
         init_guess, aligned_pose, input_cloud, output_cloud, quality);
 
     if (!ok || !quality.is_reliable) {
         {
             UL lock(global_mutex_);
             // Keep the pending initial pose so a new cloud can retry it, but do not enter tracking.
-            lidar_loc_inited_ = false;
+            localization_inited_ = false;
             has_pending_initial_pose_ = true;
             init_in_progress_ = false;
         }
@@ -351,7 +351,7 @@ bool Localization::TryInitializeWithCurrentCloud() {
         LocalizationResult res;
         res.timestamp_ = timestamp;
         res.valid_ = true;
-        res.lidar_loc_valid_ = false;
+        res.localization_valid_ = false;
         // Report the rejected aligned pose for diagnostics, but do not publish TF because status is FAIL.
         res.pose_ = Matrix4dToSE3(aligned_pose);
         res.confidence_ = quality.transform_probability;
@@ -386,7 +386,7 @@ bool Localization::TryInitializeWithCurrentCloud() {
     {
         UL lock(global_mutex_);
         latest_pose_ = aligned_pose;
-        lidar_loc_inited_ = true;
+        localization_inited_ = true;
         has_pending_initial_pose_ = false;
         init_in_progress_ = false;
     }
@@ -394,7 +394,7 @@ bool Localization::TryInitializeWithCurrentCloud() {
     LocalizationResult res;
     res.timestamp_ = timestamp;
     res.valid_ = true;
-    res.lidar_loc_valid_ = true;
+    res.localization_valid_ = true;
     res.pose_ = Matrix4dToSE3(aligned_pose);
     res.confidence_ = quality.transform_probability;
     res.status_ = LocalizationStatus::GOOD;
@@ -422,7 +422,7 @@ void Localization::Finish() {
     {
         UL lock(global_mutex_);
         map_loaded_ = false;
-        lidar_loc_inited_ = false;
+        localization_inited_ = false;
         has_pending_initial_pose_ = false;
         init_in_progress_ = false;
         latest_cloud_timestamp_ = 0.0;
@@ -439,16 +439,16 @@ bool Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
     init_guess.block<3, 1>(0, 3) = t;
 
     {
-        std::lock_guard<std::mutex> loc_lock(lidar_loc_mutex_);
+        std::lock_guard<std::mutex> loc_lock(localizer_mutex_);
         {
             UL lock(global_mutex_);
             pending_initial_pose_ = init_guess;
             has_pending_initial_pose_ = true;
-            lidar_loc_inited_ = false;
+            localization_inited_ = false;
             init_in_progress_ = false;
             latest_pose_ = Eigen::Matrix4d::Identity();
         }
-        lidar_loc_.ResetLocalizationState();
+        localizer_.ResetLocalizationState();
     }
 
     {
@@ -480,12 +480,15 @@ void Localization::PublishResult(const LocalizationResult& result) {
     const bool pose_is_publishable =
         result.valid_ && result.status_ == LocalizationStatus::GOOD;
 
-    if (pose_is_publishable && tf_callback_) {
-        std::string base_link_frame;
-        {
-            UL lock(global_mutex_);
-            base_link_frame = base_link_frame_;
-        }
+    bool pub_tf = false;
+    std::string base_link_frame;
+    {
+        UL lock(global_mutex_);
+        pub_tf = options_.pub_tf_;
+        base_link_frame = base_link_frame_;
+    }
+
+    if (pub_tf && pose_is_publishable && tf_callback_) {
         auto tf_msg = result.ToGeoMsg();
         tf_msg.child_frame_id = base_link_frame;
         tf_callback_(tf_msg);
@@ -528,7 +531,7 @@ void Localization::MarkPoor(const std::string& message) {
         result = loc_result_;
     }
     result.valid_ = true;
-    result.lidar_loc_valid_ = false;
+    result.localization_valid_ = false;
     result.status_ = LocalizationStatus::FAIL;
     result.confidence_ = 0.0;
     result.reliable_ = false;

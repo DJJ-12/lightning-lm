@@ -19,7 +19,7 @@ struct LocalizationResult {
     double timestamp_ = 0.0;
 
     bool valid_ = false;
-    bool lidar_loc_valid_ = false;
+    bool localization_valid_ = false;
 
     LocalizationStatus status_ = LocalizationStatus::UNKNOWN;
 

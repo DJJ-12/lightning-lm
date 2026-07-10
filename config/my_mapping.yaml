@@ -150,15 +150,6 @@ lio_sam:
 localization:
   map_path: /data/new_map/
 
-  initial_pose:
-    use_initial_pose: false
-    x: 0.0
-    y: 0.0
-    z: 0.0
-    roll: 0.0
-    pitch: 0.0
-    yaw: 0.0
-
   quality:
     excellent_threshold: 4.0
     good_threshold: 2.5
