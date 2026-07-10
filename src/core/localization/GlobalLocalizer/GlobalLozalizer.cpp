@@ -263,6 +263,19 @@ bool Localizer::GetInitPose(const Eigen::Matrix4d &init_guess, Eigen::Matrix4d &
               << ", quality: " << quality.quality_level
               << ", reliable: " << (quality.is_reliable ? "yes" : "no");
 
+    const Eigen::Matrix4d precise_pose = ndt_res.pose.cast<double>();
+    const Eigen::Vector3d precise_translation = precise_pose.block<3, 1>(0, 3);
+    const Eigen::Vector3d precise_rpy = precise_pose.block<3, 3>(0, 0).eulerAngles(0, 1, 2);
+    LOG(INFO) << "[INIT_2_5D] precise final pose: x: "
+              << precise_translation.x()
+              << ", y: " << precise_translation.y()
+              << ", z: " << precise_translation.z()
+              << ", roll: " << precise_rpy.x()
+              << ", pitch: " << precise_rpy.y()
+              << ", yaw: " << precise_rpy.z()
+              << ", score: " << ndt_res.transform_probability
+              << ", NVTL: " << ndt_res.nearest_voxel_transformation_likelihood;
+
     if (!quality.is_reliable) {
         LOG(WARNING) << "initial localization rejected by quality gate; last pose is not updated";
         return false;

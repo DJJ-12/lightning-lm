@@ -4,8 +4,6 @@ find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
-find_package(std_srvs REQUIRED)
-find_package(message_filters REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2 REQUIRED)
@@ -59,9 +57,6 @@ add_library(${PROJECT_NAME}.libs SHARED
         ui/ui_cloud.cc
         ui/ui_trajectory.cc
 
-        core/system/slam.cc
-        core/system/loc_system.cc
-
         wrapper/bag_io.cc
 
         runtime/mode.cc
@@ -84,8 +79,6 @@ ament_target_dependencies(
         "sensor_msgs"
         "nav_msgs"
         "visualization_msgs"
-        "std_srvs"
-        "message_filters"
         "pcl_conversions"
         "tf2_ros"
         "tf2"

@@ -521,6 +521,24 @@ void Localization::SetResultCallback(Localization::ResultCallback&& callback) {
     result_callback_ = std::move(callback);
 }
 
+void Localization::MarkPoor(const std::string& message) {
+    LocalizationResult result;
+    {
+        UL lock_result(loc_result_mutex_);
+        result = loc_result_;
+    }
+    result.valid_ = true;
+    result.lidar_loc_valid_ = false;
+    result.status_ = LocalizationStatus::FAIL;
+    result.confidence_ = 0.0;
+    result.reliable_ = false;
+    result.tp_ = 0.0;
+    result.nvtl_ = 0.0;
+    result.iterations_ = 0;
+    result.message_ = message.empty() ? "localization poor" : message;
+    PublishResult(result);
+}
+
 LocalizationResult Localization::GetLatestResult() const {
     UL lock_result(loc_result_mutex_);
     return loc_result_;

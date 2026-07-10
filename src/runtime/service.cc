@@ -2,6 +2,7 @@
 
 #include <Eigen/Geometry>
 #include <algorithm>
+#include <utility>
 
 namespace lightning::runtime {
 
@@ -92,7 +93,7 @@ bool Service::Init(rclcpp::Node::SharedPtr node, std::shared_ptr<Lightning> ligh
         "/lightning/start_mapping",
         [this](const lightning_interfaces::srv::StartMapping::Request::SharedPtr request,
                lightning_interfaces::srv::StartMapping::Response::SharedPtr response) {
-            auto result = lightning_->StartMapping(request->map_id);
+            auto result = lightning_->StartMapping(request->map_path);
             response->success = result.success;
             response->message = result.message;
         });
@@ -110,7 +111,7 @@ bool Service::Init(rclcpp::Node::SharedPtr node, std::shared_ptr<Lightning> ligh
         "/lightning/save_map",
         [this](const lightning_interfaces::srv::SaveMap::Request::SharedPtr request,
                lightning_interfaces::srv::SaveMap::Response::SharedPtr response) {
-            auto result = lightning_->SaveCurrentMap(request->map_id);
+            auto result = lightning_->SaveCurrentMap(request->map_path);
             response->response = result.success ? 0u : 1u;
         });
 
@@ -128,6 +129,17 @@ bool Service::Init(rclcpp::Node::SharedPtr node, std::shared_ptr<Lightning> ligh
                lightning_interfaces::srv::SetMapPath::Response::SharedPtr response) {
             auto result = lightning_->SetMapPath(request->map_path);
             response->success = result.success;
+            response->message = result.message;
+        });
+
+    get_map_path_srv_ = node_->create_service<lightning_interfaces::srv::GetMapPath>(
+        "/lightning/get_map_path",
+        [this](const lightning_interfaces::srv::GetMapPath::Request::SharedPtr,
+               lightning_interfaces::srv::GetMapPath::Response::SharedPtr response) {
+            std::string map_path;
+            auto result = lightning_->GetMapPath(&map_path);
+            response->success = result.success;
+            response->map_path = map_path;
             response->message = result.message;
         });
 

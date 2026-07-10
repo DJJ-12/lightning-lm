@@ -68,7 +68,8 @@ localization   : TopicInput -> Localization
 ## 启动
 
 ```bash
-ros2 run lightning run_lightning --config /home/mt/ws/src/lightning/config/my_mapping.yaml
+ros2 run lightning run_lightning --config /home/mt/workspace/src/lightning-lm/config/my_mapping.yaml
+ros2 run lightning run_lightning --config /home/mt/workspace/src/lightning-lm/config/cx16.yaml
 ```
 
 ## 典型流程
@@ -77,7 +78,7 @@ ros2 run lightning run_lightning --config /home/mt/ws/src/lightning/config/my_ma
 
 ```bash
 ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'offline_mapping'}"
-ros2 service call /lightning/start_offline_mapping lightning_interfaces/srv/StartOfflineMapping "{bag_path: '/home/mt/dataset/20260616', save_path: '/home/mt/maps/new_map'}"
+ros2 service call /lightning/start_offline_mapping lightning_interfaces/srv/StartOfflineMapping "{bag_path: '/home/mt/dataset/20260329', save_path: '/home/mt/maps/cx16_map'}"
 ros2 service call /lightning/get_offline_mapping_progress lightning_interfaces/srv/GetOfflineMappingProgress "{}"
 ```
 
@@ -85,7 +86,7 @@ ros2 service call /lightning/get_offline_mapping_progress lightning_interfaces/s
 
 ```bash
 ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'online_mapping'}"
-ros2 service call /lightning/start_mapping lightning_interfaces/srv/StartMapping "{map_id: 'map_001'}"
+ros2 service call /lightning/start_mapping lightning_interfaces/srv/StartMapping "{map_path: 'map_001'}"
 ros2 service call /lightning/finish_mapping lightning_interfaces/srv/FinishMapping "{save_map: true, save_path: '/home/mt/maps/online_map'}"
 ```
 
@@ -93,7 +94,12 @@ ros2 service call /lightning/finish_mapping lightning_interfaces/srv/FinishMappi
 
 ```bash
 ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'localization'}"
-ros2 service call /lightning/set_map_path lightning_interfaces/srv/SetMapPath "{map_path: '/home/mt/maps/new_map'}"
+ros2 service call /lightning/set_map_path lightning_interfaces/srv/SetMapPath "{map_path: '/home/mt/maps/cx16_map'}"
 ros2 service call /lightning/set_location lightning_interfaces/srv/SetLocation "{x: 0.0, y: 0.0, z: 0.0, roll: 0.0, pitch: 0.0, yaw: 0.0}"
 ros2 service call /lightning/get_localization_quality lightning_interfaces/srv/GetLocalizationQuality "{}"
+```
+### 取消任务
+
+```bash
+ros2 service call /lightning/cancel_task lightning_interfaces/srv/CancelTask "{}"
 ```

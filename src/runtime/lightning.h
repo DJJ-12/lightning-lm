@@ -39,11 +39,12 @@ class Lightning {
     ServiceResult StartOfflineMapping(const std::string& bag_path, const std::string& save_path);
     TaskSnapshot GetOfflineMappingProgress() const;
 
-    ServiceResult StartMapping(const std::string& map_id);
+    ServiceResult StartMapping(const std::string& map_path);
     ServiceResult FinishMapping(bool save_map, const std::string& save_path);
     ServiceResult SaveCurrentMap(const std::string& save_path);
 
     ServiceResult SetMapPath(const std::string& map_path);
+    ServiceResult GetMapPath(std::string* map_path) const;
     ServiceResult SetLocation(const SE3& init_pose, bool* initialized_now = nullptr);
     loc::LocalizationResult GetLocalizationQuality() const;
 
@@ -54,10 +55,12 @@ class Lightning {
     void ClearMappingLocked();
     void ClearLocalizationLocked();
     void StopTopicInputLocked();
+    void HandleCloudTimeout(const std::string& message);
     ServiceResult SaveMappingLocked(const std::string& save_path);
 
     rclcpp::Node::SharedPtr node_;
     std::string yaml_path_;
+    double localization_cloud_timeout_sec_ = 5.0;
 
     mutable std::mutex mutex_;
     Mode mode_ = Mode::IDLE;
@@ -67,6 +70,8 @@ class Lightning {
     std::unique_ptr<modules::LocalizationSystem> localization_system_;
     std::unique_ptr<TopicInput> topic_input_;
     modules::SaveMap save_map_;
+    std::string online_mapping_map_path_;
+    std::string localization_map_path_;
 
     std::thread offline_thread_;
     std::atomic_bool offline_cancel_{false};

@@ -34,6 +34,7 @@ class LocalizationSystem {
     bool SetInitialGuess(const SE3& init_pose, bool* initialized_now = nullptr);
     void ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud);
     void ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud);
+    void MarkPoor(const std::string& message);
     loc::LocalizationResult GetLatestResult() const;
     void Reset();
 

@@ -1,7 +1,10 @@
 #include "runtime/lightning.h"
 
+#include <chrono>
+
 #include <glog/logging.h>
 #include <pangolin/pangolin.h>
+#include <yaml-cpp/yaml.h>
 
 namespace lightning::runtime {
 
@@ -16,7 +19,18 @@ bool Lightning::Init(rclcpp::Node::SharedPtr node, const std::string& yaml_path)
     node_ = node;
     yaml_path_ = yaml_path;
     task_.Reset(TaskState::IDLE, "lightning started");
-    return node_ != nullptr && !yaml_path_.empty();
+    if (!node_ || yaml_path_.empty()) {
+        return false;
+    }
+    YAML::Node yaml = YAML::LoadFile(yaml_path_);
+    if (yaml["localization"] && yaml["localization"]["cloud_timeout_sec"]) {
+        localization_cloud_timeout_sec_ = yaml["localization"]["cloud_timeout_sec"].as<double>();
+    } else if (yaml["system"] && yaml["system"]["cloud_timeout_sec"]) {
+        localization_cloud_timeout_sec_ = yaml["system"]["cloud_timeout_sec"].as<double>();
+    }
+    LOG(INFO) << "[LIGHTNING] localization cloud timeout sec = "
+              << localization_cloud_timeout_sec_;
+    return true;
 }
 
 bool Lightning::CanChangeModeLocked() const {
@@ -68,6 +82,7 @@ void Lightning::ClearMappingLocked() {
         mapping_system_->Reset();
     }
     mapping_system_.reset();
+    online_mapping_map_path_.clear();
 }
 
 void Lightning::ClearLocalizationLocked() {
@@ -75,6 +90,7 @@ void Lightning::ClearLocalizationLocked() {
         localization_system_->Reset();
     }
     localization_system_.reset();
+    localization_map_path_.clear();
 }
 
 void Lightning::StopTopicInputLocked() {
@@ -159,8 +175,7 @@ TaskSnapshot Lightning::GetOfflineMappingProgress() const {
     return task_.Snapshot();
 }
 
-ServiceResult Lightning::StartMapping(const std::string& map_id) {
-    (void)map_id;
+ServiceResult Lightning::StartMapping(const std::string& map_path) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (mode_ != Mode::ONLINE_MAPPING) {
         return {false, "start_mapping is only allowed in online_mapping mode"};
@@ -170,6 +185,7 @@ ServiceResult Lightning::StartMapping(const std::string& map_id) {
     }
     StopTopicInputLocked();
     ClearMappingLocked();
+    online_mapping_map_path_ = map_path;
 
     mapping_system_ = std::make_unique<modules::MappingSystem>();
     modules::MappingSystemOptions mapping_options;
@@ -203,7 +219,7 @@ ServiceResult Lightning::StartMapping(const std::string& map_id) {
         return {false, "failed to start TopicInput"};
     }
     task_.Reset(TaskState::RUNNING, "online mapping running");
-    return {true, "online mapping started"};
+    return {true, map_path.empty() ? "online mapping started" : "online mapping started: " + map_path};
 }
 
 ServiceResult Lightning::SaveMappingLocked(const std::string& save_path) {
@@ -228,8 +244,13 @@ ServiceResult Lightning::FinishMapping(bool save_map, const std::string& save_pa
     mapping_system_->Stop();
 
     ServiceResult result{true, "online mapping finished without saving"};
-    if (save_map && !save_path.empty()) {
-        result = SaveMappingLocked(save_path);
+    if (save_map) {
+        const std::string target_save_path = save_path.empty() ? online_mapping_map_path_ : save_path;
+        if (target_save_path.empty()) {
+            result = {false, "save_path is empty"};
+        } else {
+            result = SaveMappingLocked(target_save_path);
+        }
     }
     ClearMappingLocked();
     task_.SetFinished(result.success, result.message);
@@ -270,8 +291,20 @@ ServiceResult Lightning::SetMapPath(const std::string& map_path) {
         return {false, "failed to set map path: " + map_path};
     }
 
+    localization_map_path_ = map_path;
     task_.Reset(TaskState::READY, "map path set, waiting for set_location");
     return {true, "map path set: " + map_path};
+}
+
+ServiceResult Lightning::GetMapPath(std::string* map_path) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (map_path) {
+        *map_path = localization_map_path_;
+    }
+    if (localization_map_path_.empty()) {
+        return {false, "map path is not set"};
+    }
+    return {true, "map path: " + localization_map_path_};
 }
 
 ServiceResult Lightning::SetLocation(const SE3& init_pose, bool* initialized_now) {
@@ -297,13 +330,18 @@ ServiceResult Lightning::SetLocation(const SE3& init_pose, bool* initialized_now
             nullptr,
             [this](const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (localization_system_) localization_system_->ProcessCloud(cloud);
+                if (localization_system_) {
+                    localization_system_->ProcessCloud(cloud);
+                }
             },
             [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (localization_system_) localization_system_->ProcessCloud(cloud);
+                if (localization_system_) {
+                    localization_system_->ProcessCloud(cloud);
+                }
             },
-            false);
+            false, localization_cloud_timeout_sec_,
+            [this](const std::string& message) { HandleCloudTimeout(message); });
         if (!ok) {
             return {false, "failed to start TopicInput for localization"};
         }
@@ -319,6 +357,15 @@ loc::LocalizationResult Lightning::GetLocalizationQuality() const {
         return loc::LocalizationResult();
     }
     return localization_system_->GetLatestResult();
+}
+
+void Lightning::HandleCloudTimeout(const std::string& message) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (mode_ != Mode::LOCALIZATION || !localization_system_) {
+        return;
+    }
+    LOG(WARNING) << message;
+    localization_system_->MarkPoor(message + "; localization quality: poor");
 }
 
 ServiceResult Lightning::CancelTask() {

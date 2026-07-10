@@ -149,6 +149,12 @@ void LocalizationSystem::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::S
     loc_->ProcessLivoxLidarMsg(cloud);
 }
 
+void LocalizationSystem::MarkPoor(const std::string& message) {
+    if (loc_) {
+        loc_->MarkPoor(message);
+    }
+}
+
 loc::LocalizationResult LocalizationSystem::GetLatestResult() const {
     if (!loc_) {
         return loc::LocalizationResult();

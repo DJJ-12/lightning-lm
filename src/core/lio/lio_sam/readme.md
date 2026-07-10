@@ -42,7 +42,7 @@ LIO-SAM 内部 loop closure
 10. 增加坏帧检测和保护逻辑，避免发散位姿污染 keyframe 和因子图。
 ```
 
-当前代码中，`SlamSystem` 已经新增 `use_lio_sam_` 分支，并在 LIO-SAM 模式下创建 `LioSamMapping`，而不是创建原 `LaserMapping`。`SlamSystem` 还会在 LIO-SAM 分支下关闭 lightning-lm 自己的 LoopClosing。
+当前代码中，`MappingSystem` 已经新增 `use_lio_sam_` 分支，并在 LIO-SAM 模式下创建 `LioSamMapping`，而不是创建原 `LaserMapping`。`MappingSystem` 还会在 LIO-SAM 分支下关闭 lightning-lm 自己的 LoopClosing。
 
 ---
 
@@ -84,7 +84,7 @@ rosbag
   |-- sensor_msgs::msg::Imu
   |       |
   |       v
-  |   SlamSystem::ProcessIMU()
+  |   MappingSystem::ProcessIMU()
   |       |
   |       v
   |   LioSamMapping::ProcessIMU()
@@ -95,7 +95,7 @@ rosbag
   |-- sensor_msgs::msg::PointCloud2 / livox_ros_driver2::msg::CustomMsg
           |
           v
-      SlamSystem::ProcessLidar()
+      MappingSystem::ProcessCloud()
           |
           v
       LioSamMapping::ProcessPointCloud2()
@@ -186,9 +186,9 @@ lio_sam:
 离线建图命令示例：
 
 ```bash
-ros2 run lightning run_slam_offline \
-  --input_bag /path/to/data.db3 \
-  --config /path/to/my_mapping.yaml
+ros2 run lightning run_lightning --config /path/to/my_mapping.yaml
+ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'offline_mapping'}"
+ros2 service call /lightning/start_offline_mapping lightning_interfaces/srv/StartOfflineMapping "{bag_path: '/path/to/data.db3', save_path: '/path/to/map'}"
 ```
 
 建图完成后，地图会由 lightning-lm 的 `SaveMap()` 逻辑保存。LIO-SAM 分支下保存地图时，会从 `lio_sam_->GetAllKeyframes()` 和 `lio_sam_->GetGlobalMap()` 获取 keyframe 和全局地图，而不是从原 `LaserMapping` 获取。
@@ -689,7 +689,7 @@ scan_duration = cloud.points.back().time
 
 ### 21.2 增加 HasNewKeyframe 接口
 
-当前 `SlamSystem::ProcessLidar()` 中每帧都会调用：
+当前 `MappingSystem::ProcessCloud()` 中每帧都会调用：
 
 ```cpp
 PublishKeyframeToBackends(lio_sam_->GetKeyframe());

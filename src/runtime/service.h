@@ -8,6 +8,7 @@
 #include "lightning_interfaces/srv/finish_mapping.hpp"
 #include "lightning_interfaces/srv/get_grid_map.hpp"
 #include "lightning_interfaces/srv/get_localization_quality.hpp"
+#include "lightning_interfaces/srv/get_map_path.hpp"
 #include "lightning_interfaces/srv/get_offline_mapping_progress.hpp"
 #include "lightning_interfaces/srv/get_status.hpp"
 #include "lightning_interfaces/srv/save_map.hpp"
@@ -39,6 +40,7 @@ class Service {
     rclcpp::Service<lightning_interfaces::srv::SaveMap>::SharedPtr save_map_srv_;
     rclcpp::Service<lightning_interfaces::srv::GetGridMap>::SharedPtr get_grid_map_srv_;
     rclcpp::Service<lightning_interfaces::srv::SetMapPath>::SharedPtr set_map_path_srv_;
+    rclcpp::Service<lightning_interfaces::srv::GetMapPath>::SharedPtr get_map_path_srv_;
     rclcpp::Service<lightning_interfaces::srv::SetLocation>::SharedPtr set_location_srv_;
     rclcpp::Service<lightning_interfaces::srv::GetLocalizationQuality>::SharedPtr get_localization_quality_srv_;
 };

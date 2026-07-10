@@ -54,6 +54,7 @@ class Localization {
     void SetTFCallback(TFCallback&& callback);
     void SetLocStateCallback(LocStateCallback&& callback);
     void SetResultCallback(ResultCallback&& callback);
+    void MarkPoor(const std::string& message);
     LocalizationResult GetLatestResult() const;
 
    private:
