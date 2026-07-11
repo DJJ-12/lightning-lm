@@ -44,14 +44,10 @@ bool MappingSystem::Init(const std::string& yaml_path, const MappingSystemOption
     std::vector<double> base_lidar_R{1.0, 0.0, 0.0,
                                      0.0, 1.0, 0.0,
                                      0.0, 0.0, 1.0};
-    if (yaml["extrinsicBaseLidarTrans"]) {
-        base_lidar_t = yaml["extrinsicBaseLidarTrans"].as<std::vector<double>>();
-    } else if (yaml["common"] && yaml["common"]["extrinsicBaseLidarTrans"]) {
+    if (yaml["common"] && yaml["common"]["extrinsicBaseLidarTrans"]) {
         base_lidar_t = yaml["common"]["extrinsicBaseLidarTrans"].as<std::vector<double>>();
     }
-    if (yaml["extrinsicBaseLidarRot"]) {
-        base_lidar_R = yaml["extrinsicBaseLidarRot"].as<std::vector<double>>();
-    } else if (yaml["common"] && yaml["common"]["extrinsicBaseLidarRot"]) {
+    if (yaml["common"] && yaml["common"]["extrinsicBaseLidarRot"]) {
         base_lidar_R = yaml["common"]["extrinsicBaseLidarRot"].as<std::vector<double>>();
     }
     CHECK_EQ(base_lidar_t.size(), 3);

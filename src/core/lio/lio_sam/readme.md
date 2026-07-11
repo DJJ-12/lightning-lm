@@ -223,7 +223,7 @@ mapOptimization
   publish: mapping odometry / path / local map / global map
 ```
 
-原版投影节点订阅 LiDAR、IMU 和 `odomTopic + "_incremental"`，内部维护 `cloudQueue`、`imuQueue`、`odomQueue`，并在 `cloudHandler()` 中执行点云缓存、去畸变、投影和 CloudInfo 发布。
+原版投影节点订阅 LiDAR、IMU 和外部增量里程计 topic，内部维护 `cloudQueue`、`imuQueue`、`odomQueue`，并在 `cloudHandler()` 中执行点云缓存、去畸变、投影和 CloudInfo 发布。
 
 原版特征节点订阅 `lio_sam/deskew/cloud_info`，执行曲率计算、遮挡点标记和角点/面点提取，然后发布 feature cloud info。
 
@@ -284,7 +284,7 @@ LioSamMapping::Run()
 2. 删除 lio_sam::msg::CloudInfo 作为模块间通信载体，改用 LioSamCloudInfo。
 3. 删除 IMUPreintegration 节点。
 4. 删除 TransformFusion 节点。
-5. 删除 odomTopic + "_incremental" 依赖。
+5. 删除外部增量里程计 topic 依赖。
 6. 删除原投影节点中的 odomDeskewInfo。
 7. 删除 mapOptimization 中的 ROS odometry / path / TF publisher。
 8. 删除 LIO-SAM save_map service，改用 lightning-lm SaveMap。

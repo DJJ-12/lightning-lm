@@ -37,14 +37,10 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     std::vector<double> base_lidar_R{1.0, 0.0, 0.0,
                                      0.0, 1.0, 0.0,
                                      0.0, 0.0, 1.0};
-    if (yaml_node["extrinsicBaseLidarTrans"]) {
-        base_lidar_t = yaml_node["extrinsicBaseLidarTrans"].as<std::vector<double>>();
-    } else if (yaml_node["common"] && yaml_node["common"]["extrinsicBaseLidarTrans"]) {
+    if (yaml_node["common"] && yaml_node["common"]["extrinsicBaseLidarTrans"]) {
         base_lidar_t = yaml_node["common"]["extrinsicBaseLidarTrans"].as<std::vector<double>>();
     }
-    if (yaml_node["extrinsicBaseLidarRot"]) {
-        base_lidar_R = yaml_node["extrinsicBaseLidarRot"].as<std::vector<double>>();
-    } else if (yaml_node["common"] && yaml_node["common"]["extrinsicBaseLidarRot"]) {
+    if (yaml_node["common"] && yaml_node["common"]["extrinsicBaseLidarRot"]) {
         base_lidar_R = yaml_node["common"]["extrinsicBaseLidarRot"].as<std::vector<double>>();
     }
     CHECK_EQ(base_lidar_t.size(), 3);

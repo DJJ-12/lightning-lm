@@ -25,8 +25,6 @@ bool Lightning::Init(rclcpp::Node::SharedPtr node, const std::string& yaml_path)
     YAML::Node yaml = YAML::LoadFile(yaml_path_);
     if (yaml["localization"] && yaml["localization"]["cloud_timeout_sec"]) {
         localization_cloud_timeout_sec_ = yaml["localization"]["cloud_timeout_sec"].as<double>();
-    } else if (yaml["system"] && yaml["system"]["cloud_timeout_sec"]) {
-        localization_cloud_timeout_sec_ = yaml["system"]["cloud_timeout_sec"].as<double>();
     }
     if (yaml["mapping"]) {
         if (yaml["mapping"]["block_map_resolution"]) {
@@ -55,7 +53,7 @@ ServiceResult Lightning::SetMode(const std::string& mode_text) {
     }
 
     const Mode new_mode = ModeFromString(mode_text);
-    if (ModeToString(new_mode) != mode_text && mode_text != "offline" && mode_text != "online" && mode_text != "mapping" && mode_text != "loc") {
+    if (!IsKnownModeName(mode_text)) {
         return {false, "unknown mode: " + mode_text};
     }
 

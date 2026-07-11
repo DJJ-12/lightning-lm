@@ -57,7 +57,8 @@ class LioSamMapping {
 
     Keyframe::Ptr GetKeyframe() const { return last_kf_; }
     std::vector<Keyframe::Ptr> GetAllKeyframes() const { return all_keyframes_; }
-    NavState GetState() const { return state_; }
+    //后续定位模块可能要用
+     NavState GetState() const { return state_; }
 
     CloudPtr GetScanUndist() const {
         if (!recent_cloud_) {
@@ -65,23 +66,6 @@ class LioSamMapping {
         }
         return CloudPtr(new PointCloudType(*recent_cloud_));
     }
-
-    CloudPtr GetProjCloud() const {
-        if (!recent_cloud_) {
-            return nullptr;
-        }
-        return CloudPtr(new PointCloudType(*recent_cloud_));
-    }
-
-    CloudPtr GetProjCloudShared() const { return recent_cloud_; }
-
-    CloudPtr GetRecentCloud() const {
-        if (!recent_cloud_) {
-            return nullptr;
-        }
-        return CloudPtr(new PointCloudType(*recent_cloud_));
-    }
-    
     CloudPtr GetGlobalMap(bool use_lio_pose, bool use_voxel = true, float res = 0.1);
     void SyncOptimizedKeyframePoses();
 
@@ -100,9 +84,6 @@ class LioSamMapping {
     void SyncLightningKeyframePoses();
     bool IsOnlineMapping() const {
         return options_.mapping_mode_ == MappingRuntimeMode::ONLINE_MAPPING;
-    }
-    bool IsOfflineMapping() const {
-        return options_.mapping_mode_ == MappingRuntimeMode::OFFLINE_MAPPING;
     }
 
     Options options_;

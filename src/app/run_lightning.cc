@@ -8,7 +8,7 @@
 DEFINE_string(config, "./config/default.yaml", "config yaml path");
 
 int main(int argc, char** argv) {
-    LOG(INFO) << "=================build version : 2026-0708-1555===============================";
+    LOG(INFO) << "=================build version : 2026-0711-1645===============================";
     google::InitGoogleLogging(argv[0]);
     FLAGS_alsologtostderr = true;
     gflags::ParseCommandLineFlags(&argc, &argv, true);

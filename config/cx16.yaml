@@ -6,13 +6,7 @@ common:
   lidar_topic: "/cx/cloud"
   livox_lidar_topic: "/livox/lidar_192_168_1_3"
   imu_topic: "/imu_data"
-  odom_topic: "lio_sam/imu/odom"
-  gps_topic: "odometry/gpsz"
-
-  lidar_frame: "laser_link"
   base_link_frame: "laser_link"
-  odometry_frame: "odom"
-  map_frame: "map"
 
   # Shared lidar adapter / range-image geometry.
   # 2 = Velodyne-style XYZIRT path used by the existing CX16 input.
@@ -86,7 +80,6 @@ lio_sam:
   # IMU settings
   imuGravity: 9.80511
   imuRPYWeight: 0.0
-  extrinsicTrans: [0.0, 0.0, -0.2]
   extrinsicRot: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
   extrinsicRPY: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 
@@ -123,6 +116,7 @@ lio_sam:
   historyKeyframeFitnessScore: 0.3
 
 localization:
+  cloud_timeout_sec: 5.0
   quality:
     excellent_threshold: 4.0
     good_threshold: 2.5

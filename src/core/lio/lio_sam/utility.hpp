@@ -3,8 +3,6 @@
 #define _UTILITY_LIDAR_ODOMETRY_H_
 
 #include <iostream>
-#include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <unordered_map>
 #include <utility>
@@ -24,16 +22,8 @@
 
 #include <rclcpp/rclcpp.hpp>
 
-#include <std_msgs/msg/header.hpp>
-#include <std_msgs/msg/string.hpp>
-#include <std_msgs/msg/float64_multi_array.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
-#include <sensor_msgs/msg/nav_sat_fix.hpp>
-#include <nav_msgs/msg/odometry.hpp>
-#include <nav_msgs/msg/path.hpp>
-#include <visualization_msgs/msg/marker.hpp>
-#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <opencv2/opencv.hpp>
 
@@ -101,9 +91,6 @@ struct Serializer<std::unordered_map<Key, Value, Hash, Eq, Alloc>> {
 #include <pcl_conversions/pcl_conversions.h>
 
 #include <tf2/LinearMath/Quaternion.h>
-#include <tf2_ros/transform_listener.h>
-#include <tf2_ros/transform_broadcaster.h>
-#include <tf2_eigen/tf2_eigen.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 using namespace std;
@@ -167,16 +154,6 @@ struct LioSamCloudInfo
 class ParamServer : public rclcpp::Node
 {
 public:
-    std::string robot_id;
-
-    string lioMode;
-
-    //Frames
-    string lidarFrame;
-    string baselinkFrame;
-    string odometryFrame;
-    string mapFrame;
-
     // IMU initialization
     bool useImuHeadingInitialization;
 
@@ -197,10 +174,8 @@ public:
     bool useImuAccelRollPitchInitialization;
     vector<double> extRotV;
     vector<double> extRPYV;
-    vector<double> extTransV;
     Eigen::Matrix3d extRot;
     Eigen::Matrix3d extRPY;
-    Eigen::Vector3d extTrans;
     Eigen::Quaterniond extQRPY;
 
     // LOAM
@@ -246,19 +221,6 @@ public:
 
     ParamServer(std::string node_name, const rclcpp::NodeOptions & options) : Node(node_name, options)
     {
-        declare_parameter("lioMode", "mapping");
-        get_parameter("lioMode", lioMode);
-        std::transform(lioMode.begin(), lioMode.end(), lioMode.begin(), ::tolower);
-
-        declare_parameter("lidarFrame", "laser_data_frame");
-        get_parameter("lidarFrame", lidarFrame);
-        declare_parameter("baselinkFrame", "base_link");
-        get_parameter("baselinkFrame", baselinkFrame);
-        declare_parameter("odometryFrame", "odom");
-        get_parameter("odometryFrame", odometryFrame);
-        declare_parameter("mapFrame", "map");
-        get_parameter("mapFrame", mapFrame);
-
         declare_parameter("useImuHeadingInitialization", false);
         get_parameter("useImuHeadingInitialization", useImuHeadingInitialization);
 
@@ -296,14 +258,9 @@ public:
         get_parameter("extrinsicRot", extRotV);
         declare_parameter("extrinsicRPY", id);
         get_parameter("extrinsicRPY", extRPYV);
-        double zea[] = {0.0, 0.0, 0.0};
-        std::vector < double > ze(zea, std::end(zea));
-        declare_parameter("extrinsicTrans", ze);
-        get_parameter("extrinsicTrans", extTransV);
 
         extRot = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRotV.data(), 3, 3);
         extRPY = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRPYV.data(), 3, 3);
-        extTrans = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extTransV.data(), 3, 1);
         extQRPY = Eigen::Quaterniond(extRPY);
 
         declare_parameter("edgeThreshold", 1.0);

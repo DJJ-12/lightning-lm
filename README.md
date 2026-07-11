@@ -78,6 +78,7 @@ ros2 run lightning run_lightning --config /home/mt/workspace/src/lightning-lm/co
 ```bash
 ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'offline_mapping'}"
 ros2 service call /lightning/start_mapping lightning_interfaces/srv/StartMapping "{bag_path: '/home/mt/dataset/20260329', save_path: '/home/mt/maps/cx16_map'}"
+ros2 service call /lightning/get_status lightning_interfaces/srv/GetStatus "{}"
 ros2 service call /lightning/get_offline_mapping_progress lightning_interfaces/srv/GetOfflineMappingProgress "{}"
 ```
 

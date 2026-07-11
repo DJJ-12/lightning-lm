@@ -99,15 +99,6 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
         }
         std::vector<rclcpp::Parameter> overrides;
 
-        SetParamOverride(overrides, "pointCloudTopic", common["lidar_topic"].as<std::string>());
-        SetParamOverride(overrides, "imuTopic", common["imu_topic"].as<std::string>());
-        SetParamOverride(overrides, "odomTopic", common["odom_topic"].as<std::string>());
-        SetParamOverride(overrides, "gpsTopic", common["gps_topic"].as<std::string>());
-        SetParamOverride(overrides, "lidarFrame", common["lidar_frame"].as<std::string>());
-        SetParamOverride(overrides, "baselinkFrame", common["base_link_frame"].as<std::string>());
-        SetParamOverride(overrides, "odometryFrame", common["odometry_frame"].as<std::string>());
-        SetParamOverride(overrides, "mapFrame", common["map_frame"].as<std::string>());
-
         SetParamOverride(overrides, "useImuHeadingInitialization", params["useImuHeadingInitialization"].as<bool>());
         SetParamOverride(overrides, "useImuAccelRollPitchInitialization",
                          params["useImuAccelRollPitchInitialization"].as<bool>());
@@ -122,7 +113,6 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
         SetParamOverride(overrides, "imuGyrBiasN", common["imuGyrBiasN"].as<double>());
         SetParamOverride(overrides, "imuGravity", params["imuGravity"].as<double>());
         SetParamOverride(overrides, "imuRPYWeight", params["imuRPYWeight"].as<double>());
-        SetParamOverride(overrides, "extrinsicTrans", params["extrinsicTrans"].as<std::vector<double>>());
         SetParamOverride(overrides, "extrinsicRot", params["extrinsicRot"].as<std::vector<double>>());
         SetParamOverride(overrides, "extrinsicRPY", params["extrinsicRPY"].as<std::vector<double>>());
         SetParamOverride(overrides, "edgeThreshold", params["edgeThreshold"].as<double>());

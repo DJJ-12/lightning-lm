@@ -1,20 +1,26 @@
 #include "pointcloud_preprocess.h"
 #include <execution>
-#include "io/yaml_io.h"
 #include <glog/logging.h>
+#include <yaml-cpp/yaml.h>
 
 namespace lightning {
 
 bool PointCloudPreprocess::Init(const std::string& yaml_path) {
-        /// 预处理器
-    YAML_IO yaml(yaml_path);
-    blind_ = yaml.GetValue<double>("common", "lidarMinRange");
-    time_scale_ = yaml.GetValue<double>("common", "time_scale");
-    int lidar_type = yaml.GetValue<int>("common", "lidar_type");
-    num_scans_ = yaml.GetValue<int>("common", "N_SCAN");
-    point_filter_num_ = yaml.GetValue<int>("common", "point_filter_num");
-    height_max_ = yaml.GetValue<float>("roi", "height_max");
-    height_min_ = yaml.GetValue<float>("roi", "height_min");
+    const YAML::Node yaml = YAML::LoadFile(yaml_path);
+    const YAML::Node common = yaml["common"];
+    const YAML::Node roi = yaml["roi"];
+    if (!common || !roi) {
+        LOG(ERROR) << "missing common or roi config in " << yaml_path;
+        return false;
+    }
+
+    blind_ = common["lidarMinRange"].as<double>();
+    time_scale_ = common["time_scale"].as<double>();
+    int lidar_type = common["lidar_type"].as<int>();
+    num_scans_ = common["N_SCAN"].as<int>();
+    point_filter_num_ = common["point_filter_num"].as<int>();
+    height_max_ = roi["height_max"].as<float>();
+    height_min_ = roi["height_min"].as<float>();
 
     LOG(INFO) << "lidar_type " << lidar_type;
     if (lidar_type == 1) {

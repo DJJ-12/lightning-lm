@@ -3,12 +3,10 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
-find_package(visualization_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
-find_package(tf2_eigen REQUIRED)
 find_package(GTSAM REQUIRED)
 find_package(lightning_interfaces REQUIRED)
 
@@ -17,9 +15,6 @@ include_directories(${PROJECT_SOURCE_DIR}/src/core/localization)
 add_library(${PROJECT_NAME}.libs SHARED
         common/nav_state.cc
         common/options.cc
-
-        io/yaml_io.cc
-        io/file_io.cc
 
         core/lio/eskf.cc
         core/lio/laser_mapping.cc
@@ -67,12 +62,10 @@ ament_target_dependencies(
         "geometry_msgs"
         "sensor_msgs"
         "nav_msgs"
-        "visualization_msgs"
         "pcl_conversions"
         "tf2_ros"
         "tf2"
         "tf2_geometry_msgs"
-        "tf2_eigen"
         "lightning_interfaces"
 )
 

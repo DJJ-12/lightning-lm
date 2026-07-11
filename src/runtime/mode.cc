@@ -29,13 +29,13 @@ Mode ModeFromString(const std::string& mode) {
     if (v == "idle") {
         return Mode::IDLE;
     }
-    if (v == "offline_mapping" || v == "offline") {
+    if (v == "offline_mapping") {
         return Mode::OFFLINE_MAPPING;
     }
-    if (v == "online_mapping" || v == "mapping" || v == "online") {
+    if (v == "online_mapping") {
         return Mode::ONLINE_MAPPING;
     }
-    if (v == "localization" || v == "loc") {
+    if (v == "localization") {
         return Mode::LOCALIZATION;
     }
     return Mode::IDLE;
@@ -58,6 +58,12 @@ std::string ModeToString(Mode mode) {
 
 bool IsMappingMode(Mode mode) {
     return mode == Mode::OFFLINE_MAPPING || mode == Mode::ONLINE_MAPPING;
+}
+
+bool IsKnownModeName(const std::string& mode) {
+    const std::string v = Normalize(mode);
+    return v == "idle" || v == "offline_mapping" ||
+           v == "online_mapping" || v == "localization";
 }
 
 }  // namespace lightning::runtime
