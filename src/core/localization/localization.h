@@ -59,11 +59,11 @@ class Localization {
     bool TryInitializeWithCurrentCloud();
     pcl::PointCloud<pcl::PointXYZ>::Ptr ConvertToBaseCloud(
         const sensor_msgs::msg::PointCloud2& msg,
-        const SE3& T_base_lidar,
+        const Mat4f& T_base_lidar_matrix_f,
         const std::string& base_link_frame) const;
     pcl::PointCloud<pcl::PointXYZ>::Ptr ConvertToBaseCloud(
         const livox_ros_driver2::msg::CustomMsg& msg,
-        const SE3& T_base_lidar,
+        const Mat4f& T_base_lidar_matrix_f,
         const std::string& base_link_frame) const;
     void HandleCloudFrame(const LocCloudFrame& frame);
     void ProcessLocalizationCloud(const LocCloudFrame& frame);
@@ -83,6 +83,7 @@ class Localization {
 
     Eigen::Matrix4d pending_initial_pose_ = Eigen::Matrix4d::Identity();
     Eigen::Matrix4d latest_pose_ = Eigen::Matrix4d::Identity();
+    Mat4f T_base_lidar_matrix_f_ = Mat4f::Identity();
     pcl::PointCloud<pcl::PointXYZ>::Ptr latest_cloud_ = nullptr;
     double latest_cloud_timestamp_ = 0.0;
 

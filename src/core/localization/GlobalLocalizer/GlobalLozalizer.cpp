@@ -236,23 +236,33 @@ bool Localizer::GetInitPose(
     quality.iteration_num = ndt_res.iteration_num;
     quality.evaluate(quality_thresholds_);
 
-    LOG(INFO) << "precise NDT alignment completed - score: " << ndt_res.transform_probability
-              << ", NVTL: " << ndt_res.nearest_voxel_transformation_likelihood
-              << ", quality: " << quality.quality_level
-              << ", reliable: " << (quality.is_reliable ? "yes" : "no");
+    LOG(INFO) << "precise NDT alignment completed - score: "
+            << ndt_res.transform_probability
+            << ", NVTL: "
+            << ndt_res.nearest_voxel_transformation_likelihood
+            << ", quality: "
+            << quality.quality_level
+            << ", reliable: "
+            << (quality.is_reliable ? "yes" : "no");
 
     const Eigen::Matrix4d precise_pose = ndt_res.pose.cast<double>();
     const Eigen::Vector3d precise_translation = precise_pose.block<3, 1>(0, 3);
-    const Eigen::Vector3d precise_rpy = precise_pose.block<3, 3>(0, 0).eulerAngles(0, 1, 2);
-    LOG(INFO) << "[INIT_2_5D] precise final pose: x: "
-              << precise_translation.x()
-              << ", y: " << precise_translation.y()
-              << ", z: " << precise_translation.z()
-              << ", roll: " << precise_rpy.x()
-              << ", pitch: " << precise_rpy.y()
-              << ", yaw: " << precise_rpy.z()
-              << ", score: " << ndt_res.transform_probability
-              << ", NVTL: " << ndt_res.nearest_voxel_transformation_likelihood;
+    // 按照 Rz(yaw) * Ry(pitch) * Rx(roll) 提取RPY，单位为弧度
+    const Eigen::Vector3d precise_rpy_rad =getRPYFromEigenMatrix(precise_pose.block<3, 3>(0, 0));
+    // 弧度转角度
+    constexpr double kRadToDeg = 180.0 / M_PI;
+    const Eigen::Vector3d precise_rpy_deg =precise_rpy_rad * kRadToDeg;
+
+    LOG(INFO) << "[INIT] precise final pose:"
+            << " x: " << precise_translation.x() << " m"
+            << ", y: " << precise_translation.y() << " m"
+            << ", z: " << precise_translation.z() << " m"
+            << ", roll: " << precise_rpy_deg.x() << " deg"
+            << ", pitch: " << precise_rpy_deg.y() << " deg"
+            << ", yaw: " << precise_rpy_deg.z() << " deg"
+            << ", score: " << ndt_res.transform_probability
+            << ", NVTL: "
+            << ndt_res.nearest_voxel_transformation_likelihood;
 
     last_last_pose_ = align_pose;
     last_pose_ = align_pose;
@@ -289,11 +299,11 @@ bool Localizer::RegisterFrame(
     last_last_pose_ = last_pose_;
     last_pose_ = align_pose;
 
-    LOG(INFO) << "Localization quality: " << quality.quality_level
-              << ", TP: " << quality.transform_probability
-              << ", NVTL: " << quality.nearest_voxel_likelihood
-              << ", iterations: " << quality.iteration_num
-              << ", reliable: " << (quality.is_reliable ? "yes" : "no");
+    LOG_EVERY_N(INFO, 20) << "Localization quality: " << quality.quality_level
+                          << ", TP: " << quality.transform_probability
+                          << ", NVTL: " << quality.nearest_voxel_likelihood
+                          << ", iterations: " << quality.iteration_num
+                          << ", reliable: " << (quality.is_reliable ? "yes" : "no");
 
     return quality.is_reliable;
 }

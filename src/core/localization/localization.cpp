@@ -58,6 +58,7 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     q_base_lidar.normalize();
     options_.T_base_lidar_ =
         SE3(q_base_lidar, Vec3d(base_lidar_t[0], base_lidar_t[1], base_lidar_t[2]));
+    T_base_lidar_matrix_f_ = options_.T_base_lidar_.matrix().cast<float>();
     LOG(INFO) << "[BASE_LIDAR] T_base_lidar trans="
               << options_.T_base_lidar_.translation().transpose();
 
@@ -113,7 +114,7 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
 
 pcl::PointCloud<pcl::PointXYZ>::Ptr Localization::ConvertToBaseCloud(
     const sensor_msgs::msg::PointCloud2& msg,
-    const SE3& T_base_lidar,
+    const Mat4f& T_base_lidar_matrix_f,
     const std::string& base_link_frame) const {
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
     pcl::fromROSMsg(msg, *cloud);
@@ -123,7 +124,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Localization::ConvertToBaseCloud(
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_base(new pcl::PointCloud<pcl::PointXYZ>());
     pcl::transformPointCloud(
-        *cloud, *cloud_base, T_base_lidar.matrix().cast<float>());
+        *cloud, *cloud_base, T_base_lidar_matrix_f);
     cloud_base->header = cloud->header;
     cloud_base->header.frame_id = base_link_frame;
     cloud_base->width = cloud_base->size();
@@ -134,7 +135,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Localization::ConvertToBaseCloud(
 
 pcl::PointCloud<pcl::PointXYZ>::Ptr Localization::ConvertToBaseCloud(
     const livox_ros_driver2::msg::CustomMsg& msg,
-    const SE3& T_base_lidar,
+    const Mat4f& T_base_lidar_matrix_f,
     const std::string& base_link_frame) const {
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
     cloud->header.stamp = rclcpp::Time(msg.header.stamp).nanoseconds();
@@ -153,7 +154,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Localization::ConvertToBaseCloud(
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_base(new pcl::PointCloud<pcl::PointXYZ>());
     pcl::transformPointCloud(
-        *cloud, *cloud_base, T_base_lidar.matrix().cast<float>());
+        *cloud, *cloud_base, T_base_lidar_matrix_f);
     cloud_base->header = cloud->header;
     cloud_base->header.frame_id = base_link_frame;
     cloud_base->width = cloud_base->size();
@@ -164,12 +165,12 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Localization::ConvertToBaseCloud(
 
 void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     bool map_loaded = false;
-    SE3 T_base_lidar;
+    Mat4f T_base_lidar_matrix_f;
     std::string base_link_frame;
     {
         UL lock(global_mutex_);
         map_loaded = map_loaded_;
-        T_base_lidar = options_.T_base_lidar_;
+        T_base_lidar_matrix_f = T_base_lidar_matrix_f_;
         base_link_frame = base_link_frame_;
     }
 
@@ -178,7 +179,7 @@ void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPt
     }
 
     LocCloudFrame frame;
-    frame.cloud = ConvertToBaseCloud(*msg, T_base_lidar, base_link_frame);
+    frame.cloud = ConvertToBaseCloud(*msg, T_base_lidar_matrix_f, base_link_frame);
     frame.timestamp = rclcpp::Time(msg->header.stamp).seconds();
     HandleCloudFrame(frame);
 }
@@ -186,12 +187,12 @@ void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPt
 void Localization::ProcessLivoxLidarMsg(
     const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
     bool map_loaded = false;
-    SE3 T_base_lidar;
+    Mat4f T_base_lidar_matrix_f;
     std::string base_link_frame;
     {
         UL lock(global_mutex_);
         map_loaded = map_loaded_;
-        T_base_lidar = options_.T_base_lidar_;
+        T_base_lidar_matrix_f = T_base_lidar_matrix_f_;
         base_link_frame = base_link_frame_;
     }
 
@@ -200,7 +201,7 @@ void Localization::ProcessLivoxLidarMsg(
     }
 
     LocCloudFrame frame;
-    frame.cloud = ConvertToBaseCloud(*msg, T_base_lidar, base_link_frame);
+    frame.cloud = ConvertToBaseCloud(*msg, T_base_lidar_matrix_f, base_link_frame);
     frame.timestamp = rclcpp::Time(msg->header.stamp).seconds();
     HandleCloudFrame(frame);
 }
@@ -212,7 +213,7 @@ void Localization::HandleCloudFrame(const LocCloudFrame& frame) {
 
     {
         std::lock_guard<std::mutex> cloud_lock(current_cloud_mutex_);
-        latest_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>(*frame.cloud));
+        latest_cloud_ = frame.cloud;
         latest_cloud_timestamp_ = frame.timestamp;
     }
 
@@ -245,6 +246,17 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
         return;
     }
 
+    auto current_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+
+    pcl::VoxelGrid<pcl::PointXYZ> voxel_grid;
+    voxel_grid.setLeafSize(2.0f, 2.0f, 2.0f);
+    voxel_grid.setInputCloud(frame.cloud);
+    voxel_grid.filter(*current_cloud);
+
+    if (!current_cloud || current_cloud->empty()) {
+        return;
+    }
+
     std::lock_guard<std::mutex> loc_lock(localizer_mutex_);
 
     {
@@ -254,21 +266,8 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
         }
     }
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr current_cloud(
-        new pcl::PointCloud<pcl::PointXYZ>(*frame.cloud));
-
-    pcl::VoxelGrid<pcl::PointXYZ> voxel_grid;
-    voxel_grid.setLeafSize(2.0, 2.0, 2.0);
-    voxel_grid.setInputCloud(current_cloud);
-    voxel_grid.filter(*current_cloud);
-
-    if (!current_cloud || current_cloud->empty()) {
-        return;
-    }
-
     Eigen::Matrix4d pose = Eigen::Matrix4d::Identity();
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_reg(
-        new pcl::PointCloud<pcl::PointXYZ>(*current_cloud));
+    auto cloud_reg = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
     robot_localizer::LocalizationQuality quality;
 
     const bool reliable = localizer_.RegisterFrame(current_cloud, cloud_reg, pose, quality);
@@ -295,15 +294,14 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
 }
 
 bool Localization::TryInitializeWithCurrentCloud() {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(
-        new pcl::PointCloud<pcl::PointXYZ>());
+    pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud;
     double timestamp = 0.0;
     {
         std::lock_guard<std::mutex> cloud_lock(current_cloud_mutex_);
         if (!latest_cloud_ || latest_cloud_->empty()) {
             return false;
         }
-        *input_cloud = *latest_cloud_;
+        input_cloud = latest_cloud_;
         timestamp = latest_cloud_timestamp_;
     }
 
