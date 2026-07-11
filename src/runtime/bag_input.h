@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -25,10 +24,11 @@ class BagInput {
     using CloudCallback = std::function<void(const sensor_msgs::msg::PointCloud2::SharedPtr&)>;
     using LivoxCallback = std::function<void(const livox_ros_driver2::msg::CustomMsg::SharedPtr&)>;
     using ProgressCallback = std::function<void(const BagInputProgress&)>;
+    using CancelCallback = std::function<bool()>;
 
     bool Run(const std::string& bag_path, const std::string& yaml_path,
              ImuCallback imu_cb, CloudCallback cloud_cb, LivoxCallback livox_cb,
-             ProgressCallback progress_cb, std::atomic_bool* cancel_flag);
+             ProgressCallback progress_cb, CancelCallback cancel_requested);
 };
 
 }  // namespace lightning::runtime

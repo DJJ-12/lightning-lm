@@ -17,6 +17,7 @@
 #include <gtsam/nonlinear/ISAM2.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -131,6 +132,17 @@ public:
         double curvatureJump = 0.0;
     };
 
+    struct HybridTrustedPoseState {
+        bool has_last = false;
+        bool has_prev = false;
+        bool has_last_imu = false;
+        double last_time = -1.0;
+        double prev_time = -1.0;
+        std::array<float, 6> last{};
+        std::array<float, 6> prev{};
+        std::array<float, 6> last_imu{};
+    };
+
     enum class MappingTrackingState
     {
         TRACKING,
@@ -151,6 +163,7 @@ public:
     bool hasLastOutputPose = false;
     Eigen::Affine3f lastOutputAffine = Eigen::Affine3f::Identity();
     double lastOutputTime = -1.0;
+    HybridTrustedPoseState hybrid_trusted_pose_;
     std::deque<double> speedHist;
     std::deque<double> yawRateHist;
     std::deque<double> curvatureHist;

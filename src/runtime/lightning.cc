@@ -28,8 +28,18 @@ bool Lightning::Init(rclcpp::Node::SharedPtr node, const std::string& yaml_path)
     } else if (yaml["system"] && yaml["system"]["cloud_timeout_sec"]) {
         localization_cloud_timeout_sec_ = yaml["system"]["cloud_timeout_sec"].as<double>();
     }
+    if (yaml["mapping"]) {
+        if (yaml["mapping"]["block_map_resolution"]) {
+            save_map_options_.block_resolution = yaml["mapping"]["block_map_resolution"].as<int>();
+        }
+        if (yaml["mapping"]["block_map_voxel_size"]) {
+            save_map_options_.block_voxel_size = yaml["mapping"]["block_map_voxel_size"].as<double>();
+        }
+    }
     LOG(INFO) << "[LIGHTNING] localization cloud timeout sec = "
               << localization_cloud_timeout_sec_;
+    LOG(INFO) << "[LIGHTNING] block map resolution = " << save_map_options_.block_resolution
+              << ", voxel size = " << save_map_options_.block_voxel_size;
     return true;
 }
 
@@ -117,7 +127,6 @@ ServiceResult Lightning::StartBagMappingTask(const std::string& bag_path, const 
         }
         StopTopicInputLocked();
         ClearMappingLocked();
-        offline_cancel_ = false;
         task_.Reset(TaskState::RUNNING, "offline mapping started");
     }
 
@@ -145,26 +154,37 @@ ServiceResult Lightning::StartBagMappingTask(const std::string& bag_path, const 
             [this](const BagInputProgress& progress) {
                 task_.SetProgress(progress.processed_frames, progress.total_frames, "offline mapping running");
             },
-            &offline_cancel_);
+            [this]() {
+                return task_.CancelRequested();
+            });
 
-        if (!bag_ok || offline_cancel_.load()) {
+        if (task_.CancelRequested()) {
             mapping_system->Reset();
             task_.SetState(TaskState::CANCELLED, "offline mapping cancelled");
+            return;
+        }
+        if (!bag_ok) {
+            mapping_system->Reset();
+            task_.SetFinished(false, "offline bag mapping failed");
             return;
         }
 
         task_.SetState(TaskState::SAVING, "saving offline map");
         const auto result = mapping_system->GetResult();
-        const bool save_ok = save_map_.Save(save_path, result);
+        const bool save_ok = save_map_.Save(save_path, result, save_map_options_);
         // 保存完地图后，等待用户关闭UI窗口或取消任务
         if (save_ok) {
             LOG(INFO) << "Map saved successfully. Close the UI window to continue or cancel the task.";
-            while (!pangolin::ShouldQuit() && !offline_cancel_.load()) {
+            while (!pangolin::ShouldQuit() && !task_.CancelRequested()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         }
         // 等待完后再清理
         mapping_system->Reset();
+        if (task_.CancelRequested()) {
+            task_.SetState(TaskState::CANCELLED, "offline mapping cancelled");
+            return;
+        }
         task_.SetFinished(save_ok, save_ok ? "offline mapping finished" : "failed to save offline map");
     });
 
@@ -249,7 +269,7 @@ ServiceResult Lightning::SaveMappingLocked(const std::string& save_path) {
     }
     task_.SetState(TaskState::SAVING, "saving map");
     const auto result = mapping_system_->GetResult();
-    const bool ok = save_map_.Save(save_path, result);
+    const bool ok = save_map_.Save(save_path, result, save_map_options_);
     return {ok, ok ? "map saved" : "failed to save map"};
 }
 
@@ -386,11 +406,10 @@ void Lightning::HandleCloudTimeout(const std::string& message) {
 
 ServiceResult Lightning::CancelTask() {
     std::lock_guard<std::mutex> lock(mutex_);
-    offline_cancel_ = true;
+    task_.RequestCancel();
     StopTopicInputLocked();
     ClearMappingLocked();
     ClearLocalizationLocked();
-    task_.SetState(TaskState::CANCELLED, "task cancelled");
     return {true, "task cancelled"};
 }
 

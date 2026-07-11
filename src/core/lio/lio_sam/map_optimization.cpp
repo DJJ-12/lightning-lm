@@ -1,26 +1,6 @@
 #include "core/lio/lio_sam/map_optimization.h"
 
-#include <array>
-#include <unordered_map>
-
 namespace {
-struct HybridTrustedPoseState {
-    bool has_last = false;
-    bool has_prev = false;
-    bool has_last_imu = false;
-    double last_time = -1.0;
-    double prev_time = -1.0;
-    std::array<float, 6> last{};
-    std::array<float, 6> prev{};
-    std::array<float, 6> last_imu{};
-};
-
-std::unordered_map<const mapOptimization*, HybridTrustedPoseState> g_hybrid_trusted_pose;
-
-HybridTrustedPoseState& HybridTrustedPose(const mapOptimization* owner) {
-    return g_hybrid_trusted_pose[owner];
-}
-
 bool HybridFinite6(const std::array<float, 6>& transform) {
     for (float v : transform) {
         if (!std::isfinite(static_cast<double>(v)))
@@ -94,8 +74,6 @@ mapOptimization::~mapOptimization() {
     loopClosureThreadRunning_.store(false);
     if (loopClosureThread_.joinable())
         loopClosureThread_.join();
-
-    g_hybrid_trusted_pose.erase(this);
 
     if (isam != nullptr) {
         delete isam;
@@ -744,7 +722,7 @@ bool mapOptimization::acceptMappingPose(const std::string& source){
         // Hybrid rule:
         // Only reliable INIT/LM/ICP poses update the trusted pose cache used in normal tracking.
         // Unreliable fallback poses are published by scan2MapOptimization(), but never enter this cache.
-        HybridTrustedPoseState& trusted = HybridTrustedPose(this);
+        HybridTrustedPoseState& trusted = hybrid_trusted_pose_;
         if (transformIsFinite(transformTobeMapped))
         {
             if (trusted.has_last && timeLaserInfoCur > trusted.last_time + 1e-3)
@@ -980,7 +958,7 @@ void mapOptimization::updateInitialGuess(){
             return;
         }
 
-        HybridTrustedPoseState& trusted = HybridTrustedPose(this);
+        HybridTrustedPoseState& trusted = hybrid_trusted_pose_;
         if (mappingFailureCount == 0 && trusted.has_last && HybridFinite6(trusted.last))
         {
             Eigen::Affine3f initialGuessAffine = pcl::getTransformation(

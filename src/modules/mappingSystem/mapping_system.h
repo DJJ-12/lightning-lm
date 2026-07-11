@@ -23,8 +23,6 @@ namespace modules {
 struct MappingSystemOptions {
     bool online_input = false;
     bool with_ui = false;
-    bool with_2dui = false;
-    bool step_on_kf = false;
 };
 
 struct MappingSystemResult {

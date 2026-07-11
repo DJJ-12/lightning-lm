@@ -6,7 +6,6 @@
 #include <atomic>
 #include "common/eigen_types.h"
 #include "common/keyframe.h"
-#include "common/loop_candidate.h"
 #include "common/nav_state.h"
 #include "common/point_def.h"
 

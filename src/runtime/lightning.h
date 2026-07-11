@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -70,11 +69,11 @@ class Lightning {
     std::unique_ptr<modules::LocalizationSystem> localization_system_;
     std::unique_ptr<TopicInput> topic_input_;
     modules::SaveMap save_map_;
+    modules::SaveMapOptions save_map_options_;
     std::string mapping_save_path_;
     std::string localization_map_path_;
 
     std::thread offline_thread_;
-    std::atomic_bool offline_cancel_{false};
 };
 
 }  // namespace lightning::runtime

@@ -25,11 +25,6 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
 
     YAML::Node yaml_node = YAML::LoadFile(yaml_path);
     options_.with_ui_ = false;
-    if (yaml_node["system"] && yaml_node["system"]["pub_tf"]) {
-        options_.pub_tf_ = yaml_node["system"]["pub_tf"].as<bool>();
-    } else if (yaml_node["pub_tf"]) {
-        options_.pub_tf_ = yaml_node["pub_tf"].as<bool>();
-    }
     LOG(INFO) << "[LOCALIZATION_CORE] pub_tf = " << options_.pub_tf_;
     if (yaml_node["system"] && yaml_node["system"]["with_ui"]) {
         options_.with_ui_ = yaml_node["system"]["with_ui"].as<bool>();
@@ -408,11 +403,6 @@ bool Localization::TryInitializeWithCurrentCloud() {
     return true;
 }
 
-void Localization::ProcessIMUMsg(IMUPtr imu) {
-    (void)imu;
-    // robot_localizer localization does not use IMU.
-}
-
 void Localization::Finish() {
     if (ui_) {
         ui_->Quit();
@@ -494,12 +484,6 @@ void Localization::PublishResult(const LocalizationResult& result) {
         tf_callback_(tf_msg);
     }
 
-    if (loc_state_callback_) {
-        std_msgs::msg::Int32 loc_state;
-        loc_state.data = static_cast<int>(result.status_);
-        loc_state_callback_(loc_state);
-    }
-
     if (result_callback_) {
         result_callback_(result);
     }
@@ -514,10 +498,6 @@ SE3 Localization::Matrix4dToSE3(const Eigen::Matrix4d& pose) {
 
 void Localization::SetTFCallback(Localization::TFCallback&& callback) {
     tf_callback_ = std::move(callback);
-}
-
-void Localization::SetLocStateCallback(Localization::LocStateCallback&& callback) {
-    loc_state_callback_ = std::move(callback);
 }
 
 void Localization::SetResultCallback(Localization::ResultCallback&& callback) {

@@ -57,9 +57,9 @@ localization   : TopicInput -> Localization
 /lightning/start_mapping
 /lightning/finish_mapping
 /lightning/save_map
-/lightning/get_grid_map
 
 /lightning/set_map_path
+/lightning/get_map_path
 /lightning/set_location
 /lightning/get_localization_quality
 ```

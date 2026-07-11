@@ -67,30 +67,11 @@ fasterlio:
 system:
   frontend: "lio_sam"
   with_ui: true
-  with_2dui: false
-  step_on_kf: false
   pub_tf: false
-
-maps:
-  delete_when_unload: false
-  dyn_cloud_policy: persistent
-  load_dyn_cloud: true
-  load_map_size: 2
-  max_pts_dyn_chunk: 100000
-  save_dyn_when_quit: true
-  save_dyn_when_unload: false
-  unload_map_size: 4
-  with_dyn_area: false
 
 roi:
   height_max: 100.0
   height_min: -100.0
-
-ui:
-  car_length: 2.0
-  car_width: 1.6
-  car_height: 1.7
-  scans: 1
 
 lio_sam:
   debugTiming: false
@@ -142,8 +123,6 @@ lio_sam:
   historyKeyframeFitnessScore: 0.3
 
 localization:
-  map_path: "./data/cx16_map/"
-
   quality:
     excellent_threshold: 4.0
     good_threshold: 2.5

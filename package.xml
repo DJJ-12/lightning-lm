@@ -3,14 +3,12 @@
 <package format="3">
     <name>lightning</name>
     <version>0.0.0</version>
-    <description>TODO: Package description</description>
+    <description>Lightning LM mapping and localization runtime</description>
     <maintainer email="gao.xiang.thu@gmail.com">gaoxiang</maintainer>
-    <license>TODO: License declaration</license>
+    <license>Proprietary</license>
 
     <buildtool_depend>ament_cmake</buildtool_depend>
     
-    <depend>scrubber_common</depend>
-    <depend>agibot_robot</depend>
     <depend>lightning_interfaces</depend>
     <depend>rclcpp</depend>
     <depend>std_msgs</depend>
@@ -22,7 +20,6 @@
     <depend>tf2_geometry_msgs</depend>
     <depend>tf2_eigen</depend>
     <depend>pcl_conversions</depend>
-    <depend>pcl_ros</depend>
     <depend>visualization_msgs</depend>
     <depend>gtsam</depend>
     <test_depend>ament_lint_auto</test_depend>

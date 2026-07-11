@@ -29,7 +29,6 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
     LOG(INFO) << "[LOCALIZATION_SYSTEM] pub_tf = " << options_.pub_tf_;
 
     loc::Localization::Options loc_options;
-    loc_options.online_mode_ = true;
     loc_options.pub_tf_ = options_.pub_tf_;
     loc_ = std::make_shared<loc::Localization>(loc_options);
     if (node) {

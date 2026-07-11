@@ -11,15 +11,12 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_eigen REQUIRED)
 find_package(GTSAM REQUIRED)
 find_package(lightning_interfaces REQUIRED)
-find_package(rosidl_default_runtime REQUIRED)
 
 include_directories(${PROJECT_SOURCE_DIR}/src/core/localization)
 
 add_library(${PROJECT_NAME}.libs SHARED
         common/nav_state.cc
-        common/constant.h
         common/options.cc
-        common/params.cc
 
         io/yaml_io.cc
         io/file_io.cc
@@ -30,9 +27,6 @@ add_library(${PROJECT_NAME}.libs SHARED
         core/lio/lio_sam/deskew_feature_extractor.cpp
         core/lio/lio_sam/map_optimization.cpp
         core/lio/pointcloud_preprocess.cc
-
-        core/maps/tiled_map.cc
-        core/maps/tiled_map_chunk.cc
 
         core/localization/localization_result.cc
         core/localization/localization.cpp
@@ -45,7 +39,6 @@ add_library(${PROJECT_NAME}.libs SHARED
         core/localization/MapLoader/utils.cpp
 
         utils/timer.cc
-        utils/pointcloud_utils.cc
 
         ui/pangolin_window.cc
         ui/pangolin_window_impl.cc
@@ -81,7 +74,6 @@ ament_target_dependencies(
         "tf2_geometry_msgs"
         "tf2_eigen"
         "lightning_interfaces"
-        "rosidl_default_runtime"
 )
 
 # 添加对 livox 消息类型支持的依赖

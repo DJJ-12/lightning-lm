@@ -9,14 +9,12 @@
 #include <pcl/point_types.h>
 
 #include "common/eigen_types.h"
-#include "common/imu.h"
 #include "common/std_types.h"
 #include "core/localization/GlobalLocalizer/GlobalLocalizer.h"
 #include "core/localization/localization_result.h"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "livox_ros_driver2/msg/custom_msg.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
-#include "std_msgs/msg/int32.hpp"
 
 namespace lightning {
 namespace ui {
@@ -28,11 +26,9 @@ namespace loc {
 class Localization {
    public:
     struct Options {
-        bool online_mode_ = false;
         bool with_ui_ = false;
         SE3 T_base_lidar_ = SE3();
         bool pub_tf_ = false;
-        
     };
 
     explicit Localization(Options options);
@@ -42,17 +38,14 @@ class Localization {
 
     void ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPtr laser_msg);
     void ProcessLivoxLidarMsg(const livox_ros_driver2::msg::CustomMsg::SharedPtr laser_msg);
-    void ProcessIMUMsg(IMUPtr imu);
 
     bool SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vector3d& t);
     void Finish();
 
     using TFCallback = std::function<void(const geometry_msgs::msg::TransformStamped& odom)>;
-    using LocStateCallback = std::function<void(const std_msgs::msg::Int32& state)>;
     using ResultCallback = std::function<void(const LocalizationResult& result)>;
 
     void SetTFCallback(TFCallback&& callback);
-    void SetLocStateCallback(LocStateCallback&& callback);
     void SetResultCallback(ResultCallback&& callback);
     void MarkPoor(const std::string& message);
     LocalizationResult GetLatestResult() const;
@@ -101,7 +94,6 @@ class Localization {
     mutable std::mutex loc_result_mutex_;
 
     TFCallback tf_callback_;
-    LocStateCallback loc_state_callback_;
     ResultCallback result_callback_;
     std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
 

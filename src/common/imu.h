@@ -5,6 +5,8 @@
 #ifndef LIGHTNING_IMU_H
 #define LIGHTNING_IMU_H
 
+#include <memory>
+
 #include "common/eigen_types.h"
 
 namespace lightning {

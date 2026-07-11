@@ -372,8 +372,6 @@ void PangolinWindowImpl::Render() {
     pangolin::Var<bool> menu_draw_backend_traj("menu.Draw Backend Traj", true, true);    // 后端实时轨迹
     pangolin::Var<bool> menu_reset_3d_view("menu.Reset 3D View", false, false);          // 重置俯视视角
     pangolin::Var<bool> menu_reset_front_view("menu.Set to front View", false, false);   // 前视视角
-    pangolin::Var<bool> menu_step("menu.Step", false, false);                            // 单步调试
-    pangolin::Var<float> menu_play_speed("menu.Play speed", 10.0, 0.1, 10.0);            // 运行速度
     pangolin::Var<float> menu_intensity("menu.intensity", 0.5, 0.0, 1.0);                // 亮度
 
     // display layout
@@ -402,13 +400,6 @@ void PangolinWindowImpl::Render() {
             menu_reset_front_view = false;
         }
 
-        if (menu_step) {
-            debug::flg_next = true;
-        } else {
-            debug::flg_next = false;
-        }
-
-        debug::play_speed = menu_play_speed;
         ui::opacity = menu_intensity;
 
         // Render pointcloud

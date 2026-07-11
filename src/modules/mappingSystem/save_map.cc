@@ -14,7 +14,6 @@
 #include <glog/logging.h>
 
 #include "common/nav_state.h"
-#include "core/maps/tiled_map.h"
 
 namespace lightning::modules {
 
@@ -47,12 +46,6 @@ bool SaveMap::Save(const std::string& save_path, const MappingSystemResult& resu
     }
 
     pcl::io::savePCDFileBinaryCompressed(save_path + "/global.pcd", *result.global_map);
-
-    TiledMap::Options tm_options;
-    tm_options.map_path_ = save_path;
-    TiledMap tm(tm_options);
-    SE3 start_pose = result.keyframes.front()->GetLIOPose();
-    tm.ConvertFromFullPCD(result.global_map, start_pose, save_path);
 
     if (!SaveBlockMap(save_path, result.global_map, options)) {
         return false;

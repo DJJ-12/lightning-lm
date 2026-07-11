@@ -14,10 +14,9 @@ set(CMAKE_BUILD_TYPE Release)
 # 导入第三方库，同时做一些全局编译选项配置
 add_definitions("-DPCL_NO_PRECOMPILE")
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -fopenmp -fPIC -g")
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS} -O2 -fopenmp -fPIC -g -ggdb")
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS} -ggdb -g -fopenmp -fPIC -g")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -g")
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
 
 
 if (CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -41,17 +40,6 @@ file(MAKE_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(cmake/packages.cmake)
 
-find_package(visualization_msgs REQUIRED)
-find_package(tf2_geometry_msgs REQUIRED)
-find_package(tf2_eigen REQUIRED)
-find_package(pcl_conversions REQUIRED)
-find_package(OpenMP REQUIRED)
-find_package(lightning_interfaces REQUIRED)
-find_package(rosidl_default_generators REQUIRED)
-
-include_directories(
-)
-
 install(DIRECTORY config
         DESTINATION lib/${PROJECT_NAME}/
 )
@@ -60,8 +48,6 @@ install(DIRECTORY config
 add_subdirectory(thirdparty/livox_ros_driver)
 
 # 添加对 livox_interfaces2 的依赖
-ament_export_dependencies(rosidl_default_runtime)
-
 add_subdirectory(src)
 
 ament_package()

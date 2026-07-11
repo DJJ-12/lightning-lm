@@ -35,8 +35,6 @@ bool MappingSystem::Init(const std::string& yaml_path, const MappingSystemOption
 
     if (yaml["system"]) {
         if (yaml["system"]["with_ui"]) options_.with_ui = yaml["system"]["with_ui"].as<bool>();
-        if (yaml["system"]["with_2dui"]) options_.with_2dui = yaml["system"]["with_2dui"].as<bool>();
-        if (yaml["system"]["step_on_kf"]) options_.step_on_kf = yaml["system"]["step_on_kf"].as<bool>();
     }
     if (yaml["common"] && yaml["common"]["base_link_frame"]) {
         base_link_frame_ = yaml["common"]["base_link_frame"].as<std::string>();
