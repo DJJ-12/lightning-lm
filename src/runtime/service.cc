@@ -8,12 +8,10 @@ namespace lightning::runtime {
 
 namespace {
 SE3 PoseFromRequest(const lightning_interfaces::srv::SetLocation::Request& request) {
-    Eigen::AngleAxisd roll_angle(request.roll, Eigen::Vector3d::UnitX());
-    Eigen::AngleAxisd pitch_angle(request.pitch, Eigen::Vector3d::UnitY());
-    Eigen::AngleAxisd yaw_angle(request.yaw, Eigen::Vector3d::UnitZ());
-    Eigen::Quaterniond q(yaw_angle * pitch_angle * roll_angle);
-    q.normalize();
-    Eigen::Vector3d t(request.x, request.y, request.z);
+    constexpr double kDegToRad = 0.017453292519943295;
+    Eigen::AngleAxisd yaw_angle(request.yaw * kDegToRad, Eigen::Vector3d::UnitZ());
+    Eigen::Quaterniond q(yaw_angle);
+    Eigen::Vector3d t(request.x, request.y, 0.0);
     return SE3(q, t);
 }
 }  // namespace

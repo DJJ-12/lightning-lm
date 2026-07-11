@@ -411,17 +411,23 @@ bool LaserMapping::SyncPackages() {
         measures_.scan_ = lidar_buffer_.front();
         measures_.lidar_begin_time_ = time_buffer_.front();
 
+        double max_point_time = 0.0;
+        for (const auto& point : measures_.scan_->points) {
+            max_point_time = std::max(max_point_time, point.time);
+        }
+        const double scan_duration = max_point_time / 1000.0;
+
         if (measures_.scan_->points.size() <= 1) {
             LOG(WARNING) << "Too few input point cloud!";
             lidar_end_time_ = measures_.lidar_begin_time_ + lidar_mean_scantime_;
-        } else if (measures_.scan_->points.back().time / double(1000) < 0.5 * lidar_mean_scantime_) {
+        } else if (scan_duration < 0.5 * lidar_mean_scantime_) {
             lidar_end_time_ = measures_.lidar_begin_time_ + lidar_mean_scantime_;
         } else {
             scan_num_++;
-            lidar_end_time_ = measures_.lidar_begin_time_ + measures_.scan_->points.back().time / double(1000);
+            lidar_end_time_ = measures_.lidar_begin_time_ + scan_duration;
 
             lidar_mean_scantime_ +=
-                (measures_.scan_->points.back().time / double(1000) - lidar_mean_scantime_) / scan_num_;
+                (scan_duration - lidar_mean_scantime_) / scan_num_;
 
             if ((lidar_end_time_ - measures_.lidar_begin_time_) > 5 * lo::lidar_time_interval) {
                 /// timestamp 有异常

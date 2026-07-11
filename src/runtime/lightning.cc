@@ -326,6 +326,31 @@ ServiceResult Lightning::SetMapPath(const std::string& map_path) {
     }
 
     localization_map_path_ = map_path;
+
+    topic_input_ = std::make_unique<TopicInput>();
+    const bool input_ok = topic_input_->Start(
+        node_, yaml_path_,
+        nullptr,
+        [this](const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (localization_system_) {
+                localization_system_->ProcessCloud(cloud);
+            }
+        },
+        [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (localization_system_) {
+                localization_system_->ProcessCloud(cloud);
+            }
+        },
+        false, localization_cloud_timeout_sec_,
+        [this](const std::string& message) { HandleCloudTimeout(message); });
+    if (!input_ok) {
+        StopTopicInputLocked();
+        ClearLocalizationLocked();
+        return {false, "failed to start TopicInput for localization"};
+    }
+
     task_.Reset(TaskState::READY, "map path set, waiting for set_location");
     return {true, "map path set: " + map_path};
 }
@@ -357,29 +382,6 @@ ServiceResult Lightning::SetLocation(const SE3& init_pose, bool* initialized_now
         *initialized_now = initialized;
     }
 
-    if (!topic_input_) {
-        topic_input_ = std::make_unique<TopicInput>();
-        const bool ok = topic_input_->Start(
-            node_, yaml_path_,
-            nullptr,
-            [this](const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (localization_system_) {
-                    localization_system_->ProcessCloud(cloud);
-                }
-            },
-            [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (localization_system_) {
-                    localization_system_->ProcessCloud(cloud);
-                }
-            },
-            false, localization_cloud_timeout_sec_,
-            [this](const std::string& message) { HandleCloudTimeout(message); });
-        if (!ok) {
-            return {false, "failed to start TopicInput for localization"};
-        }
-    }
     task_.SetState(initialized ? TaskState::RUNNING : TaskState::WAIT_CLOUD,
                    initialized ? "localization initialized" : "initial pose accepted, waiting for current cloud");
     return {true, initialized ? "localization initialized" : "initial pose accepted, waiting for current cloud"};

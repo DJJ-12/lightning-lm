@@ -61,32 +61,42 @@ TreeStructuredParzenEstimator::Input TreeStructuredParzenEstimator::get_next_inp
 {
     std::normal_distribution<double> dist_normal_trans_x(sample_mean_[TRANS_X], sample_stddev_[TRANS_X]);
     std::normal_distribution<double> dist_normal_trans_y(sample_mean_[TRANS_Y], sample_stddev_[TRANS_Y]);
+    std::normal_distribution<double> dist_normal_trans_z(sample_mean_[TRANS_Z], sample_stddev_[TRANS_Z]);
+    std::normal_distribution<double> dist_normal_angle_x(sample_mean_[ANGLE_X], sample_stddev_[ANGLE_X]);
+    std::normal_distribution<double> dist_normal_angle_y(sample_mean_[ANGLE_Y], sample_stddev_[ANGLE_Y]);
     std::normal_distribution<double> dist_normal_angle_z(sample_mean_[ANGLE_Z], sample_stddev_[ANGLE_Z]);
     //std::uniform_real_distribution<double> dist_uniform_angle_z(-M_PI, M_PI);
 
-    auto make_2d_input = [&]() {
+    if (static_cast<int64_t>(trials_.size()) < n_startup_trials_ || above_num_ == 0)
+    {
+        // Random sampling based on prior until the number of trials reaches `n_startup_trials_`.
         Input input(input_dimension_);
         input[TRANS_X] = dist_normal_trans_x(engine);
         input[TRANS_Y] = dist_normal_trans_y(engine);
-        input[TRANS_Z] = sample_mean_[TRANS_Z];   // 2.5D：禁止 z 撒种子
-        input[ANGLE_X] = sample_mean_[ANGLE_X];   // 2.5D：禁止 roll 撒种子
-        input[ANGLE_Y] = sample_mean_[ANGLE_Y];   // 2.5D：禁止 pitch 撒种子
+        input[TRANS_Z] = dist_normal_trans_z(engine);
+        input[ANGLE_X] = dist_normal_angle_x(engine);
+        input[ANGLE_Y] = dist_normal_angle_y(engine);
         input[ANGLE_Z] = dist_normal_angle_z(engine);
+        input[TRANS_Z] = sample_mean_[TRANS_Z];
+        input[ANGLE_X] = sample_mean_[ANGLE_X];
+        input[ANGLE_Y] = sample_mean_[ANGLE_Y];
         return input;
-    };
-
-    if (static_cast<int64_t>(trials_.size()) < n_startup_trials_ || above_num_ == 0)
-    {
-        
-        // 2.5D relocalization: only x / y / yaw are sampled.
-        return make_2d_input();
     }
 
     Input best_input;
     double best_log_likelihood_ratio = std::numeric_limits<double>::lowest();
     for (int64_t i = 0; i < n_ei_candidates; i++)
     {
-        Input input = make_2d_input();
+        Input input(input_dimension_);
+        input[TRANS_X] = dist_normal_trans_x(engine);
+        input[TRANS_Y] = dist_normal_trans_y(engine);
+        input[TRANS_Z] = dist_normal_trans_z(engine);
+        input[ANGLE_X] = dist_normal_angle_x(engine);
+        input[ANGLE_Y] = dist_normal_angle_y(engine);
+        input[ANGLE_Z] = dist_normal_angle_z(engine);
+        input[TRANS_Z] = sample_mean_[TRANS_Z];
+        input[ANGLE_X] = sample_mean_[ANGLE_X];
+        input[ANGLE_Y] = sample_mean_[ANGLE_Y];
         const double log_likelihood_ratio = compute_log_likelihood_ratio(input);
         if (log_likelihood_ratio > best_log_likelihood_ratio)
         {

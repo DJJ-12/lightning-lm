@@ -26,6 +26,9 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
     } else if (yaml_node["pub_tf"]) {
         options_.pub_tf_ = yaml_node["pub_tf"].as<bool>();
     }
+    if (yaml_node["common"] && yaml_node["common"]["base_link_frame"]) {
+        base_link_frame_ = yaml_node["common"]["base_link_frame"].as<std::string>();
+    }
     LOG(INFO) << "[LOCALIZATION_SYSTEM] pub_tf = " << options_.pub_tf_;
 
     loc::Localization::Options loc_options;
@@ -51,6 +54,15 @@ void LocalizationSystem::SetupPublishers(rclcpp::Node::SharedPtr node) {
         if (options_.pub_tf_ && tf_broadcaster_) {
             tf_broadcaster_->sendTransform(tf_msg);
         }
+    });
+
+    loc_->SetResultCallback([this](const loc::LocalizationResult& result) {
+        if (!result.valid_) {
+            return;
+        }
+
+        auto tf_msg = result.ToGeoMsg();
+        tf_msg.child_frame_id = base_link_frame_;
 
         geometry_msgs::msg::PoseStamped pose_msg;
         pose_msg.header = tf_msg.header;
@@ -69,13 +81,11 @@ void LocalizationSystem::SetupPublishers(rclcpp::Node::SharedPtr node) {
         if (loc_odom_pub_) {
             loc_odom_pub_->publish(odom_msg);
         }
-    });
 
-    loc_->SetResultCallback([this](const loc::LocalizationResult& result) {
-        if (!loc_pose_quality_pub_ || !result.valid_) {
+        if (!loc_pose_quality_pub_) {
             return;
         }
-        auto tf_msg = result.ToGeoMsg();
+
         lightning_interfaces::msg::LocalizationPose msg;
         msg.header = tf_msg.header;
         msg.pose.position.x = tf_msg.transform.translation.x;
@@ -135,14 +145,14 @@ bool LocalizationSystem::SetInitialGuess(const SE3& init_pose, bool* initialized
 }
 
 void LocalizationSystem::ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
-    if (!loc_ || !map_ready_ || !has_initial_guess_) {
+    if (!loc_ || !map_ready_) {
         return;
     }
     loc_->ProcessLidarMsg(cloud);
 }
 
 void LocalizationSystem::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
-    if (!loc_ || !map_ready_ || !has_initial_guess_) {
+    if (!loc_ || !map_ready_) {
         return;
     }
     loc_->ProcessLivoxLidarMsg(cloud);

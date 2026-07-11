@@ -45,6 +45,7 @@ class LocalizationSystem {
     LocalizationSystemOptions options_;
     std::string yaml_path_;
     std::string map_path_;
+    std::string base_link_frame_ = "base_link";
     bool map_ready_ = false;
     bool has_initial_guess_ = false;
 

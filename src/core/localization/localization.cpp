@@ -267,7 +267,8 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
     }
 
     Eigen::Matrix4d pose = Eigen::Matrix4d::Identity();
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_reg(new pcl::PointCloud<pcl::PointXYZ>());
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_reg(
+        new pcl::PointCloud<pcl::PointXYZ>(*current_cloud));
     robot_localizer::LocalizationQuality quality;
 
     const bool reliable = localizer_.RegisterFrame(current_cloud, cloud_reg, pose, quality);
@@ -317,67 +318,18 @@ bool Localization::TryInitializeWithCurrentCloud() {
             init_in_progress_) {
             return false;
         }
-
         init_in_progress_ = true;
         init_guess = pending_initial_pose_;
     }
-
-    LOG(INFO) << "[INIT_LOC] use pending initial pose x=" << init_guess(0, 3)
-              << ", y=" << init_guess(1, 3)
-              << ", z=" << init_guess(2, 3);
 
     Eigen::Matrix4d aligned_pose = Eigen::Matrix4d::Identity();
     pcl::PointCloud<pcl::PointXYZ>::Ptr output_cloud(
         new pcl::PointCloud<pcl::PointXYZ>());
     robot_localizer::LocalizationQuality quality;
 
-    const bool ok = localizer_.GetInitPose(
+    localizer_.GetInitPose(
         init_guess, aligned_pose, input_cloud, output_cloud, quality);
 
-    if (!ok || !quality.is_reliable) {
-        {
-            UL lock(global_mutex_);
-            // Keep the pending initial pose so a new cloud can retry it, but do not enter tracking.
-            localization_inited_ = false;
-            has_pending_initial_pose_ = true;
-            init_in_progress_ = false;
-        }
-
-        LocalizationResult res;
-        res.timestamp_ = timestamp;
-        res.valid_ = true;
-        res.localization_valid_ = false;
-        // Report the rejected aligned pose for diagnostics, but do not publish TF because status is FAIL.
-        res.pose_ = Matrix4dToSE3(aligned_pose);
-        res.confidence_ = quality.transform_probability;
-        res.status_ = LocalizationStatus::FAIL;
-        res.reliable_ = false;
-        res.tp_ = quality.transform_probability;
-        res.nvtl_ = quality.nearest_voxel_likelihood;
-        res.iterations_ = quality.iteration_num;
-        res.message_ = "initial localization failed: " + quality.quality_level;
-
-        PublishResult(res);
-        return false;
-    }
-    const Eigen::Matrix4d T_map_base_init = aligned_pose;
-
-    LOG(INFO) << "[INIT_2_5D] T_map_base_init: x="
-            << T_map_base_init(0, 3)
-            << ", y=" << T_map_base_init(1, 3)
-            << ", z=" << T_map_base_init(2, 3);
-
-    LOG(INFO) << "[INIT_2_5D] init_guess: x="
-            << init_guess(0, 3)
-            << ", y=" << init_guess(1, 3)
-            << ", z=" << init_guess(2, 3);
-
-    LOG(INFO) << "[INIT_2_5D] quality: TP="
-            << quality.transform_probability
-            << ", NVTL=" << quality.nearest_voxel_likelihood
-            << ", iterations=" << quality.iteration_num
-            << ", level=" << quality.quality_level
-            << ", reliable=" << quality.is_reliable;
     {
         UL lock(global_mutex_);
         latest_pose_ = aligned_pose;
@@ -389,17 +341,20 @@ bool Localization::TryInitializeWithCurrentCloud() {
     LocalizationResult res;
     res.timestamp_ = timestamp;
     res.valid_ = true;
-    res.localization_valid_ = true;
+    res.localization_valid_ = quality.is_reliable;
     res.pose_ = Matrix4dToSE3(aligned_pose);
     res.confidence_ = quality.transform_probability;
-    res.status_ = LocalizationStatus::GOOD;
-    res.reliable_ = true;
+    res.status_ = quality.is_reliable ? LocalizationStatus::GOOD : LocalizationStatus::FAIL;
+    res.reliable_ = quality.is_reliable;
     res.tp_ = quality.transform_probability;
     res.nvtl_ = quality.nearest_voxel_likelihood;
     res.iterations_ = quality.iteration_num;
     res.message_ = "localization initialized: " + quality.quality_level;
 
-    PublishResult(res);
+    {
+        UL lock_result(loc_result_mutex_);
+        loc_result_ = res;
+    }
     return true;
 }
 
@@ -453,7 +408,7 @@ bool Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
     LOG(INFO) << "[SET_LOCATION] accepted new initial pose x=" << init_guess(0, 3)
               << ", y=" << init_guess(1, 3)
               << ", z=" << init_guess(2, 3);
-    return false;
+    return TryInitializeWithCurrentCloud();
 }
 
 void Localization::PublishResult(const LocalizationResult& result) {
@@ -467,8 +422,7 @@ void Localization::PublishResult(const LocalizationResult& result) {
         ui_->UpdateRecentPose(result.pose_);
     }
 
-    const bool pose_is_publishable =
-        result.valid_ && result.status_ == LocalizationStatus::GOOD;
+    const bool pose_is_publishable = result.valid_;
 
     std::string base_link_frame;
     {
@@ -517,7 +471,10 @@ void Localization::MarkPoor(const std::string& message) {
     result.nvtl_ = 0.0;
     result.iterations_ = 0;
     result.message_ = message.empty() ? "localization poor" : message;
-    PublishResult(result);
+    {
+        UL lock_result(loc_result_mutex_);
+        loc_result_ = result;
+    }
 }
 
 LocalizationResult Localization::GetLatestResult() const {
