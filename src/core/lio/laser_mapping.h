@@ -62,7 +62,7 @@ class LaserMapping {
 
     bool Run();
 
-    // Input has already been standardized by PointCloudPreprocess.
+    // Input has already been transformed by MappingSystem into base_link.
     void ProcessPointCloud2(CloudPtr cloud);
 
     void ProcessIMU(const lightning::IMUPtr &msg_in);
@@ -143,8 +143,8 @@ class LaserMapping {
     double filter_size_map_min_ = 0;
 
     /// params
-    std::vector<double> extrinT_{3, 0.0};  // lidar-imu translation
-    std::vector<double> extrinR_{9, 0.0};  // lidar-imu rotation
+    // Input cloud is already in base_link. In FAST-LIO, base_link is treated as
+    // the body/IMU frame, so these offsets are intentionally fixed to identity.
     Mat3d offset_R_imu_lidar_ = Mat3d::Identity();
     Vec3d offset_t_imu_lidar_ = Vec3d::Zero();
     std::string map_file_path_;

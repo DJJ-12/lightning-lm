@@ -23,6 +23,8 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
     YAML::Node yaml_node = YAML::LoadFile(yaml_path);
     if (yaml_node["system"] && yaml_node["system"]["pub_tf"]) {
         options_.pub_tf_ = yaml_node["system"]["pub_tf"].as<bool>();
+    } else if (yaml_node["pub_tf"]) {
+        options_.pub_tf_ = yaml_node["pub_tf"].as<bool>();
     }
     LOG(INFO) << "[LOCALIZATION_SYSTEM] pub_tf = " << options_.pub_tf_;
 

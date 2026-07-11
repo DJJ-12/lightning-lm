@@ -12,6 +12,7 @@
 #include <string>
 #include <limits>
 #include <iomanip>
+#include <stdexcept>
 #include <array>
 #include <thread>
 #include <fstream>
@@ -90,6 +91,7 @@ struct Serializer<std::unordered_map<Key, Value, Hash, Eq, Alloc>> {
 #include <pcl/filters/crop_box.h>
 #include <pcl_conversions/pcl_conversions.h>
 
+#include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
@@ -359,7 +361,7 @@ public:
         if (sqrt(q_final.x()*q_final.x() + q_final.y()*q_final.y() + q_final.z()*q_final.z() + q_final.w()*q_final.w()) < 0.1)
         {
             RCLCPP_ERROR(get_logger(), "Invalid quaternion, please use a 9-axis IMU!");
-            rclcpp::shutdown();
+            throw std::runtime_error("invalid IMU quaternion");
         }
 
         return imu_out;
@@ -380,15 +382,6 @@ void imuAngular2rosAngular(sensor_msgs::msg::Imu *thisImuMsg, T *angular_x, T *a
     *angular_x = thisImuMsg->angular_velocity.x;
     *angular_y = thisImuMsg->angular_velocity.y;
     *angular_z = thisImuMsg->angular_velocity.z;
-}
-
-
-template<typename T>
-void imuAccel2rosAccel(sensor_msgs::msg::Imu *thisImuMsg, T *acc_x, T *acc_y, T *acc_z)
-{
-    *acc_x = thisImuMsg->linear_acceleration.x;
-    *acc_y = thisImuMsg->linear_acceleration.y;
-    *acc_z = thisImuMsg->linear_acceleration.z;
 }
 
 

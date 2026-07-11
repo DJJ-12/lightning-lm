@@ -1,5 +1,4 @@
 find_package(rclcpp REQUIRED)
-find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -58,7 +57,6 @@ add_library(${PROJECT_NAME}.libs SHARED
 ament_target_dependencies(
         ${PROJECT_NAME}.libs
         "rclcpp"
-        "std_msgs"
         "geometry_msgs"
         "sensor_msgs"
         "nav_msgs"

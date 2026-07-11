@@ -54,9 +54,6 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         b_gyr_cov = yaml["common"]["imuGyrBiasN"].as<float>();
         b_acc_cov = yaml["common"]["imuAccBiasN"].as<float>();
 
-        extrinT_ = yaml["fasterlio"]["extrinsic_T"].as<std::vector<double>>();
-        extrinR_ = yaml["fasterlio"]["extrinsic_R"].as<std::vector<double>>();
-
         ivox_options_.resolution_ = yaml["fasterlio"]["ivox_grid_resolution"].as<float>();
         ivox_nearby_type = yaml["fasterlio"]["ivox_nearby_type"].as<int>();
         use_aa_ = yaml["fasterlio"]["use_aa"].as<bool>();
@@ -94,8 +91,12 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
 
     voxel_scan_.setLeafSize(filter_size_scan, filter_size_scan, filter_size_scan);
 
-    offset_t_imu_lidar_ = math::VecFromArray<double>(extrinT_);
-    offset_R_imu_lidar_= math::MatFromArray<double>(extrinR_);
+    // MappingSystem has already converted every frontend input cloud to base_link.
+    // In lightning, base_link is the FAST-LIO body/IMU frame, so the internal
+    // lidar-to-IMU extrinsic must stay identity to avoid applying extrinsics twice.
+    offset_t_imu_lidar_.setZero();
+    offset_R_imu_lidar_.setIdentity();
+    LOG(INFO) << "[FAST_LIO] input cloud is base_link; internal lidar-to-imu extrinsic is identity";
 
     p_imu_->SetExtrinsic(offset_t_imu_lidar_, offset_R_imu_lidar_);
     p_imu_->SetGyrCov(Vec3d(gyr_cov, gyr_cov, gyr_cov));

@@ -26,12 +26,6 @@ struct LocalizationQuality {
     bool is_reliable = false;                     // 是否可靠
     std::string quality_level = "unknown";       // 质量等级：excellent/good/fair/poor
 
-    // 评估定位质量（使用默认阈值）
-    void evaluate() {
-        QualityThresholds thresholds;
-        evaluate(thresholds);
-    }
-
     // 评估定位质量（使用自定义阈值）
     void evaluate(const QualityThresholds& thresholds) {
         if (transform_probability > thresholds.excellent_threshold && 
@@ -80,16 +74,10 @@ public:
         quality_thresholds_ = thresholds;
     }
 
-    void GetInitPose(const Eigen::Matrix4d& init_guess, Eigen::Matrix4d& align_pose, const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud);
-
     bool GetInitPose(const Eigen::Matrix4d& init_guess, Eigen::Matrix4d& align_pose, const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud, LocalizationQuality& quality);
 
     void ResetLocalizationState();
 
-    // 原有接口（保持兼容性）
-    bool RegisterFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud, Eigen::Matrix4d& align_pose);
-    
-    // 新增接口（带定位质量输出）
     bool RegisterFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud, Eigen::Matrix4d& align_pose, LocalizationQuality& quality);
 
     void SetStaticMap(std::string pcd_metadata_path, std::string pcd_directory)
@@ -99,8 +87,6 @@ public:
         map_loader_.Initialize(pcd_metadata_path_, pcd_directory_);
     }
 
-    void UpdateMap(const Eigen::Vector2d &pose);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr GetLocateMap(){ return map_loader_.GetMapCloud();}
     void MapReset() {map_loader_.reset();}
 };
 }

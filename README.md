@@ -33,6 +33,17 @@ localization   : TopicInput -> Localization
 - `Localization`: 定位算法主模块，内部保留 robot_localizer::Localizer 和 MapLoader
 - `SaveMap`: 地图保存模块
 
+## 坐标约定
+
+建图和定位统一由外层读取：
+
+```text
+common.extrinsicBaseLidarTrans
+common.extrinsicBaseLidarRot
+```
+
+`MappingSystem` 会先把输入点云从 LiDAR 坐标系转换到 `base_link`，再交给 LIO-SAM 或 FAST-LIO。两个前端的输入点云都视为 `base_link` 坐标系，输出状态都视为 `T_map_base`。FAST-LIO 内部不再读取 `fasterlio.extrinsic_T/R`，其内部 lidar-to-IMU 外参固定为单位阵，避免同一帧点云被重复套用外参。
+
 ## SetMapPath 与 MapLoader 的关系
 
 `/lightning/set_map_path` 只负责让客户指定地图根路径，例如：

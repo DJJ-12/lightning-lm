@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <iomanip>
 #include <limits>
 #include <utility>
@@ -61,9 +62,6 @@ LioSamMapping::~LioSamMapping() {
     deskew_feature_extractor_.reset();
     map_optimization_.reset();
     frontend_cloud_info_.reset();
-    if (owns_rclcpp_context_ && rclcpp::ok()) {
-        rclcpp::shutdown();
-    }
 }
 
 bool LioSamMapping::Init(const std::string& config_yaml) {
@@ -73,10 +71,8 @@ bool LioSamMapping::Init(const std::string& config_yaml) {
     }
 
     if (!rclcpp::ok()) {
-        int argc = 1;
-        const char* argv[] = {"lightning_lio_sam_offline"};
-        rclcpp::init(argc, argv);
-        owns_rclcpp_context_ = true;
+        LOG(ERROR) << "rclcpp context is not initialized; start LIO-SAM through run_lightning";
+        return false;
     }
 
     frontend_cloud_info_ = std::make_unique<::LioSamCloudInfo>();
@@ -345,14 +341,19 @@ bool LioSamMapping::Run() {
     }
 
     LioSamCloudInfo& cloud_info = *frontend_cloud_info_;
-    if (!deskew_feature_extractor_->Run(
-            measures_.cloud,
-            measures_.imus,
-            measures_.lidar_begin_time,
-            measures_.lidar_end_time,
-            measures_.frame_id,
-            true,
-            cloud_info)) {
+    try {
+        if (!deskew_feature_extractor_->Run(
+                measures_.cloud,
+                measures_.imus,
+                measures_.lidar_begin_time,
+                measures_.lidar_end_time,
+                measures_.frame_id,
+                true,
+                cloud_info)) {
+            return false;
+        }
+    } catch (const std::exception& e) {
+        LOG(ERROR) << "[LIO_SAM] deskew failed: " << e.what();
         return false;
     }
 

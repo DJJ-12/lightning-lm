@@ -37,10 +37,14 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     std::vector<double> base_lidar_R{1.0, 0.0, 0.0,
                                      0.0, 1.0, 0.0,
                                      0.0, 0.0, 1.0};
-    if (yaml_node["common"] && yaml_node["common"]["extrinsicBaseLidarTrans"]) {
+    if (yaml_node["extrinsicBaseLidarTrans"]) {
+        base_lidar_t = yaml_node["extrinsicBaseLidarTrans"].as<std::vector<double>>();
+    } else if (yaml_node["common"] && yaml_node["common"]["extrinsicBaseLidarTrans"]) {
         base_lidar_t = yaml_node["common"]["extrinsicBaseLidarTrans"].as<std::vector<double>>();
     }
-    if (yaml_node["common"] && yaml_node["common"]["extrinsicBaseLidarRot"]) {
+    if (yaml_node["extrinsicBaseLidarRot"]) {
+        base_lidar_R = yaml_node["extrinsicBaseLidarRot"].as<std::vector<double>>();
+    } else if (yaml_node["common"] && yaml_node["common"]["extrinsicBaseLidarRot"]) {
         base_lidar_R = yaml_node["common"]["extrinsicBaseLidarRot"].as<std::vector<double>>();
     }
     CHECK_EQ(base_lidar_t.size(), 3);
@@ -268,11 +272,6 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
 
     const bool reliable = localizer_.RegisterFrame(current_cloud, cloud_reg, pose, quality);
 
-    {
-        UL lock(global_mutex_);
-        latest_pose_ = pose;
-    }
-
     LocalizationResult res;
     res.timestamp_ = frame.timestamp;
     res.valid_ = true;
@@ -285,6 +284,11 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
     res.nvtl_ = quality.nearest_voxel_likelihood;
     res.iterations_ = quality.iteration_num;
     res.message_ = reliable ? "localization reliable" : "localization not reliable";
+
+    {
+        UL lock(global_mutex_);
+        latest_pose_ = pose;
+    }
 
     PublishResult(res);
 }
@@ -466,15 +470,13 @@ void Localization::PublishResult(const LocalizationResult& result) {
     const bool pose_is_publishable =
         result.valid_ && result.status_ == LocalizationStatus::GOOD;
 
-    bool pub_tf = false;
     std::string base_link_frame;
     {
         UL lock(global_mutex_);
-        pub_tf = options_.pub_tf_;
         base_link_frame = base_link_frame_;
     }
 
-    if (pub_tf && pose_is_publishable && tf_callback_) {
+    if (pose_is_publishable && tf_callback_) {
         auto tf_msg = result.ToGeoMsg();
         tf_msg.child_frame_id = base_link_frame;
         tf_callback_(tf_msg);

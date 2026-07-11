@@ -156,12 +156,6 @@ Localizer::Localizer()
     LOG(INFO) << "Localizer initialized";
 }
 
-void Localizer::GetInitPose(const Eigen::Matrix4d &init_guess, Eigen::Matrix4d &align_pose, const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud)
-{
-    LocalizationQuality quality;
-    (void)GetInitPose(init_guess, align_pose, pc, output_cloud, quality);
-}
-
 bool Localizer::GetInitPose(const Eigen::Matrix4d &init_guess, Eigen::Matrix4d &align_pose, const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud, LocalizationQuality& quality)
 {
     quality = LocalizationQuality();
@@ -292,12 +286,6 @@ void Localizer::ResetLocalizationState()
     last_pose_ = Eigen::Matrix4d::Identity();
 }
 
-bool Localizer::RegisterFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr &pc, pcl::PointCloud<pcl::PointXYZ>::Ptr &output_cloud, Eigen::Matrix4d &align_pose)
-{
-    LocalizationQuality quality;
-    return RegisterFrame(pc, output_cloud, align_pose, quality);
-}
-
 bool Localizer::RegisterFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr &pc, pcl::PointCloud<pcl::PointXYZ>::Ptr &output_cloud, Eigen::Matrix4d &align_pose, LocalizationQuality& quality) 
 {
     Eigen::Matrix4d init_guess = last_pose_ * last_last_pose_.inverse() * last_pose_;
@@ -315,12 +303,7 @@ bool Localizer::RegisterFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr &pc, pcl
     // 评估定位质量（使用配置的阈值）
     quality.evaluate(quality_thresholds_);
 
-    // Tracking and publishing use different gates:
-    // - return value still means "reliable enough to publish/use as a trusted localization result";
-    // - last_pose_ may be updated for tracking when the score is not completely unusable,
-    //   otherwise a single poor frame can freeze the constant-velocity predictor and cause
-    //   a domino failure in the following frames.
-    const double tracking_min_tp = 0.5;  // conservative fallback gate; keep publish gate stricter.
+    const double tracking_min_tp = 0.5;
     const bool acceptable_for_tracking =
         quality.is_reliable || quality.transform_probability > tracking_min_tp;
 
@@ -338,11 +321,6 @@ bool Localizer::RegisterFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr &pc, pcl
               << ", reliable: " << (quality.is_reliable ? "yes" : "no");
 
     return quality.is_reliable;
-}
-
-void Localizer::UpdateMap(const Eigen::Vector2d &pose) 
-{ 
-    map_loader_.LoadMapOnPose(pose); 
 }
 
 }

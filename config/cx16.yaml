@@ -46,10 +46,6 @@ fasterlio:
   esti_plane_threshold: 0.15
   use_aa: false
 
-  extrinsic_T: [0.0, 0.0, 0.0]
-  extrinsic_R: [1.0, 0.0, 0.0,
-                0.0, 1.0, 0.0,
-                0.0, 0.0, 1.0]
   keep_first_imu_estimation: false
 
   enable_icp_part: false
