@@ -106,14 +106,6 @@ bool Service::Init(rclcpp::Node::SharedPtr node, std::shared_ptr<Lightning> ligh
             response->response = result.success ? 0u : 1u;
         });
 
-    get_grid_map_srv_ = node_->create_service<lightning_interfaces::srv::GetGridMap>(
-        "/lightning/get_grid_map",
-        [](const lightning_interfaces::srv::GetGridMap::Request::SharedPtr,
-           lightning_interfaces::srv::GetGridMap::Response::SharedPtr response) {
-            response->success = false;
-            response->message = "get_grid_map is reserved in the clean architecture; use saved map output for now";
-        });
-
     set_map_path_srv_ = node_->create_service<lightning_interfaces::srv::SetMapPath>(
         "/lightning/set_map_path",
         [this](const lightning_interfaces::srv::SetMapPath::Request::SharedPtr request,

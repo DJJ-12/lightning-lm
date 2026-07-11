@@ -5,13 +5,11 @@
 #include <fstream>
 #include <iomanip>
 #include <map>
-#include <opencv2/opencv.hpp>
 #include <pcl/common/point_tests.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
 #include <sstream>
-#include <yaml-cpp/yaml.h>
 
 #include <glog/logging.h>
 
@@ -61,9 +59,6 @@ bool SaveMap::Save(const std::string& save_path, const MappingSystemResult& resu
     }
     if (!SavePoseFile(save_path, result.keyframes)) {
         return false;
-    }
-    if (result.grid_map) {
-        SaveGridMap(save_path, result.grid_map);
     }
 
     LOG(INFO) << "map saved to: " << save_path;
@@ -169,55 +164,5 @@ bool SaveMap::SavePoseFile(const std::string& save_path,
     return true;
 }
 
-bool SaveMap::SaveGridMap(const std::string& save_path,
-                          const std::shared_ptr<nav_msgs::msg::OccupancyGrid>& grid_map) const {
-    if (!grid_map) {
-        return false;
-    }
-    const auto& map = *grid_map;
-    const int width = static_cast<int>(map.info.width);
-    const int height = static_cast<int>(map.info.height);
-    if (width <= 0 || height <= 0 || static_cast<int>(map.data.size()) < width * height) {
-        return false;
-    }
-
-    cv::Mat nav_image(height, width, CV_8UC1);
-    for (int y = 0; y < height; ++y) {
-        const int row_start_index = y * width;
-        for (int x = 0; x < width; ++x) {
-            const int index = row_start_index + x;
-            const int8_t data = map.data[index];
-            if (data == 0) {
-                nav_image.at<uchar>(height - 1 - y, x) = 255;
-            } else if (data == 100) {
-                nav_image.at<uchar>(height - 1 - y, x) = 0;
-            } else {
-                nav_image.at<uchar>(height - 1 - y, x) = 128;
-            }
-        }
-    }
-    cv::imwrite(save_path + "/map.pgm", nav_image);
-
-    std::ofstream yaml_file(save_path + "/map.yaml");
-    if (!yaml_file.is_open()) {
-        LOG(ERROR) << "failed to write map.yaml";
-        return false;
-    }
-    YAML::Emitter emitter;
-    emitter << YAML::BeginMap;
-    emitter << YAML::Key << "image" << YAML::Value << "map.pgm";
-    emitter << YAML::Key << "mode" << YAML::Value << "trinary";
-    emitter << YAML::Key << "width" << YAML::Value << map.info.width;
-    emitter << YAML::Key << "height" << YAML::Value << map.info.height;
-    emitter << YAML::Key << "resolution" << YAML::Value << map.info.resolution;
-    std::vector<double> orig{map.info.origin.position.x, map.info.origin.position.y, 0.0};
-    emitter << YAML::Key << "origin" << YAML::Value << orig;
-    emitter << YAML::Key << "negate" << YAML::Value << 0;
-    emitter << YAML::Key << "occupied_thresh" << YAML::Value << 0.65;
-    emitter << YAML::Key << "free_thresh" << YAML::Value << 0.25;
-    emitter << YAML::EndMap;
-    yaml_file << emitter.c_str();
-    return true;
-}
 
 }  // namespace lightning::modules

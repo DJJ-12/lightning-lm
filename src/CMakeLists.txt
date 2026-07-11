@@ -31,10 +31,6 @@ add_library(${PROJECT_NAME}.libs SHARED
         core/lio/lio_sam/map_optimization.cpp
         core/lio/pointcloud_preprocess.cc
 
-        core/g2p5/g2p5_map.cc
-        core/g2p5/g2p5.cc
-        core/g2p5/g2p5_subgrid.cc
-
         core/maps/tiled_map.cc
         core/maps/tiled_map_chunk.cc
 

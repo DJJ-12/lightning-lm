@@ -22,8 +22,6 @@ class SaveMap {
                       const SaveMapOptions& options) const;
     bool SavePoseFile(const std::string& save_path,
                       const std::vector<Keyframe::Ptr>& keyframes) const;
-    bool SaveGridMap(const std::string& save_path,
-                     const std::shared_ptr<nav_msgs::msg::OccupancyGrid>& grid_map) const;
 };
 
 }  // namespace lightning::modules

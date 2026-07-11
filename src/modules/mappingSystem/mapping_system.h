@@ -5,7 +5,6 @@
 #include <vector>
 
 #include <livox_ros_driver2/msg/custom_msg.hpp>
-#include <nav_msgs/msg/occupancy_grid.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
@@ -19,14 +18,12 @@ class LaserMapping;
 class LioSamMapping;
 class PointCloudPreprocess;
 namespace ui { class PangolinWindow; }
-namespace g2p5 { class G2P5; }
 namespace modules {
 
 struct MappingSystemOptions {
     bool online_input = false;
     bool with_ui = false;
     bool with_2dui = false;
-    bool with_gridmap = false;
     bool step_on_kf = false;
 };
 
@@ -34,7 +31,6 @@ struct MappingSystemResult {
     bool valid = false;
     std::vector<Keyframe::Ptr> keyframes;
     CloudPtr global_map;
-    std::shared_ptr<nav_msgs::msg::OccupancyGrid> grid_map;
 };
 
 class MappingSystem {
@@ -70,7 +66,6 @@ class MappingSystem {
     std::shared_ptr<LioSamMapping> lio_sam_;
     std::shared_ptr<LaserMapping> lio_;
     std::shared_ptr<ui::PangolinWindow> ui_;
-    std::shared_ptr<g2p5::G2P5> g2p5_;
     Keyframe::Ptr cur_kf_;
 };
 

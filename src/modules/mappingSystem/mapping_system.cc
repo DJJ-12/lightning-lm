@@ -4,7 +4,10 @@
 #include <pcl/common/transforms.h>
 #include <yaml-cpp/yaml.h>
 
-#include "core/g2p5/g2p5.h"
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <iomanip>
 #include "core/lio/laser_mapping.h"
 #include "core/lio/lio_sam/lio_sam_mapping.h"
 #include "core/lio/pointcloud_preprocess.h"
@@ -33,7 +36,6 @@ bool MappingSystem::Init(const std::string& yaml_path, const MappingSystemOption
     if (yaml["system"]) {
         if (yaml["system"]["with_ui"]) options_.with_ui = yaml["system"]["with_ui"].as<bool>();
         if (yaml["system"]["with_2dui"]) options_.with_2dui = yaml["system"]["with_2dui"].as<bool>();
-        if (yaml["system"]["with_g2p5"]) options_.with_gridmap = yaml["system"]["with_g2p5"].as<bool>();
         if (yaml["system"]["step_on_kf"]) options_.step_on_kf = yaml["system"]["step_on_kf"].as<bool>();
     }
     if (yaml["common"] && yaml["common"]["base_link_frame"]) {
@@ -99,12 +101,7 @@ bool MappingSystem::Init(const std::string& yaml_path, const MappingSystemOption
         }
     }
 
-    if (options_.with_gridmap) {
-        g2p5::G2P5::Options opt;
-        opt.online_mode_ = options_.online_input;
-        g2p5_ = std::make_shared<g2p5::G2P5>(opt);
-        g2p5_->Init(yaml_path);
-    }
+
 
     return true;
 }
@@ -139,11 +136,7 @@ void MappingSystem::Reset() {
         ui->Quit();
     }
 
-    if (g2p5_) {
-        g2p5_->Quit();
-    }
 
-    g2p5_.reset();
     lio_sam_.reset();
     lio_.reset();
     preprocess_.reset();
@@ -257,9 +250,6 @@ void MappingSystem::HandleProcessedKeyframe(const Keyframe::Ptr& kf) {
         return;
     }
     cur_kf_ = kf;
-    if (g2p5_) {
-        g2p5_->PushKeyframe(cur_kf_);
-    }
     if (ui_) {
         ui_->UpdateKF(cur_kf_);
     }
@@ -274,13 +264,6 @@ MappingSystemResult MappingSystem::GetResult() {
     } else if (lio_) {
         result.keyframes = lio_->GetAllKeyframes();
         result.global_map = lio_->GetGlobalMap(true);
-    }
-
-    if (g2p5_) {
-        auto newest_map = g2p5_->GetNewestMap();
-        if (newest_map) {
-            result.grid_map = std::make_shared<nav_msgs::msg::OccupancyGrid>(newest_map->ToROS());
-        }
     }
 
     result.valid = result.global_map && !result.global_map->empty() && !result.keyframes.empty();
