@@ -73,6 +73,7 @@ class Localization {
     void HandleCloudFrame(const LocCloudFrame& frame);
     void ProcessLocalizationCloud(const LocCloudFrame& frame);
     void PublishResult(const LocalizationResult& result);
+    void LoadTargetMapForUI(const std::string& global_map_path);
     static SE3 Matrix4dToSE3(const Eigen::Matrix4d& pose);
 
     std::mutex global_mutex_;

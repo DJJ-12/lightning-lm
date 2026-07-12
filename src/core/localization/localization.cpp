@@ -4,12 +4,15 @@
 #include <pcl/common/transforms.h>
 #include <pcl/filters/filter.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/io/pcd_io.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <rclcpp/time.hpp>
 #include <yaml-cpp/yaml.h>
 
 #include <chrono>
+#include <filesystem>
 #include <iomanip>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -22,6 +25,20 @@ double SteadySeconds() {
     return std::chrono::duration<double>(
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
+}
+
+void AppendXYZCloud(const pcl::PointCloud<pcl::PointXYZ>& src, PointCloudType& dst) {
+    dst.reserve(dst.size() + src.size());
+    for (const auto& src_pt : src.points) {
+        PointType dst_pt;
+        dst_pt.x = src_pt.x;
+        dst_pt.y = src_pt.y;
+        dst_pt.z = src_pt.z;
+        dst_pt.intensity = 0.0f;
+        dst_pt.ring = 0;
+        dst_pt.time = 0.0;
+        dst.push_back(dst_pt);
+    }
 }
 
 }  // namespace
@@ -122,9 +139,59 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     if (options_.with_ui_) {
         ui_ = std::make_shared<ui::PangolinWindow>();
         ui_->Init();
+        LoadTargetMapForUI(global_map_path);
     }
 
     return true;
+}
+
+void Localization::LoadTargetMapForUI(const std::string& global_map_path) {
+    if (!ui_) {
+        return;
+    }
+
+    CloudPtr target_map(new PointCloudType());
+    namespace fs = std::filesystem;
+    std::string map_source = "BlockMap";
+    int block_file_count = 0;
+    const fs::path block_map_dir = fs::path(global_map_path) / "BlockMap" / "pointcloud_map";
+    if (fs::exists(block_map_dir) && fs::is_directory(block_map_dir)) {
+        for (const auto& entry : fs::directory_iterator(block_map_dir)) {
+            const std::string ext = entry.path().extension().string();
+            if (!entry.is_regular_file() || (ext != ".pcd" && ext != ".PCD")) {
+                continue;
+            }
+            pcl::PointCloud<pcl::PointXYZ> block_cloud;
+            if (pcl::io::loadPCDFile(entry.path().string(), block_cloud) != 0) {
+                LOG(WARNING) << "[LOCALIZATION_UI] failed to load BlockMap pcd: "
+                             << entry.path().string();
+                continue;
+            }
+            AppendXYZCloud(block_cloud, *target_map);
+            ++block_file_count;
+        }
+    }
+
+    if (target_map->empty()) {
+        map_source = "global.pcd";
+        const std::string global_pcd_path = global_map_path + "/global.pcd";
+        if (pcl::io::loadPCDFile(global_pcd_path, *target_map) != 0 || target_map->empty()) {
+            LOG(WARNING) << "[LOCALIZATION_UI] failed to load map for UI from BlockMap or global.pcd under: "
+                         << global_map_path;
+            return;
+        }
+    }
+
+    target_map->height = 1;
+    target_map->width = target_map->size();
+    target_map->is_dense = false;
+
+    std::map<int, CloudPtr> ui_map;
+    ui_map.emplace(0, target_map);
+    ui_->UpdatePointCloudGlobal(ui_map);
+    LOG(INFO) << "[LOCALIZATION_UI] target map loaded for UI from " << map_source
+              << ", block_files=" << block_file_count
+              << ", points=" << target_map->size();
 }
 
 pcl::PointCloud<pcl::PointXYZ>::Ptr Localization::ConvertToBaseCloud(
