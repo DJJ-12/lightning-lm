@@ -41,7 +41,8 @@ class Lightning {
     ServiceResult FinishMapping();
     ServiceResult SaveCurrentMap(const std::string& save_path);
 
-    ServiceResult SetMapPath(const std::string& map_path);
+    ServiceResult StartLocalization(const std::string& bag_path, const std::string& map_path);
+    ServiceResult FinishLocalization();
     ServiceResult GetMapPath(std::string* map_path) const;
     ServiceResult SetLocation(const SE3& init_pose, bool* initialized_now = nullptr);
     loc::LocalizationResult GetLocalizationQuality() const;
@@ -55,6 +56,7 @@ class Lightning {
     void StopTopicInputLocked();
     void HandleCloudTimeout(const std::string& message);
     ServiceResult StartBagMappingTask(const std::string& bag_path, const std::string& save_path);
+    ServiceResult StartBagLocalizationTask(const std::string& bag_path, const std::string& map_path);
     ServiceResult SaveMappingLocked(const std::string& save_path);
 
     rclcpp::Node::SharedPtr node_;

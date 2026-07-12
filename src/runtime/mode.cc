@@ -35,8 +35,11 @@ Mode ModeFromString(const std::string& mode) {
     if (v == "online_mapping") {
         return Mode::ONLINE_MAPPING;
     }
-    if (v == "localization") {
-        return Mode::LOCALIZATION;
+    if (v == "offline_localization") {
+        return Mode::OFFLINE_LOCALIZATION;
+    }
+    if (v == "online_localization") {
+        return Mode::ONLINE_LOCALIZATION;
     }
     return Mode::IDLE;
 }
@@ -49,8 +52,10 @@ std::string ModeToString(Mode mode) {
             return "offline_mapping";
         case Mode::ONLINE_MAPPING:
             return "online_mapping";
-        case Mode::LOCALIZATION:
-            return "localization";
+        case Mode::OFFLINE_LOCALIZATION:
+            return "offline_localization";
+        case Mode::ONLINE_LOCALIZATION:
+            return "online_localization";
         default:
             return "idle";
     }
@@ -60,10 +65,15 @@ bool IsMappingMode(Mode mode) {
     return mode == Mode::OFFLINE_MAPPING || mode == Mode::ONLINE_MAPPING;
 }
 
+bool IsLocalizationMode(Mode mode) {
+    return mode == Mode::OFFLINE_LOCALIZATION || mode == Mode::ONLINE_LOCALIZATION;
+}
+
 bool IsKnownModeName(const std::string& mode) {
     const std::string v = Normalize(mode);
     return v == "idle" || v == "offline_mapping" ||
-           v == "online_mapping" || v == "localization";
+           v == "online_mapping" || v == "offline_localization" ||
+           v == "online_localization";
 }
 
 }  // namespace lightning::runtime

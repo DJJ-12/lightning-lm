@@ -9,9 +9,11 @@ namespace lightning::runtime {
 namespace {
 SE3 PoseFromRequest(const lightning_interfaces::srv::SetLocation::Request& request) {
     constexpr double kDegToRad = 0.017453292519943295;
+    Eigen::AngleAxisd roll_angle(request.roll * kDegToRad, Eigen::Vector3d::UnitX());
+    Eigen::AngleAxisd pitch_angle(request.pitch * kDegToRad, Eigen::Vector3d::UnitY());
     Eigen::AngleAxisd yaw_angle(request.yaw * kDegToRad, Eigen::Vector3d::UnitZ());
-    Eigen::Quaterniond q(yaw_angle);
-    Eigen::Vector3d t(request.x, request.y, 0.0);
+    Eigen::Quaterniond q(yaw_angle * pitch_angle * roll_angle);
+    Eigen::Vector3d t(request.x, request.y, request.z);
     return SE3(q, t);
 }
 }  // namespace
@@ -87,11 +89,29 @@ bool Service::Init(rclcpp::Node::SharedPtr node, std::shared_ptr<Lightning> ligh
             response->message = result.message;
         });
 
+    start_localization_srv_ = node_->create_service<lightning_interfaces::srv::StartLocalization>(
+        "/lightning/start_localization",
+        [this](const lightning_interfaces::srv::StartLocalization::Request::SharedPtr request,
+               lightning_interfaces::srv::StartLocalization::Response::SharedPtr response) {
+            auto result = lightning_->StartLocalization(request->bag_path, request->map_path);
+            response->success = result.success;
+            response->message = result.message;
+        });
+
     finish_mapping_srv_ = node_->create_service<lightning_interfaces::srv::FinishMapping>(
         "/lightning/finish_mapping",
         [this](const lightning_interfaces::srv::FinishMapping::Request::SharedPtr,
                lightning_interfaces::srv::FinishMapping::Response::SharedPtr response) {
             auto result = lightning_->FinishMapping();
+            response->success = result.success;
+            response->message = result.message;
+        });
+
+    finish_localization_srv_ = node_->create_service<lightning_interfaces::srv::FinishLocalization>(
+        "/lightning/finish_localization",
+        [this](const lightning_interfaces::srv::FinishLocalization::Request::SharedPtr,
+               lightning_interfaces::srv::FinishLocalization::Response::SharedPtr response) {
+            auto result = lightning_->FinishLocalization();
             response->success = result.success;
             response->message = result.message;
         });
@@ -102,15 +122,6 @@ bool Service::Init(rclcpp::Node::SharedPtr node, std::shared_ptr<Lightning> ligh
                lightning_interfaces::srv::SaveMap::Response::SharedPtr response) {
             auto result = lightning_->SaveCurrentMap(request->map_path);
             response->response = result.success ? 0u : 1u;
-        });
-
-    set_map_path_srv_ = node_->create_service<lightning_interfaces::srv::SetMapPath>(
-        "/lightning/set_map_path",
-        [this](const lightning_interfaces::srv::SetMapPath::Request::SharedPtr request,
-               lightning_interfaces::srv::SetMapPath::Response::SharedPtr response) {
-            auto result = lightning_->SetMapPath(request->map_path);
-            response->success = result.success;
-            response->message = result.message;
         });
 
     get_map_path_srv_ = node_->create_service<lightning_interfaces::srv::GetMapPath>(

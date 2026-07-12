@@ -11,8 +11,8 @@ common:
   lidar_type: 4
   N_SCAN: 128
   Horizon_SCAN: 1800
-  lidarMinRange: 0.5
-  lidarMaxRange: 200.0
+  lidarMinRange: 1.0
+  lidarMaxRange: 1000.0
   point_filter_num: 1
   time_scale: 1000
 
@@ -23,10 +23,10 @@ common:
   imuGyrBiasN: 0.0001
 
   # Shared keyframe insertion thresholds. Angle unit: rad.
-  surroundingkeyframeAddingDistThreshold: 2.0
-  surroundingkeyframeAddingAngleThreshold: 0.4
-  surroundingKeyframeDensity: 4.0
-  surroundingKeyframeSearchRadius: 25.0
+  surroundingkeyframeAddingDistThreshold: 1.0
+  surroundingkeyframeAddingAngleThreshold: 0.2
+  surroundingKeyframeDensity: 2.0
+  surroundingKeyframeSearchRadius: 50.0
 
   extrinsicBaseLidarTrans: [4.230, -0.745, 0.0]
   extrinsicBaseLidarRot: [0.0, -1.0, 0.0,
@@ -58,13 +58,13 @@ system:
   pub_tf: false
 
 roi:
-  height_max: 10.0
-  height_min: 0.5
+  height_max: 100.0
+  height_min: -100.0
 
 lio_sam:
   debugTiming: false
 
-  # GPS settings
+  # GPS / IMU initialization
   useImuHeadingInitialization: false
   useImuAccelRollPitchInitialization: true
 
@@ -73,7 +73,7 @@ lio_sam:
 
   # IMU settings
   imuGravity: 9.80511
-  imuRPYWeight: 0.01
+  imuRPYWeight: 0.0
   extrinsicRot: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
   extrinsicRPY: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 
@@ -84,9 +84,9 @@ lio_sam:
   surfFeatureMinValidNum: 100
 
   # Voxel filters
-  odometrySurfLeafSize: 0.6
-  mappingCornerLeafSize: 0.4
-  mappingSurfLeafSize: 0.6
+  odometrySurfLeafSize: 0.4
+  mappingCornerLeafSize: 0.2
+  mappingSurfLeafSize: 0.4
 
   # Robot motion constraint
   z_tollerance: 1000.0
