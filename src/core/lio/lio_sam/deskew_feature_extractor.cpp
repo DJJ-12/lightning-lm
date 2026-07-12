@@ -59,6 +59,13 @@ DeskewFeatureExtractor::DeskewFeatureExtractor(const rclcpp::NodeOptions& option
         pcl::console::setVerbosityLevel(pcl::console::L_ERROR);
     }
 
+void DeskewFeatureExtractor::SetBaseLidarExtrinsic(
+    const Eigen::Affine3f& T_base_lidar,
+    const std::string& base_link_frame) {
+    TBaseLidar = T_base_lidar;
+    baseLinkFrame = base_link_frame;
+}
+
 bool DeskewFeatureExtractor::Run(const PointCloudType::Ptr& inputCloud,
              const std::vector<sensor_msgs::msg::Imu>& imuWindow,
              double lidarBeginTime,
@@ -276,6 +283,17 @@ PointType DeskewFeatureExtractor::deskewPoint(const PointType* point, double rel
         return deskewPoint(point, relTime, currentDeskewState);
     }
 
+PointType DeskewFeatureExtractor::lidarPointToBase(const PointType& point) const {
+        PointType pointBase = point;
+        pointBase.x = TBaseLidar(0, 0) * point.x + TBaseLidar(0, 1) * point.y +
+                      TBaseLidar(0, 2) * point.z + TBaseLidar(0, 3);
+        pointBase.y = TBaseLidar(1, 0) * point.x + TBaseLidar(1, 1) * point.y +
+                      TBaseLidar(1, 2) * point.z + TBaseLidar(1, 3);
+        pointBase.z = TBaseLidar(2, 0) * point.x + TBaseLidar(2, 1) * point.y +
+                      TBaseLidar(2, 2) * point.z + TBaseLidar(2, 3);
+        return pointBase;
+    }
+
 void DeskewFeatureExtractor::cacheRawKeyframeDeskewInfo(){
         savedDeskewState.imuAvailable = currentDeskewState.imuAvailable;
         savedDeskewState.timeScanCur = currentDeskewState.timeScanCur;
@@ -319,7 +337,8 @@ void DeskewFeatureExtractor::projectPointCloud(){
                 continue;
 
             rangeMat[cloudIndex] = range;
-            fullCloud->points[cloudIndex] = deskewPoint(&point, point.time);
+            const PointType pointBase = lidarPointToBase(point);
+            fullCloud->points[cloudIndex] = deskewPoint(&pointBase, point.time);
         }
     }
 
@@ -490,7 +509,7 @@ void DeskewFeatureExtractor::packCloudInfo_packFeatureCloud(bool keepDeskewedClo
                                         LioSamCloudInfo& cloudInfoOut){
         extractedCloud->header.stamp =
             static_cast<std::uint64_t>(std::llround(timeScanCur * 1e9));
-        extractedCloud->header.frame_id = currentFrameId;
+        extractedCloud->header.frame_id = baseLinkFrame;
         extractedCloud->height = 1;
         extractedCloud->width = extractedCloud->size();
         extractedCloud->is_dense = true;
@@ -506,7 +525,7 @@ void DeskewFeatureExtractor::packCloudInfo_packFeatureCloud(bool keepDeskewedClo
         surfaceCloud->is_dense = true;
 
         cloudInfoOut.timestamp = timeScanCur;
-        cloudInfoOut.frame_id = currentFrameId;
+        cloudInfoOut.frame_id = baseLinkFrame;
         cloudInfoOut.imu_available = currentDeskewState.imuAvailable;
         cloudInfoOut.imu_roll_init = imuRollInit;
         cloudInfoOut.imu_pitch_init = imuPitchInit;

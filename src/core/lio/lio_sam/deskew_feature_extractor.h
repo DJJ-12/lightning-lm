@@ -13,6 +13,8 @@ class DeskewFeatureExtractor : public ParamServer
 {
 public:
     explicit DeskewFeatureExtractor(const rclcpp::NodeOptions& options);
+    void SetBaseLidarExtrinsic(const Eigen::Affine3f& T_base_lidar,
+                               const std::string& base_link_frame);
     bool Run(const PointCloudType::Ptr& inputCloud,
              const std::vector<sensor_msgs::msg::Imu>& imuWindow,
              double lidarBeginTime,
@@ -61,6 +63,7 @@ private:
                           double relTime,
                           DeskewState& state);
     PointType deskewPoint(const PointType* point, double relTime);
+    PointType lidarPointToBase(const PointType& point) const;
     void cacheRawKeyframeDeskewInfo();
     void projectPointCloud();
     void cloudExtraction();
@@ -100,4 +103,6 @@ private:
     double timeScanEnd = 0.0;
     std::string currentFrameId;
     std::string savedFrameId;
+    std::string baseLinkFrame = "base_link";
+    Eigen::Affine3f TBaseLidar = Eigen::Affine3f::Identity();
 };

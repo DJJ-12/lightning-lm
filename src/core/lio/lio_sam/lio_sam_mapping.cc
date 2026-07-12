@@ -77,6 +77,8 @@ bool LioSamMapping::Init(const std::string& config_yaml) {
 
     frontend_cloud_info_ = std::make_unique<::LioSamCloudInfo>();
     deskew_feature_extractor_ = std::make_unique<::DeskewFeatureExtractor>(node_options_);
+    deskew_feature_extractor_->SetBaseLidarExtrinsic(
+        Eigen::Affine3f(T_base_lidar_matrix_f_), base_link_frame_);
     map_optimization_ = std::make_unique<::mapOptimization>(node_options_);
 
     LOG(INFO) << "[LIO_SAM_FRONTEND] frontend=deskew_feature_extractor";
@@ -93,6 +95,23 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
             LOG(ERROR) << "lio_sam config section is missing";
             return false;
         }
+
+        base_link_frame_ = common["base_link_frame"].as<std::string>();
+        const std::vector<double> base_lidar_t =
+            common["extrinsicBaseLidarTrans"].as<std::vector<double>>();
+        const std::vector<double> base_lidar_r =
+            common["extrinsicBaseLidarRot"].as<std::vector<double>>();
+        Mat3d R_base_lidar;
+        R_base_lidar << base_lidar_r[0], base_lidar_r[1], base_lidar_r[2],
+            base_lidar_r[3], base_lidar_r[4], base_lidar_r[5],
+            base_lidar_r[6], base_lidar_r[7], base_lidar_r[8];
+        Quatd q_base_lidar(R_base_lidar);
+        q_base_lidar.normalize();
+        T_base_lidar_ = SE3(
+            q_base_lidar,
+            Vec3d(base_lidar_t[0], base_lidar_t[1], base_lidar_t[2]));
+        T_base_lidar_matrix_f_ = T_base_lidar_.matrix().cast<float>();
+
         std::vector<rclcpp::Parameter> overrides;
 
         SetParamOverride(overrides, "useImuHeadingInitialization", params["useImuHeadingInitialization"].as<bool>());
@@ -382,7 +401,7 @@ bool LioSamMapping::Run() {
     scan_undistort_ = cloud_info.cloud_deskewed;
     if (scan_undistort_) {
         scan_undistort_->header.stamp = static_cast<std::uint64_t>(std::llround(state_.timestamp_ * 1e9));
-        scan_undistort_->header.frame_id = measures_.frame_id;
+        scan_undistort_->header.frame_id = base_link_frame_;
         scan_undistort_->height = 1;
         scan_undistort_->width = scan_undistort_->size();
         scan_undistort_->is_dense = true;
@@ -409,7 +428,7 @@ bool LioSamMapping::MakeLightningKeyframeIfNeeded() {
     PointCloudType::Ptr raw_cloud = map_optimization_->LatestRawCloudKeyFrame();
 
     CloudPtr cloud(new PointCloudType());
-    cloud->header.frame_id = measures_.frame_id;
+    cloud->header.frame_id = base_link_frame_;
     cloud->header.stamp = static_cast<std::uint64_t>(std::llround(state_.timestamp_ * 1e9));
     if (raw_cloud) {
         *cloud = *raw_cloud;

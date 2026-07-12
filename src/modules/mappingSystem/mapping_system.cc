@@ -165,6 +165,11 @@ bool MappingSystem::BuildInputCloud(const sensor_msgs::msg::PointCloud2::SharedP
     }
     CloudPtr pcl_input(new PointCloudType);
     preprocess_->Process(cloud, pcl_input);
+    if (use_lio_sam_) {
+        input = pcl_input;
+        return input && !input->empty();
+    }
+
     CloudPtr input_base(new PointCloudType);
     pcl::transformPointCloud(*pcl_input, *input_base, T_base_lidar_.matrix().cast<float>());
     input_base->header = pcl_input->header;
@@ -179,6 +184,11 @@ bool MappingSystem::BuildInputCloud(const livox_ros_driver2::msg::CustomMsg::Sha
     }
     CloudPtr pcl_input(new PointCloudType);
     preprocess_->Process(cloud, pcl_input);
+    if (use_lio_sam_) {
+        input = pcl_input;
+        return input && !input->empty();
+    }
+
     CloudPtr input_base(new PointCloudType);
     pcl::transformPointCloud(*pcl_input, *input_base, T_base_lidar_.matrix().cast<float>());
     input_base->header = pcl_input->header;

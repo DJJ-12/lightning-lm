@@ -117,6 +117,10 @@ class LioSamMapping {
     int kf_id_ = 0;
     size_t map_keyframe_count_ = 0;
 
+    std::string base_link_frame_ = "base_link";
+    SE3 T_base_lidar_ = SE3();
+    Mat4f T_base_lidar_matrix_f_ = Mat4f::Identity();
+
     std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
 };
 
