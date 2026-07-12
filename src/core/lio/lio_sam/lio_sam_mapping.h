@@ -57,7 +57,7 @@ class LioSamMapping {
 
     Keyframe::Ptr GetKeyframe() const { return last_kf_; }
     std::vector<Keyframe::Ptr> GetAllKeyframes() const { return all_keyframes_; }
-    //ºóÐø¶¨Î»Ä£¿é¿ÉÄÜÒªÓÃ
+    //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î»Ä£ï¿½ï¿½ï¿½ï¿½ï¿½Òªï¿½ï¿½
      NavState GetState() const { return state_; }
 
     CloudPtr GetScanUndist() const {
@@ -116,10 +116,6 @@ class LioSamMapping {
     Keyframe::Ptr last_kf_ = nullptr;
     int kf_id_ = 0;
     size_t map_keyframe_count_ = 0;
-
-    std::string base_link_frame_ = "base_link";
-    SE3 T_base_lidar_ = SE3();
-    Mat4f T_base_lidar_matrix_f_ = Mat4f::Identity();
 
     std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
 };
