@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <mutex>
 #include <functional>
 #include <memory>
@@ -54,6 +55,10 @@ class Localization {
     struct LocCloudFrame {
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = nullptr;
         double timestamp = 0.0;
+        double callback_start_steady_sec = 0.0;
+        double arrival_dt = 0.0;
+        double convert_ms = 0.0;
+        size_t raw_points = 0;
     };
 
     bool TryInitializeWithCurrentCloud();
@@ -86,6 +91,10 @@ class Localization {
     Mat4f T_base_lidar_matrix_f_ = Mat4f::Identity();
     pcl::PointCloud<pcl::PointXYZ>::Ptr latest_cloud_ = nullptr;
     double latest_cloud_timestamp_ = 0.0;
+    bool has_last_processed_cloud_timestamp_ = false;
+    double last_processed_cloud_timestamp_ = 0.0;
+    bool has_last_callback_start_steady_sec_ = false;
+    double last_callback_start_steady_sec_ = 0.0;
 
     std::mutex current_cloud_mutex_;
 

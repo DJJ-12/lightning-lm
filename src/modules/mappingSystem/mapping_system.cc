@@ -261,13 +261,16 @@ void MappingSystem::HandleProcessedKeyframe(const Keyframe::Ptr& kf) {
 
 MappingSystemResult MappingSystem::GetResult() {
     MappingSystemResult result;
+    result.T_base_lidar = T_base_lidar_;
     if (use_lio_sam_ && lio_sam_) {
         lio_sam_->SyncOptimizedKeyframePoses();
         result.keyframes = lio_sam_->GetAllKeyframes();
         result.global_map = lio_sam_->GetGlobalMap(true);
+        result.global_map_is_lidar_frame = true;
     } else if (lio_) {
         result.keyframes = lio_->GetAllKeyframes();
         result.global_map = lio_->GetGlobalMap(true);
+        result.global_map_is_lidar_frame = false;
     }
 
     result.valid = result.global_map && !result.global_map->empty() && !result.keyframes.empty();

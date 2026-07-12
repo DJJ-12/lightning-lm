@@ -29,6 +29,8 @@ struct MappingSystemResult {
     bool valid = false;
     std::vector<Keyframe::Ptr> keyframes;
     CloudPtr global_map;
+    SE3 T_base_lidar = SE3();
+    bool global_map_is_lidar_frame = false;
 };
 
 class MappingSystem {

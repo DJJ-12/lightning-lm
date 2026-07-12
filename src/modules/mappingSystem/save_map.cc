@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <pcl/common/transforms.h>
 #include <pcl/common/point_tests.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/io/pcd_io.h>
@@ -45,17 +46,44 @@ bool SaveMap::Save(const std::string& save_path, const MappingSystemResult& resu
         return false;
     }
 
-    pcl::io::savePCDFileBinaryCompressed(save_path + "/global.pcd", *result.global_map);
-
-    if (!SaveBlockMap(save_path, result.global_map, options)) {
+    CloudPtr global_map_to_save = BuildMapForSave(result);
+    if (!global_map_to_save || global_map_to_save->empty()) {
+        LOG(ERROR) << "SaveMap failed: converted global map is empty";
         return false;
     }
-    if (!SavePoseFile(save_path, result.keyframes)) {
+
+    pcl::io::savePCDFileBinaryCompressed(save_path + "/global.pcd", *global_map_to_save);
+
+    if (!SaveBlockMap(save_path, global_map_to_save, options)) {
+        return false;
+    }
+    if (!SavePoseFile(save_path, result.keyframes, result.global_map_is_lidar_frame)) {
         return false;
     }
 
     LOG(INFO) << "map saved to: " << save_path;
     return true;
+}
+
+CloudPtr SaveMap::BuildMapForSave(const MappingSystemResult& result) const {
+    if (!result.global_map || result.global_map->empty()) {
+        return nullptr;
+    }
+    if (!result.global_map_is_lidar_frame) {
+        return result.global_map;
+    }
+
+    CloudPtr global_map_base(new PointCloudType());
+    pcl::transformPointCloud(
+        *result.global_map,
+        *global_map_base,
+        result.T_base_lidar.matrix().cast<float>());
+    global_map_base->header = result.global_map->header;
+    global_map_base->height = 1;
+    global_map_base->width = global_map_base->size();
+    global_map_base->is_dense = result.global_map->is_dense;
+    LOG(INFO) << "LIO-SAM global map transformed from lidar0 to base0 before saving";
+    return global_map_base;
 }
 
 bool SaveMap::SaveBlockMap(const std::string& save_path, const CloudPtr& global_map,
@@ -135,11 +163,21 @@ bool SaveMap::SaveBlockMap(const std::string& save_path, const CloudPtr& global_
 }
 
 bool SaveMap::SavePoseFile(const std::string& save_path,
-                           const std::vector<Keyframe::Ptr>& keyframes) const {
+                           const std::vector<Keyframe::Ptr>& keyframes,
+                           bool poses_are_lidar_frame) const {
     std::ofstream pose_file(save_path + "/pose.txt");
     if (!pose_file.is_open()) {
         LOG(ERROR) << "failed to open pose.txt";
         return false;
+    }
+    if (poses_are_lidar_frame) {
+        pose_file << "# parent_frame: lidar0\n";
+        pose_file << "# child_frame: lidar\n";
+        pose_file << "# pose: T_L0_Lk\n";
+    } else {
+        pose_file << "# parent_frame: base0\n";
+        pose_file << "# child_frame: base_link\n";
+        pose_file << "# pose: T_B0_Bk\n";
     }
     pose_file << "# id timestamp tx ty tz qx qy qz qw\n";
     for (const auto& kf : keyframes) {

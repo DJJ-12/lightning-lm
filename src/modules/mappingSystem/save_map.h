@@ -18,10 +18,12 @@ class SaveMap {
               const SaveMapOptions& options = SaveMapOptions()) const;
 
    private:
+    CloudPtr BuildMapForSave(const MappingSystemResult& result) const;
     bool SaveBlockMap(const std::string& save_path, const CloudPtr& global_map,
                       const SaveMapOptions& options) const;
     bool SavePoseFile(const std::string& save_path,
-                      const std::vector<Keyframe::Ptr>& keyframes) const;
+                      const std::vector<Keyframe::Ptr>& keyframes,
+                      bool poses_are_lidar_frame) const;
 };
 
 }  // namespace lightning::modules

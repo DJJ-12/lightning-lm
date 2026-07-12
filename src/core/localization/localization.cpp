@@ -8,12 +8,23 @@
 #include <rclcpp/time.hpp>
 #include <yaml-cpp/yaml.h>
 
+#include <chrono>
+#include <iomanip>
 #include <string>
 #include <vector>
 
 #include "ui/pangolin_window.h"
 
 namespace lightning::loc {
+namespace {
+
+double SteadySeconds() {
+    return std::chrono::duration<double>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+}  // namespace
 
 Localization::Localization(Options options) : options_(options) {}
 
@@ -96,6 +107,10 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     pending_initial_pose_ = Eigen::Matrix4d::Identity();
     latest_pose_ = Eigen::Matrix4d::Identity();
     latest_cloud_timestamp_ = 0.0;
+    has_last_processed_cloud_timestamp_ = false;
+    last_processed_cloud_timestamp_ = 0.0;
+    has_last_callback_start_steady_sec_ = false;
+    last_callback_start_steady_sec_ = 0.0;
     {
         std::lock_guard<std::mutex> cloud_lock(current_cloud_mutex_);
         latest_cloud_.reset();
@@ -164,14 +179,23 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Localization::ConvertToBaseCloud(
 }
 
 void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+    const double callback_start_steady_sec = SteadySeconds();
     bool map_loaded = false;
     Mat4f T_base_lidar_matrix_f;
     std::string base_link_frame;
+    double arrival_dt = 0.0;
     {
         UL lock(global_mutex_);
         map_loaded = map_loaded_;
         T_base_lidar_matrix_f = T_base_lidar_matrix_f_;
         base_link_frame = base_link_frame_;
+        if (map_loaded) {
+            if (has_last_callback_start_steady_sec_) {
+                arrival_dt = callback_start_steady_sec - last_callback_start_steady_sec_;
+            }
+            last_callback_start_steady_sec_ = callback_start_steady_sec;
+            has_last_callback_start_steady_sec_ = true;
+        }
     }
 
     if (!map_loaded) {
@@ -179,21 +203,35 @@ void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPt
     }
 
     LocCloudFrame frame;
+    const double convert_start_steady_sec = SteadySeconds();
     frame.cloud = ConvertToBaseCloud(*msg, T_base_lidar_matrix_f, base_link_frame);
+    frame.convert_ms = (SteadySeconds() - convert_start_steady_sec) * 1000.0;
     frame.timestamp = rclcpp::Time(msg->header.stamp).seconds();
+    frame.callback_start_steady_sec = callback_start_steady_sec;
+    frame.arrival_dt = arrival_dt;
+    frame.raw_points = frame.cloud ? frame.cloud->size() : 0;
     HandleCloudFrame(frame);
 }
 
 void Localization::ProcessLivoxLidarMsg(
     const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
+    const double callback_start_steady_sec = SteadySeconds();
     bool map_loaded = false;
     Mat4f T_base_lidar_matrix_f;
     std::string base_link_frame;
+    double arrival_dt = 0.0;
     {
         UL lock(global_mutex_);
         map_loaded = map_loaded_;
         T_base_lidar_matrix_f = T_base_lidar_matrix_f_;
         base_link_frame = base_link_frame_;
+        if (map_loaded) {
+            if (has_last_callback_start_steady_sec_) {
+                arrival_dt = callback_start_steady_sec - last_callback_start_steady_sec_;
+            }
+            last_callback_start_steady_sec_ = callback_start_steady_sec;
+            has_last_callback_start_steady_sec_ = true;
+        }
     }
 
     if (!map_loaded) {
@@ -201,8 +239,13 @@ void Localization::ProcessLivoxLidarMsg(
     }
 
     LocCloudFrame frame;
+    const double convert_start_steady_sec = SteadySeconds();
     frame.cloud = ConvertToBaseCloud(*msg, T_base_lidar_matrix_f, base_link_frame);
+    frame.convert_ms = (SteadySeconds() - convert_start_steady_sec) * 1000.0;
     frame.timestamp = rclcpp::Time(msg->header.stamp).seconds();
+    frame.callback_start_steady_sec = callback_start_steady_sec;
+    frame.arrival_dt = arrival_dt;
+    frame.raw_points = frame.cloud ? frame.cloud->size() : 0;
     HandleCloudFrame(frame);
 }
 
@@ -248,10 +291,12 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
 
     auto current_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
 
+    const double voxel_start_steady_sec = SteadySeconds();
     pcl::VoxelGrid<pcl::PointXYZ> voxel_grid;
     voxel_grid.setLeafSize(2.0f, 2.0f, 2.0f);
     voxel_grid.setInputCloud(frame.cloud);
     voxel_grid.filter(*current_cloud);
+    const double voxel_ms = (SteadySeconds() - voxel_start_steady_sec) * 1000.0;
 
     if (!current_cloud || current_cloud->empty()) {
         return;
@@ -270,7 +315,9 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
     auto cloud_reg = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
     robot_localizer::LocalizationQuality quality;
 
+    const double ndt_start_steady_sec = SteadySeconds();
     const bool reliable = localizer_.RegisterFrame(current_cloud, cloud_reg, pose, quality);
+    const double ndt_ms = (SteadySeconds() - ndt_start_steady_sec) * 1000.0;
 
     LocalizationResult res;
     res.timestamp_ = frame.timestamp;
@@ -285,10 +332,31 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
     res.iterations_ = quality.iteration_num;
     res.message_ = reliable ? "localization reliable" : "localization not reliable";
 
+    double header_dt = 0.0;
     {
         UL lock(global_mutex_);
         latest_pose_ = pose;
+        if (has_last_processed_cloud_timestamp_) {
+            header_dt = frame.timestamp - last_processed_cloud_timestamp_;
+        }
+        last_processed_cloud_timestamp_ = frame.timestamp;
+        has_last_processed_cloud_timestamp_ = true;
     }
+
+    const double total_ms = (SteadySeconds() - frame.callback_start_steady_sec) * 1000.0;
+    LOG(INFO) << std::setprecision(14)
+              << "[LOC_DIAG] header_stamp=" << frame.timestamp
+              << ", header_dt=" << header_dt
+              << ", arrival_dt=" << frame.arrival_dt
+              << ", raw_points=" << frame.raw_points
+              << ", voxel_points=" << current_cloud->size()
+              << ", convert_ms=" << frame.convert_ms
+              << ", voxel_ms=" << voxel_ms
+              << ", ndt_ms=" << ndt_ms
+              << ", total_ms=" << total_ms
+              << ", TP=" << quality.transform_probability
+              << ", NVTL=" << quality.nearest_voxel_likelihood
+              << ", iterations=" << quality.iteration_num;
 
     PublishResult(res);
 }
@@ -369,6 +437,10 @@ void Localization::Finish() {
         has_pending_initial_pose_ = false;
         init_in_progress_ = false;
         latest_cloud_timestamp_ = 0.0;
+        has_last_processed_cloud_timestamp_ = false;
+        last_processed_cloud_timestamp_ = 0.0;
+        has_last_callback_start_steady_sec_ = false;
+        last_callback_start_steady_sec_ = 0.0;
     }
     {
         std::lock_guard<std::mutex> cloud_lock(current_cloud_mutex_);
@@ -390,6 +462,8 @@ bool Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
             localization_inited_ = false;
             init_in_progress_ = false;
             latest_pose_ = Eigen::Matrix4d::Identity();
+            has_last_processed_cloud_timestamp_ = false;
+            last_processed_cloud_timestamp_ = 0.0;
         }
         localizer_.ResetLocalizationState();
     }
