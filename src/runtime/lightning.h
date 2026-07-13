@@ -37,11 +37,11 @@ class Lightning {
 
     TaskSnapshot GetOfflineMappingProgress() const;
 
-    ServiceResult StartMapping(const std::string& bag_path, const std::string& save_path);
-    ServiceResult FinishMapping();
-    ServiceResult SaveCurrentMap(const std::string& save_path);
+    ServiceResult StartMapping(const std::string& save_path);
+    ServiceResult LoadBag(const std::string& bag_path);
+    ServiceResult FinishMapping(bool save_map);
 
-    ServiceResult StartLocalization(const std::string& bag_path, const std::string& map_path);
+    ServiceResult SetMapPath(const std::string& map_path);
     ServiceResult FinishLocalization();
     ServiceResult GetMapPath(std::string* map_path) const;
     ServiceResult SetLocation(const SE3& init_pose, bool* initialized_now = nullptr);
@@ -54,9 +54,11 @@ class Lightning {
     void ClearMappingLocked();
     void ClearLocalizationLocked();
     void StopTopicInputLocked();
+    void JoinOfflineThread();
     void HandleCloudTimeout(const std::string& message);
-    ServiceResult StartBagMappingTask(const std::string& bag_path, const std::string& save_path);
-    ServiceResult StartBagLocalizationTask(const std::string& bag_path, const std::string& map_path);
+    void StartBagMappingTask(const std::string& bag_path);
+    void StartBagLocalizationTask(const std::string& bag_path);
+    bool StartLocalizationTopicInputLocked();
     ServiceResult SaveMappingLocked(const std::string& save_path);
 
     rclcpp::Node::SharedPtr node_;
@@ -74,6 +76,7 @@ class Lightning {
     modules::SaveMapOptions save_map_options_;
     std::string mapping_save_path_;
     std::string localization_map_path_;
+    std::string offline_bag_path_;
 
     std::thread offline_thread_;
 };

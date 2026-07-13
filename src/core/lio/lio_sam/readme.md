@@ -188,7 +188,8 @@ lio_sam:
 ```bash
 ros2 run lightning run_lightning --config /path/to/my_mapping.yaml
 ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'offline_mapping'}"
-ros2 service call /lightning/start_mapping lightning_interfaces/srv/StartMapping "{bag_path: '/path/to/data.db3', save_path: '/path/to/map'}"
+ros2 service call /lightning/mapping/start_mapping lightning_interfaces/srv/StartMapping "{save_path: '/path/to/map'}"
+ros2 service call /lightning/mapping/load_bag lightning_interfaces/srv/LoadBag "{bag_path: '/path/to/data.db3'}"
 ```
 
 建图完成后，地图会由 lightning-lm 的 `SaveMap()` 逻辑保存。LIO-SAM 分支下保存地图时，会从 `lio_sam_->GetAllKeyframes()` 和 `lio_sam_->GetGlobalMap()` 获取 keyframe 和全局地图，而不是从原 `LaserMapping` 获取。
