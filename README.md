@@ -112,10 +112,13 @@ ros2 service call /lightning/start_localization lightning_interfaces/srv/StartLo
 
 ```bash
 ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'online_localization'}"
-ros2 service call /lightning/start_localization lightning_interfaces/srv/StartLocalization "{bag_path: '', map_path: '/home/mt/maps/cx16_map'}"
-ros2 service call /lightning/set_location lightning_interfaces/srv/SetLocation "{x: 0.0, y: 0.0, z: -0.2, roll: 0.0, pitch: 0.0, yaw: 0.0}"
+
+ros2 service call /lightning/start_localization lightning_interfaces/srv/StartLocalization "{bag_path: '', map_path: '/data/new_map'}"
+
+ros2 service call /lightning/set_location lightning_interfaces/srv/SetLocation "{x: -48.0, y: -17.4, z: -0.2, roll: 0.0, pitch: 0.0, yaw: 0.0}"
 
 ros2 service call /lightning/get_localization_quality lightning_interfaces/srv/GetLocalizationQuality "{}"
+
 ros2 service call /lightning/finish_localization lightning_interfaces/srv/FinishLocalization "{}"
 
 ```
