@@ -45,6 +45,7 @@ class Localization {
 
     using TFCallback = std::function<void(const geometry_msgs::msg::TransformStamped& odom)>;
     using ResultCallback = std::function<void(const LocalizationResult& result)>;
+    using XYZCloud = pcl::PointCloud<pcl::PointXYZ>;
 
     void SetTFCallback(TFCallback&& callback);
     void SetResultCallback(ResultCallback&& callback);

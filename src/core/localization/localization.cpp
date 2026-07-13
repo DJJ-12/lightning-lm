@@ -356,7 +356,7 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
         return;
     }
 
-    auto current_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    XYZCloud::Ptr current_cloud(new XYZCloud);
 
     const double voxel_start_steady_sec = SteadySeconds();
     pcl::VoxelGrid<pcl::PointXYZ> voxel_grid;
@@ -379,7 +379,7 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
     }
 
     Eigen::Matrix4d pose = Eigen::Matrix4d::Identity();
-    auto cloud_reg = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    XYZCloud::Ptr cloud_reg(new XYZCloud);
     robot_localizer::LocalizationQuality quality;
 
     const double ndt_start_steady_sec = SteadySeconds();
