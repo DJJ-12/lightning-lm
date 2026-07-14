@@ -134,18 +134,18 @@ ServiceResult Lightning::StartMapping(const std::string& save_path) {
     mapping_save_path_ = save_path;
     offline_bag_path_.clear();
 
+    if (mode_ == Mode::OFFLINE_MAPPING) {
+        task_.Reset(TaskState::READY, "offline mapping ready, waiting for load_bag");
+        return {true, "offline mapping ready, save_path: " + save_path};
+    }
+
     mapping_system_ = std::make_unique<modules::MappingSystem>();
     modules::MappingSystemOptions mapping_options;
-    mapping_options.online_input = mode_ == Mode::ONLINE_MAPPING;
+    mapping_options.online_input = true;
     if (!mapping_system_->Init(yaml_path_, mapping_options) || !mapping_system_->Start()) {
         ClearMappingLocked();
         task_.SetFinished(false, "failed to initialize MappingSystem");
         return {false, "failed to initialize MappingSystem"};
-    }
-
-    if (mode_ == Mode::OFFLINE_MAPPING) {
-        task_.Reset(TaskState::READY, "offline mapping ready, waiting for load_bag");
-        return {true, "offline mapping ready, save_path: " + save_path};
     }
 
     topic_input_ = std::make_unique<TopicInput>();
@@ -198,7 +198,7 @@ ServiceResult Lightning::LoadBag(const std::string& bag_path) {
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!mapping_system_) {
+        if (mapping_save_path_.empty()) {
             return {false, "start_mapping has not been called"};
         }
         offline_bag_path_ = bag_path;
@@ -211,6 +211,18 @@ ServiceResult Lightning::LoadBag(const std::string& bag_path) {
 void Lightning::StartBagMappingTask(const std::string& bag_path) {
     std::lock_guard<std::mutex> start_lock(mutex_);
     offline_thread_ = std::thread([this, bag_path]() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            mapping_system_ = std::make_unique<modules::MappingSystem>();
+            modules::MappingSystemOptions mapping_options;
+            mapping_options.online_input = false;
+            if (!mapping_system_->Init(yaml_path_, mapping_options) || !mapping_system_->Start()) {
+                ClearMappingLocked();
+                task_.SetFinished(false, "failed to initialize MappingSystem");
+                return;
+            }
+        }
+
         BagInput bag_input;
         const bool bag_ok = bag_input.Run(
             bag_path, yaml_path_,
