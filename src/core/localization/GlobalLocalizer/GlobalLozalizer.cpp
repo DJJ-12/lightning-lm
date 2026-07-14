@@ -10,21 +10,21 @@ namespace robot_localizer
 {
 Eigen::Vector3d getRPYFromEigenMatrix(const Eigen::Matrix3d& R) {
     Eigen::Vector3d rpy;
-    double& roll = rpy.x();   // roll��Ӧx����
-    double& pitch = rpy.y();  // pitch��Ӧy����
-    double& yaw = rpy.z();    // yaw��Ӧz����
+    double& roll = rpy.x();   // roll对应x分量
+    double& pitch = rpy.y();  // pitch对应y分量
+    double& yaw = rpy.z();    // yaw对应z分量
 
-    // ����Pitch�ǣ���Y�ᣩ
+    // 计算Pitch角（绕Y轴）
     pitch = std::asin(-R(2, 0));
 
-    // ������������cos(pitch)�ӽ�0ʱ��
+    // 处理万向锁（cos(pitch)接近0时）
     const double cos_pitch = std::cos(pitch);
     if (std::fabs(cos_pitch) > 1e-6) {
-        // ��������������roll��yaw
+        // 非万向锁：计算roll和yaw
         roll = std::atan2(R(2, 1), R(2, 2));
         yaw = std::atan2(R(1, 0), R(0, 0));
     } else {
-        // �����������pitch�֡�90�㣩���̶�yaw=0������roll
+        // 万向锁情况（pitch≈±90°）：固定yaw=0，计算roll
         yaw = 0.0;
         roll = std::atan2(-R(0, 1), R(1, 1));
     }
@@ -34,14 +34,15 @@ Eigen::Vector3d getRPYFromEigenMatrix(const Eigen::Matrix3d& R) {
 
 pclomp::NdtResult Localizer::AlignPose(const Eigen::Matrix4d &initial_pose_with_cov)
 {
-    // ��ȡ��ʼλ�˵�RPY�Ƕȡ�
-    // 2.5D �ض�λԼ�����������׶�ֻ���� x / y / yaw �����ӣ�
-    // z / roll / pitch ����̶�Ϊ�����ֵ�������������˲�����ʮ�׸߶Ȼ����̬�ǵ���Ч��ѡ��
+    // 获取初始位姿的RPY角度。
+    // 2.5D 重定位约束：粗搜索阶段只允许 x / y / yaw 撒种子；
+    // z / roll / pitch 必须固定为输入初值，避免地面机器人产生几十米高度或大姿态角的无效候选。
     const auto base_rpy = getRPYFromEigenMatrix(initial_pose_with_cov.block<3, 3>(0, 0));
     const double stddev_z = 10.0;
     const double stddev_roll = 0.01;
     const double stddev_pitch = 0.01;
 
+    // 定义采样均值和标准差：只对 x / y / yaw 采样；z / roll / pitch 固定。
     const std::vector<double> sample_mean{
         initial_pose_with_cov(0,3),
         initial_pose_with_cov(1,3),
@@ -54,17 +55,19 @@ pclomp::NdtResult Localizer::AlignPose(const Eigen::Matrix4d &initial_pose_with_
         3.0, 3.0, stddev_z, stddev_roll, stddev_pitch, 0.17453
     };
 
+    // 2.5D 粗搜索：优化 x / y / yaw；z / roll / pitch 由下面的固定约束强制锁定。
     TreeStructuredParzenEstimator tpe(
         TreeStructuredParzenEstimator::Direction::MAXIMIZE,
         100,
         sample_mean,
         sample_stddev);
-
-    auto output_cloud = std::make_shared<pcl::PointCloud<PointSource>>();
+        
+    auto output_cloud = std::make_shared<pcl::PointCloud<PointSource> >();
     std::vector<pclomp::NdtResult> result_array;
 
     for (int64_t i = 0; i < 200; i++)
     {
+        // 第 0 个候选直接使用用户输入初值；后续候选再围绕 x / y / yaw 做 2.5D 搜索。
         const TreeStructuredParzenEstimator::Input input = tpe.get_next_input();
 
         Eigen::Matrix3d rot = Eigen::AngleAxisd(input[5], Eigen::Vector3d::UnitZ())
@@ -82,12 +85,13 @@ pclomp::NdtResult Localizer::AlignPose(const Eigen::Matrix4d &initial_pose_with_
                   << ", pitch: " << input[4]
                   << ", yaw: " << input[5] << std::endl;
 
+        // 执行NDT配准
         const Eigen::Matrix4f initial_pose_matrix = init_pose_matrix.cast<float>();
         ndt_rough_ptr_->align(*output_cloud, initial_pose_matrix);
         const pclomp::NdtResult ndt_result = ndt_rough_ptr_->getResult();
 
         const auto align_pose_rpy = getRPYFromEigenMatrix(
-            ndt_result.pose.block<3, 3>(0, 0).cast<double>());
+        	ndt_result.pose.block<3, 3>(0, 0).cast<double>());
         std::cout << "aligned pose: "
                   << "x: " << ndt_result.pose(0,3)
                   << ", y: " << ndt_result.pose(1,3)
@@ -95,7 +99,8 @@ pclomp::NdtResult Localizer::AlignPose(const Eigen::Matrix4d &initial_pose_with_
                   << ", roll: " << align_pose_rpy.x()
                   << ", pitch: " << align_pose_rpy.y()
                   << ", yaw: " << align_pose_rpy.z() << std::endl;
-
+                  
+        // 构建TPE结果
         TreeStructuredParzenEstimator::Input result(6);
         result[0] = ndt_result.pose(0,3);
         result[1] = ndt_result.pose(1,3);
@@ -104,12 +109,14 @@ pclomp::NdtResult Localizer::AlignPose(const Eigen::Matrix4d &initial_pose_with_
         result[4] = align_pose_rpy.y();
         result[5] = align_pose_rpy.z();
 
+        // 添加试验结果到TPE
         tpe.add_trial(TreeStructuredParzenEstimator::Trial{
             result,
             ndt_result.transform_probability});
         result_array.push_back(ndt_result);
     }
 
+    // 找到最佳粒子
     auto best_particle_ptr = std::max_element(
         std::begin(result_array),
         std::end(result_array),
@@ -260,7 +267,7 @@ bool Localizer::GetInitPose(
             << ", roll: " << precise_rpy_deg.x() << " deg"
             << ", pitch: " << precise_rpy_deg.y() << " deg"
             << ", yaw: " << precise_rpy_deg.z() << " deg"
-            << ", score: " << ndt_res.transform_probability
+              << ", score: " << ndt_res.transform_probability
             << ", NVTL: "
             << ndt_res.nearest_voxel_transformation_likelihood;
 
@@ -288,22 +295,22 @@ bool Localizer::RegisterFrame(
     pclomp::NdtResult ndt_res = ndt_ptr_->getResult();
     align_pose = ndt_res.pose.cast<double>();
 
-    // ��䶨λ������Ϣ
+    // 填充定位质量信息
     quality.transform_probability = ndt_res.transform_probability;
     quality.nearest_voxel_likelihood = ndt_res.nearest_voxel_transformation_likelihood;
     quality.iteration_num = ndt_res.iteration_num;
     
-    // ������λ������ʹ�����õ���ֵ��
+    // 评估定位质量（使用配置的阈值）
     quality.evaluate(quality_thresholds_);
 
-    last_last_pose_ = last_pose_;
-    last_pose_ = align_pose;
+        last_last_pose_ = last_pose_;
+        last_pose_ = align_pose;
 
     LOG_EVERY_N(INFO, 20) << "Localization quality: " << quality.quality_level
-                          << ", TP: " << quality.transform_probability
-                          << ", NVTL: " << quality.nearest_voxel_likelihood
-                          << ", iterations: " << quality.iteration_num
-                          << ", reliable: " << (quality.is_reliable ? "yes" : "no");
+              << ", TP: " << quality.transform_probability
+              << ", NVTL: " << quality.nearest_voxel_likelihood
+              << ", iterations: " << quality.iteration_num
+              << ", reliable: " << (quality.is_reliable ? "yes" : "no");
 
     return quality.is_reliable;
 }
