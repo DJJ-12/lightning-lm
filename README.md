@@ -101,5 +101,15 @@ ros2 service call /lightning/localization/set_location lightning_interfaces/srv/
 ```bash
 ros2 service call /lightning/cancel_task lightning_interfaces/srv/CancelTask "{}"
 ```
-
+Localizer::RegisterFrame()
+    ↓
+ndt_ptr_->align(output, initial_guess)
+    ↓
+pcl::Registration::align()
+    ↓
+MultiGridNormalDistributionsTransform::computeTransformation()
+    ↓
+computeDerivatives()
+    ↓
+updateDerivatives()
 

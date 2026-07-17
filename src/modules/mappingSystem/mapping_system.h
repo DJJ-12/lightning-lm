@@ -49,6 +49,8 @@ class MappingSystem {
     void ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud);
 
     MappingSystemResult GetResult();
+    CloudPtr BuildCurrentMapInBaseFrame();
+    bool ConsumeMapUpdate();
 
    private:
     bool BuildInputCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud, CloudPtr& input);
@@ -67,6 +69,7 @@ class MappingSystem {
     std::shared_ptr<LaserMapping> lio_;
     std::shared_ptr<ui::PangolinWindow> ui_;
     Keyframe::Ptr cur_kf_;
+    bool map_update_pending_ = false;
 };
 
 }  // namespace modules

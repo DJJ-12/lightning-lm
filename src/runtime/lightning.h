@@ -6,6 +6,7 @@
 #include <thread>
 
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include "common/eigen_types.h"
 #include "core/localization/localization_result.h"
@@ -60,8 +61,10 @@ class Lightning {
     void StartBagLocalizationTask(const std::string& bag_path);
     bool StartLocalizationTopicInputLocked();
     ServiceResult SaveMappingLocked(const std::string& save_path);
+    void PublishMappingMapLocked(bool force);
 
     rclcpp::Node::SharedPtr node_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr mapping_map_pub_;
     std::string yaml_path_;
     double localization_cloud_timeout_sec_ = 5.0;
 

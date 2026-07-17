@@ -102,6 +102,7 @@ bool MappingSystem::Init(const std::string& yaml_path, const MappingSystemOption
 
 bool MappingSystem::Start() {
     cur_kf_.reset();
+    map_update_pending_ = false;
     running_ = true;
     return true;
 }
@@ -113,6 +114,7 @@ void MappingSystem::Stop() {
 void MappingSystem::Reset() {
     running_ = false;
     cur_kf_.reset();
+    map_update_pending_ = false;
 
     // 先让算法对象断开 UI，避免 LIO-SAM / LaserMapping 析构时再次持有 UI
     if (use_lio_sam_ && lio_sam_) {
@@ -254,9 +256,60 @@ void MappingSystem::HandleProcessedKeyframe(const Keyframe::Ptr& kf) {
         return;
     }
     cur_kf_ = kf;
+    map_update_pending_ = true;
     if (ui_) {
         ui_->UpdateKF(cur_kf_);
     }
+}
+
+CloudPtr MappingSystem::BuildCurrentMapInBaseFrame() {
+    std::vector<Keyframe::Ptr> keyframes;
+    if (use_lio_sam_ && lio_sam_) {
+        lio_sam_->SyncOptimizedKeyframePoses();
+        keyframes = lio_sam_->GetAllKeyframes();
+    } else if (lio_) {
+        keyframes = lio_->GetAllKeyframes();
+    }
+    if (keyframes.empty()) {
+        return nullptr;
+    }
+
+    CloudPtr map_base(new PointCloudType());
+    const Eigen::Matrix4f T_base_lidar = T_base_lidar_.matrix().cast<float>();
+
+    for (const auto& kf : keyframes) {
+        if (!kf) {
+            continue;
+        }
+        CloudPtr cloud = kf->GetCloud();
+        if (!cloud || cloud->empty()) {
+            continue;
+        }
+
+        Eigen::Matrix4f pose = kf->GetOptPose().matrix().cast<float>();
+        if (use_lio_sam_) {
+            pose = T_base_lidar * pose;
+        }
+
+        CloudPtr cloud_base(new PointCloudType());
+        pcl::transformPointCloud(*cloud, *cloud_base, pose);
+        *map_base += *cloud_base;
+    }
+
+    if (map_base->empty()) {
+        return nullptr;
+    }
+    map_base->header.frame_id = "map";
+    map_base->height = 1;
+    map_base->width = map_base->size();
+    map_base->is_dense = false;
+    return map_base;
+}
+
+bool MappingSystem::ConsumeMapUpdate() {
+    const bool pending = map_update_pending_;
+    map_update_pending_ = false;
+    return pending;
 }
 
 MappingSystemResult MappingSystem::GetResult() {

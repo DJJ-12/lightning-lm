@@ -3,6 +3,7 @@
 #include <utility>
 
 #include <glog/logging.h>
+#include <pcl_conversions/pcl_conversions.h>
 #include <yaml-cpp/yaml.h>
 
 namespace lightning::runtime {
@@ -19,6 +20,10 @@ bool Lightning::Init(rclcpp::Node::SharedPtr node, const std::string& yaml_path)
     if (!node_ || yaml_path_.empty()) {
         return false;
     }
+    mapping_map_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+        "/lightning/mapping/map",
+        rclcpp::QoS(1).reliable().transient_local());
+
     YAML::Node yaml = YAML::LoadFile(yaml_path_);
     if (yaml["localization"] && yaml["localization"]["cloud_timeout_sec"]) {
         localization_cloud_timeout_sec_ = yaml["localization"]["cloud_timeout_sec"].as<double>();
@@ -157,11 +162,21 @@ ServiceResult Lightning::StartMapping(const std::string& save_path) {
         },
         [this](const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (mapping_system_) mapping_system_->ProcessCloud(cloud);
+            if (mapping_system_) {
+                mapping_system_->ProcessCloud(cloud);
+                if (mapping_system_->ConsumeMapUpdate()) {
+                    PublishMappingMapLocked(false);
+                }
+            }
         },
         [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (mapping_system_) mapping_system_->ProcessCloud(cloud);
+            if (mapping_system_) {
+                mapping_system_->ProcessCloud(cloud);
+                if (mapping_system_->ConsumeMapUpdate()) {
+                    PublishMappingMapLocked(false);
+                }
+            }
         },
         true);
     if (!input_ok) {
@@ -236,12 +251,18 @@ void Lightning::StartBagMappingTask(const std::string& bag_path) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (mapping_system_) {
                     mapping_system_->ProcessCloud(cloud);
+                    if (mapping_system_->ConsumeMapUpdate()) {
+                        PublishMappingMapLocked(false);
+                    }
                 }
             },
             [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (mapping_system_) {
                     mapping_system_->ProcessCloud(cloud);
+                    if (mapping_system_->ConsumeMapUpdate()) {
+                        PublishMappingMapLocked(false);
+                    }
                 }
             },
             [this](const BagInputProgress& progress) {
@@ -271,6 +292,26 @@ void Lightning::StartBagMappingTask(const std::string& bag_path) {
     });
 }
 
+void Lightning::PublishMappingMapLocked(bool force) {
+    if (!mapping_map_pub_ || !mapping_system_) {
+        return;
+    }
+    if (!force && mapping_map_pub_->get_subscription_count() == 0) {
+        return;
+    }
+
+    CloudPtr map_base = mapping_system_->BuildCurrentMapInBaseFrame();
+    if (!map_base || map_base->empty()) {
+        return;
+    }
+
+    sensor_msgs::msg::PointCloud2 msg;
+    pcl::toROSMsg(*map_base, msg);
+    msg.header.stamp = node_ ? node_->now() : rclcpp::Clock().now();
+    msg.header.frame_id = "map";
+    mapping_map_pub_->publish(msg);
+}
+
 ServiceResult Lightning::SaveMappingLocked(const std::string& save_path) {
     if (!mapping_system_) {
         return {false, "MappingSystem is not running"};
@@ -278,6 +319,9 @@ ServiceResult Lightning::SaveMappingLocked(const std::string& save_path) {
     task_.SetState(TaskState::SAVING, "saving map");
     const auto result = mapping_system_->GetResult();
     const bool ok = save_map_.Save(save_path, result, save_map_options_);
+    if (ok) {
+        PublishMappingMapLocked(true);
+    }
     return {ok, ok ? "map saved" : "failed to save map"};
 }
 
@@ -312,6 +356,8 @@ ServiceResult Lightning::FinishMapping(bool save_map) {
     ServiceResult result{true, "mapping finished without saving"};
     if (save_map) {
         result = SaveMappingLocked(mapping_save_path_);
+    } else {
+        PublishMappingMapLocked(true);
     }
     ClearMappingLocked();
     task_.SetFinished(result.success, result.message);
