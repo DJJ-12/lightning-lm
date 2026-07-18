@@ -1,5 +1,6 @@
 #include "modules/mappingSystem/mapping_system.h"
 
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <glog/logging.h>
 #include <pcl/common/transforms.h>
 #include <yaml-cpp/yaml.h>
@@ -102,7 +103,7 @@ bool MappingSystem::Init(const std::string& yaml_path, const MappingSystemOption
 
 bool MappingSystem::Start() {
     cur_kf_.reset();
-    map_update_pending_ = false;
+    mapping_update_pending_ = false;
     running_ = true;
     return true;
 }
@@ -114,7 +115,7 @@ void MappingSystem::Stop() {
 void MappingSystem::Reset() {
     running_ = false;
     cur_kf_.reset();
-    map_update_pending_ = false;
+    mapping_update_pending_ = false;
 
     // 先让算法对象断开 UI，避免 LIO-SAM / LaserMapping 析构时再次持有 UI
     if (use_lio_sam_ && lio_sam_) {
@@ -256,7 +257,7 @@ void MappingSystem::HandleProcessedKeyframe(const Keyframe::Ptr& kf) {
         return;
     }
     cur_kf_ = kf;
-    map_update_pending_ = true;
+    mapping_update_pending_ = true;
     if (ui_) {
         ui_->UpdateKF(cur_kf_);
     }
@@ -306,9 +307,46 @@ CloudPtr MappingSystem::BuildCurrentMapInBaseFrame() {
     return map_base;
 }
 
-bool MappingSystem::ConsumeMapUpdate() {
-    const bool pending = map_update_pending_;
-    map_update_pending_ = false;
+nav_msgs::msg::Path MappingSystem::BuildCurrentPath() {
+    std::vector<Keyframe::Ptr> keyframes;
+    if (use_lio_sam_ && lio_sam_) {
+        lio_sam_->SyncOptimizedKeyframePoses();
+        keyframes = lio_sam_->GetAllKeyframes();
+    } else if (lio_) {
+        keyframes = lio_->GetAllKeyframes();
+    }
+
+    nav_msgs::msg::Path path;
+    path.header.frame_id = "map";
+    path.poses.reserve(keyframes.size());
+    for (const auto& kf : keyframes) {
+        if (!kf) {
+            continue;
+        }
+
+        SE3 pose = kf->GetOptPose();
+        if (use_lio_sam_) {
+            pose = T_base_lidar_ * pose;
+        }
+
+        geometry_msgs::msg::PoseStamped pose_msg;
+        pose_msg.header.frame_id = "map";
+        pose_msg.pose.position.x = pose.translation().x();
+        pose_msg.pose.position.y = pose.translation().y();
+        pose_msg.pose.position.z = pose.translation().z();
+        const Quatd q = pose.unit_quaternion();
+        pose_msg.pose.orientation.x = q.x();
+        pose_msg.pose.orientation.y = q.y();
+        pose_msg.pose.orientation.z = q.z();
+        pose_msg.pose.orientation.w = q.w();
+        path.poses.push_back(pose_msg);
+    }
+    return path;
+}
+
+bool MappingSystem::ConsumeMappingUpdate() {
+    const bool pending = mapping_update_pending_;
+    mapping_update_pending_ = false;
     return pending;
 }
 

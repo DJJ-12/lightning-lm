@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <livox_ros_driver2/msg/custom_msg.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
@@ -50,7 +51,8 @@ class MappingSystem {
 
     MappingSystemResult GetResult();
     CloudPtr BuildCurrentMapInBaseFrame();
-    bool ConsumeMapUpdate();
+    nav_msgs::msg::Path BuildCurrentPath();
+    bool ConsumeMappingUpdate();
 
    private:
     bool BuildInputCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud, CloudPtr& input);
@@ -69,7 +71,7 @@ class MappingSystem {
     std::shared_ptr<LaserMapping> lio_;
     std::shared_ptr<ui::PangolinWindow> ui_;
     Keyframe::Ptr cur_kf_;
-    bool map_update_pending_ = false;
+    bool mapping_update_pending_ = false;
 };
 
 }  // namespace modules

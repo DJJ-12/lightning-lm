@@ -23,6 +23,9 @@ bool Lightning::Init(rclcpp::Node::SharedPtr node, const std::string& yaml_path)
     mapping_map_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
         "/lightning/mapping/map",
         rclcpp::QoS(1).reliable().transient_local());
+    mapping_path_pub_ = node_->create_publisher<nav_msgs::msg::Path>(
+        "/lightning/mapping/path",
+        rclcpp::QoS(1).reliable().transient_local());
 
     YAML::Node yaml = YAML::LoadFile(yaml_path_);
     if (yaml["localization"] && yaml["localization"]["cloud_timeout_sec"]) {
@@ -164,8 +167,8 @@ ServiceResult Lightning::StartMapping(const std::string& save_path) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (mapping_system_) {
                 mapping_system_->ProcessCloud(cloud);
-                if (mapping_system_->ConsumeMapUpdate()) {
-                    PublishMappingMapLocked(false);
+                if (mapping_system_->ConsumeMappingUpdate()) {
+                    PublishMappingOutputsLocked(false);
                 }
             }
         },
@@ -173,8 +176,8 @@ ServiceResult Lightning::StartMapping(const std::string& save_path) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (mapping_system_) {
                 mapping_system_->ProcessCloud(cloud);
-                if (mapping_system_->ConsumeMapUpdate()) {
-                    PublishMappingMapLocked(false);
+                if (mapping_system_->ConsumeMappingUpdate()) {
+                    PublishMappingOutputsLocked(false);
                 }
             }
         },
@@ -251,8 +254,8 @@ void Lightning::StartBagMappingTask(const std::string& bag_path) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (mapping_system_) {
                     mapping_system_->ProcessCloud(cloud);
-                    if (mapping_system_->ConsumeMapUpdate()) {
-                        PublishMappingMapLocked(false);
+                    if (mapping_system_->ConsumeMappingUpdate()) {
+                        PublishMappingOutputsLocked(false);
                     }
                 }
             },
@@ -260,8 +263,8 @@ void Lightning::StartBagMappingTask(const std::string& bag_path) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (mapping_system_) {
                     mapping_system_->ProcessCloud(cloud);
-                    if (mapping_system_->ConsumeMapUpdate()) {
-                        PublishMappingMapLocked(false);
+                    if (mapping_system_->ConsumeMappingUpdate()) {
+                        PublishMappingOutputsLocked(false);
                     }
                 }
             },
@@ -292,24 +295,42 @@ void Lightning::StartBagMappingTask(const std::string& bag_path) {
     });
 }
 
-void Lightning::PublishMappingMapLocked(bool force) {
-    if (!mapping_map_pub_ || !mapping_system_) {
+void Lightning::PublishMappingOutputsLocked(bool force) {
+    if (!mapping_system_) {
         return;
     }
-    if (!force && mapping_map_pub_->get_subscription_count() == 0) {
+    const bool publish_map =
+        mapping_map_pub_ && (force || mapping_map_pub_->get_subscription_count() > 0);
+    const bool publish_path =
+        mapping_path_pub_ && (force || mapping_path_pub_->get_subscription_count() > 0);
+    if (!publish_map && !publish_path) {
         return;
     }
 
-    CloudPtr map_base = mapping_system_->BuildCurrentMapInBaseFrame();
-    if (!map_base || map_base->empty()) {
-        return;
+    const auto stamp = node_ ? node_->now() : rclcpp::Clock().now();
+    if (publish_map) {
+        CloudPtr map_base = mapping_system_->BuildCurrentMapInBaseFrame();
+        if (map_base && !map_base->empty()) {
+            sensor_msgs::msg::PointCloud2 msg;
+            pcl::toROSMsg(*map_base, msg);
+            msg.header.stamp = stamp;
+            msg.header.frame_id = "map";
+            mapping_map_pub_->publish(msg);
+        }
     }
 
-    sensor_msgs::msg::PointCloud2 msg;
-    pcl::toROSMsg(*map_base, msg);
-    msg.header.stamp = node_ ? node_->now() : rclcpp::Clock().now();
-    msg.header.frame_id = "map";
-    mapping_map_pub_->publish(msg);
+    if (publish_path) {
+        nav_msgs::msg::Path path = mapping_system_->BuildCurrentPath();
+        if (!path.poses.empty()) {
+            path.header.stamp = stamp;
+            path.header.frame_id = "map";
+            for (auto& pose : path.poses) {
+                pose.header.stamp = stamp;
+                pose.header.frame_id = "map";
+            }
+            mapping_path_pub_->publish(path);
+        }
+    }
 }
 
 ServiceResult Lightning::SaveMappingLocked(const std::string& save_path) {
@@ -320,7 +341,7 @@ ServiceResult Lightning::SaveMappingLocked(const std::string& save_path) {
     const auto result = mapping_system_->GetResult();
     const bool ok = save_map_.Save(save_path, result, save_map_options_);
     if (ok) {
-        PublishMappingMapLocked(true);
+        PublishMappingOutputsLocked(true);
     }
     return {ok, ok ? "map saved" : "failed to save map"};
 }
@@ -357,7 +378,7 @@ ServiceResult Lightning::FinishMapping(bool save_map) {
     if (save_map) {
         result = SaveMappingLocked(mapping_save_path_);
     } else {
-        PublishMappingMapLocked(true);
+        PublishMappingOutputsLocked(true);
     }
     ClearMappingLocked();
     task_.SetFinished(result.success, result.message);
