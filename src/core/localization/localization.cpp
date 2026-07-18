@@ -411,6 +411,7 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
     }
 
     const double total_ms = (SteadySeconds() - frame.callback_start_steady_sec) * 1000.0;
+    /*
     LOG(INFO) << std::setprecision(14)
               << "[LOC_DIAG] header_stamp=" << frame.timestamp
               << ", header_dt=" << header_dt
@@ -424,7 +425,7 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
               << ", TP=" << quality.transform_probability
               << ", NVTL=" << quality.nearest_voxel_likelihood
               << ", iterations=" << quality.iteration_num;
-
+    */
     PublishResult(res);
 }
 

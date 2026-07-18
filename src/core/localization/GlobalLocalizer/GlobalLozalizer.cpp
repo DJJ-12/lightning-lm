@@ -76,7 +76,7 @@ pclomp::NdtResult Localizer::AlignPose(const Eigen::Matrix4d &initial_pose_with_
         Eigen::Matrix4d init_pose_matrix = Eigen::Matrix4d::Identity();
         init_pose_matrix.block<3, 3>(0, 0) = rot;
         init_pose_matrix.block<3, 1>(0, 3) = Eigen::Vector3d(input[0], input[1], input[2]);
-
+        /*
         LOG(INFO) << "Initial Pose: "
                   << "x: " << input[0]
                   << ", y: " << input[1]
@@ -84,7 +84,7 @@ pclomp::NdtResult Localizer::AlignPose(const Eigen::Matrix4d &initial_pose_with_
                   << ", roll: " << input[3]
                   << ", pitch: " << input[4]
                   << ", yaw: " << input[5] << std::endl;
-
+        */
         // 执行NDT配准
         const Eigen::Matrix4f initial_pose_matrix = init_pose_matrix.cast<float>();
         ndt_rough_ptr_->align(*output_cloud, initial_pose_matrix);
