@@ -1,7 +1,8 @@
 ﻿# Hesai mapping/localization config.
 
 common:
-  lidar_topic: "/lidar_points_front"
+  # lidar_topic: "/lidar_points_front"
+  lidar_topic: "/lidar_points_back"
   livox_lidar_topic: "/livox/lidar_192_168_1_3"
   imu_topic: "/imu_data"
   base_link_frame: "base_link"
@@ -28,9 +29,16 @@ common:
   surroundingKeyframeDensity: 2.0
   surroundingKeyframeSearchRadius: 50.0
 
-  extrinsicBaseLidarTrans: [4.230, -0.745, 0.0]
-  extrinsicBaseLidarRot: [0.0, -1.0, 0.0,
-                          1.0,  0.0, 0.0,
+  # front lidar
+  # extrinsicBaseLidarTrans: [4.230, -0.745, 0.0]
+  # extrinsicBaseLidarRot: [0.0, -1.0, 0.0,
+  #                         1.0,  0.0, 0.0,
+  #                         0.0,  0.0, 1.0]
+
+  # back lidar
+  extrinsicBaseLidarTrans: [-4.230, 0.745, 0.0]
+  extrinsicBaseLidarRot: [0.0, 1.0, 0.0,
+                          -1.0,  0.0, 0.0,
                           0.0,  0.0, 1.0]
 
 fasterlio:
@@ -54,7 +62,7 @@ fasterlio:
 
 system:
   frontend: "lio_sam"
-  with_ui: true
+  with_ui: false
   pub_tf: false
 
 roi:
