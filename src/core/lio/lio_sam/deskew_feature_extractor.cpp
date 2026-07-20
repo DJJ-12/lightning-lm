@@ -105,6 +105,12 @@ void DeskewFeatureExtractor::resetParameters(){
         std::fill(pointRange.begin(), pointRange.end(), 0.0f);
         std::fill(cloudNeighborPicked.begin(), cloudNeighborPicked.end(), 0);
         std::fill(cloudLabel.begin(), cloudLabel.end(), 0);
+        std::fill(cloudCurvature.begin(), cloudCurvature.end(), 0.0f);
+        for (size_t i = 0; i < cloudSmoothness.size(); ++i)
+        {
+            cloudSmoothness[i].value = 0.0f;
+            cloudSmoothness[i].ind = static_cast<int>(i);
+        }
         currentDeskewState.reset();
         imuRollInit = 0.0f;
         imuPitchInit = 0.0f;
@@ -394,6 +400,17 @@ void DeskewFeatureExtractor::extractFeatures(){
         surfaceCloudScan->clear();
         surfaceCloudScanDS->clear();
 
+        const int cloudSize = static_cast<int>(extractedCloud->points.size());
+        const int validPointCount = std::min(
+            {cloudSize,
+             static_cast<int>(pointColInd.size()),
+             static_cast<int>(cloudCurvature.size()),
+             static_cast<int>(cloudNeighborPicked.size()),
+             static_cast<int>(cloudLabel.size()),
+             static_cast<int>(cloudSmoothness.size())});
+        if (validPointCount <= 0)
+            return;
+
         for (int i = 0; i < N_SCAN; ++i)
         {
             surfaceCloudScan->clear();
@@ -405,6 +422,8 @@ void DeskewFeatureExtractor::extractFeatures(){
                     (startRingIndex[i] * (5 - j) + endRingIndex[i] * (j + 1)) / 6 - 1;
                 if (sp >= ep)
                     continue;
+                if (sp < 0 || ep < 0 || sp >= validPointCount || ep >= validPointCount)
+                    continue;
 
                 std::sort(
                     cloudSmoothness.begin() + sp, cloudSmoothness.begin() + ep, by_value());
@@ -413,6 +432,8 @@ void DeskewFeatureExtractor::extractFeatures(){
                 for (int k = ep; k >= sp; --k)
                 {
                     const int ind = cloudSmoothness[k].ind;
+                    if (ind < 0 || ind >= validPointCount)
+                        continue;
                     if (cloudNeighborPicked[ind] == 0 && cloudCurvature[ind] > edgeThreshold)
                     {
                         ++largestPickedNum;
@@ -429,19 +450,29 @@ void DeskewFeatureExtractor::extractFeatures(){
                         cloudNeighborPicked[ind] = 1;
                         for (int l = 1; l <= 5; ++l)
                         {
+                            const int currentIndex = ind + l;
+                            const int previousIndex = currentIndex - 1;
+                            if (currentIndex < 0 || currentIndex >= validPointCount ||
+                                previousIndex < 0 || previousIndex >= validPointCount)
+                                break;
                             const int columnDiff =
-                                std::abs(pointColInd[ind + l] - pointColInd[ind + l - 1]);
+                                std::abs(pointColInd[currentIndex] - pointColInd[previousIndex]);
                             if (columnDiff > 10)
                                 break;
-                            cloudNeighborPicked[ind + l] = 1;
+                            cloudNeighborPicked[currentIndex] = 1;
                         }
                         for (int l = -1; l >= -5; --l)
                         {
+                            const int currentIndex = ind + l;
+                            const int nextIndex = currentIndex + 1;
+                            if (currentIndex < 0 || currentIndex >= validPointCount ||
+                                nextIndex < 0 || nextIndex >= validPointCount)
+                                break;
                             const int columnDiff =
-                                std::abs(pointColInd[ind + l] - pointColInd[ind + l + 1]);
+                                std::abs(pointColInd[currentIndex] - pointColInd[nextIndex]);
                             if (columnDiff > 10)
                                 break;
-                            cloudNeighborPicked[ind + l] = 1;
+                            cloudNeighborPicked[currentIndex] = 1;
                         }
                     }
                 }
@@ -449,25 +480,37 @@ void DeskewFeatureExtractor::extractFeatures(){
                 for (int k = sp; k <= ep; ++k)
                 {
                     const int ind = cloudSmoothness[k].ind;
+                    if (ind < 0 || ind >= validPointCount)
+                        continue;
                     if (cloudNeighborPicked[ind] == 0 && cloudCurvature[ind] < surfThreshold)
                     {
                         cloudLabel[ind] = -1;
                         cloudNeighborPicked[ind] = 1;
                         for (int l = 1; l <= 5; ++l)
                         {
+                            const int currentIndex = ind + l;
+                            const int previousIndex = currentIndex - 1;
+                            if (currentIndex < 0 || currentIndex >= validPointCount ||
+                                previousIndex < 0 || previousIndex >= validPointCount)
+                                break;
                             const int columnDiff =
-                                std::abs(pointColInd[ind + l] - pointColInd[ind + l - 1]);
+                                std::abs(pointColInd[currentIndex] - pointColInd[previousIndex]);
                             if (columnDiff > 10)
                                 break;
-                            cloudNeighborPicked[ind + l] = 1;
+                            cloudNeighborPicked[currentIndex] = 1;
                         }
                         for (int l = -1; l >= -5; --l)
                         {
+                            const int currentIndex = ind + l;
+                            const int nextIndex = currentIndex + 1;
+                            if (currentIndex < 0 || currentIndex >= validPointCount ||
+                                nextIndex < 0 || nextIndex >= validPointCount)
+                                break;
                             const int columnDiff =
-                                std::abs(pointColInd[ind + l] - pointColInd[ind + l + 1]);
+                                std::abs(pointColInd[currentIndex] - pointColInd[nextIndex]);
                             if (columnDiff > 10)
                                 break;
-                            cloudNeighborPicked[ind + l] = 1;
+                            cloudNeighborPicked[currentIndex] = 1;
                         }
                     }
                 }

@@ -52,7 +52,7 @@ ros2 run lightning run_lightning --config /home/mt/workspace/src/lightning-lm/co
 ```bash
 ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'online_mapping'}"
 ros2 service call /lightning/mapping/start_mapping lightning_interfaces/srv/StartMapping "{save_path: '/home/mt/maps/cx16_map'}"
-ros2 service call /lightning/mapping/finish_mapping lightning_interfaces/srv/FinishMapping "{save_map: true}"
+ros2 service call /lightning/mapping/finish_mapping lightning_interfaces/srv/FinishMapping "{save_map: false}"
 ros2 service call /lightning/mapping/get_map_path lightning_interfaces/srv/GetMapPath "{}"
 ```
 

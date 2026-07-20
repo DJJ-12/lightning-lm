@@ -5,8 +5,10 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/executors/single_threaded_executor.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
@@ -14,32 +16,40 @@
 
 namespace lightning::runtime {
 
+// TopicInput 在程序启动时创建一次，并在独立节点、独立 executor、独立线程中接收数据。
+// 回调只负责把消息交给上层队列，不执行建图、定位或服务逻辑。
 class TopicInput {
    public:
     using ImuCallback = std::function<void(const sensor_msgs::msg::Imu::SharedPtr&)>;
     using CloudCallback = std::function<void(const sensor_msgs::msg::PointCloud2::SharedPtr&)>;
     using LivoxCallback = std::function<void(const livox_ros_driver2::msg::CustomMsg::SharedPtr&)>;
-    using TimeoutCallback = std::function<void(const std::string&)>;
 
-    bool Start(rclcpp::Node::SharedPtr node, const std::string& yaml_path,
-               ImuCallback imu_cb, CloudCallback cloud_cb, LivoxCallback livox_cb,
-               bool subscribe_imu = true, double cloud_timeout_sec = 0.0,
-               TimeoutCallback timeout_cb = nullptr);
-    void Stop();
+    TopicInput() = default;
+    ~TopicInput();
+
+    bool Start(const std::string& yaml_path,
+               ImuCallback imu_cb,
+               CloudCallback cloud_cb,
+               LivoxCallback livox_cb);
+    void Shutdown();
     bool Running() const { return running_.load(); }
 
    private:
-    void MarkCloudReceived();
-    void CheckCloudTimeout();
+    void Spin();
 
     std::atomic_bool running_{false};
-    std::atomic_bool cloud_timeout_reported_{false};
-    std::atomic<std::int64_t> last_cloud_time_ms_{0};
-    double cloud_timeout_sec_ = 0.0;
-    TimeoutCallback timeout_cb_;
+    std::atomic<std::uint64_t> imu_received_{0};
+    std::atomic<std::uint64_t> cloud_received_{0};
+    std::atomic<std::uint64_t> livox_received_{0};
+
+    ImuCallback imu_cb_;
+    CloudCallback cloud_cb_;
+    LivoxCallback livox_cb_;
 
     rclcpp::Node::SharedPtr node_;
-    rclcpp::TimerBase::SharedPtr cloud_timeout_timer_;
+    std::shared_ptr<rclcpp::executors::SingleThreadedExecutor> executor_;
+    std::thread thread_;
+
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_sub_;

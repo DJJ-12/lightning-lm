@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "ui/pangolin_window.h"
@@ -493,9 +494,17 @@ bool Localization::TryInitializeWithCurrentCloud() {
 }
 
 void Localization::Finish() {
+    LOG(INFO) << "[定位析构诊断][Localization::Finish][01] 开始"
+              << ", this=" << this
+              << ", thread_id=" << std::this_thread::get_id()
+              << ", ui=" << ui_.get();
     if (ui_) {
+        LOG(INFO) << "[定位析构诊断][Localization::Finish][02] 调用 PangolinWindow::Quit";
         ui_->Quit();
+        LOG(INFO) << "[定位析构诊断][Localization::Finish][03] PangolinWindow::Quit 已返回";
+        LOG(INFO) << "[定位析构诊断][Localization::Finish][04] 准备 reset PangolinWindow";
         ui_.reset();
+        LOG(INFO) << "[定位析构诊断][Localization::Finish][05] PangolinWindow 已 reset";
     }
 
     {
@@ -514,6 +523,7 @@ void Localization::Finish() {
         std::lock_guard<std::mutex> cloud_lock(current_cloud_mutex_);
         latest_cloud_.reset();
     }
+    LOG(INFO) << "[定位析构诊断][Localization::Finish][06] 完成";
 }
 
 bool Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vector3d& t) {

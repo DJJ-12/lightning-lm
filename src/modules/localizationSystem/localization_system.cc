@@ -13,7 +13,9 @@ namespace lightning::modules {
 LocalizationSystem::LocalizationSystem(LocalizationSystemOptions options) : options_(options) {}
 
 LocalizationSystem::~LocalizationSystem() {
+    LOG(INFO) << "[定位析构诊断][LocalizationSystem][01] 进入析构 this=" << this;
     Reset();
+    LOG(INFO) << "[定位析构诊断][LocalizationSystem][02] 析构完成 this=" << this;
 }
 
 bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::SharedPtr node) {
@@ -172,10 +174,16 @@ loc::LocalizationResult LocalizationSystem::GetLatestResult() const {
 }
 
 void LocalizationSystem::Reset() {
+    LOG(INFO) << "[定位析构诊断][LocalizationSystem::Reset][01] 开始"
+              << ", this=" << this << ", loc=" << loc_.get();
     if (loc_) {
+        LOG(INFO) << "[定位析构诊断][LocalizationSystem::Reset][02] 调用 Localization::Finish";
         loc_->Finish();
+        LOG(INFO) << "[定位析构诊断][LocalizationSystem::Reset][03] Localization::Finish 已返回";
     }
+    LOG(INFO) << "[定位析构诊断][LocalizationSystem::Reset][04] 准备 reset Localization";
     loc_.reset();
+    LOG(INFO) << "[定位析构诊断][LocalizationSystem::Reset][05] Localization 已 reset";
     tf_broadcaster_.reset();
     loc_odom_pub_.reset();
     loc_pose_pub_.reset();
@@ -183,6 +191,7 @@ void LocalizationSystem::Reset() {
     map_ready_ = false;
     has_initial_guess_ = false;
     map_path_.clear();
+    LOG(INFO) << "[定位析构诊断][LocalizationSystem::Reset][06] 完成";
 }
 
 }  // namespace lightning::modules
