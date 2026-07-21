@@ -59,6 +59,12 @@ DeskewFeatureExtractor::DeskewFeatureExtractor(const rclcpp::NodeOptions& option
         pcl::console::setVerbosityLevel(pcl::console::L_ERROR);
     }
 
+DeskewFeatureExtractor::~DeskewFeatureExtractor() {
+    RCLCPP_INFO(get_logger(),
+        "[跨任务状态诊断][DeskewFeatureExtractor] 析构 this=%p",
+        static_cast<void*>(this));
+}
+
 bool DeskewFeatureExtractor::Run(const PointCloudType::Ptr& inputCloud,
              const std::vector<sensor_msgs::msg::Imu>& imuWindow,
              double lidarBeginTime,

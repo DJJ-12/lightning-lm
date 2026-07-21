@@ -63,6 +63,11 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
 
         allocateMemory();
 
+        RCLCPP_INFO(get_logger(),
+            "[跨任务状态修复][mapOptimization] 构造完成 this=%p, time_member_addr=%p, object_last_stamp=%.9f, mappingProcessInterval=%.6f",
+            static_cast<void*>(this), static_cast<void*>(&timeLastProcessing_),
+            timeLastProcessing_, mappingProcessInterval);
+
         if (loopClosureEnableFlag)
         {
             loopClosureThreadRunning_.store(true);
@@ -71,6 +76,13 @@ mapOptimization::mapOptimization(const rclcpp::NodeOptions & options) : ParamSer
     }
 
 mapOptimization::~mapOptimization() {
+    RCLCPP_INFO(get_logger(),
+        "[跨任务状态修复][mapOptimization] 开始析构 this=%p, object_last_stamp=%.9f, run_calls=%llu, executed=%llu, skipped=%llu, keyposes=%zu",
+        static_cast<void*>(this), timeLastProcessing_,
+        static_cast<unsigned long long>(diagnosticRunCalls),
+        static_cast<unsigned long long>(diagnosticExecutedCalls),
+        static_cast<unsigned long long>(diagnosticSkippedCalls),
+        cloudKeyPoses6D ? cloudKeyPoses6D->size() : 0U);
     loopClosureThreadRunning_.store(false);
     if (loopClosureThread_.joinable())
         loopClosureThread_.join();
@@ -138,6 +150,8 @@ void mapOptimization::allocateMemory(){
 
 bool mapOptimization::Run(LioSamCloudInfo& msgIn){
         createdNewKeyframe = false;
+        lastRunExecuted = false;
+        ++diagnosticRunCalls;
 
         // extract time stamp
         timeLaserInfoCur = msgIn.timestamp;
@@ -149,10 +163,23 @@ bool mapOptimization::Run(LioSamCloudInfo& msgIn){
 
         std::lock_guard<std::mutex> lock(mtx);
 
-        static double timeLastProcessing = -1;
-        if (timeLaserInfoCur - timeLastProcessing >= mappingProcessInterval)
+        const double intervalFromLastProcessing = timeLaserInfoCur - timeLastProcessing_;
+        if (diagnosticRunCalls <= 5 || intervalFromLastProcessing < 0.0)
         {
-            timeLastProcessing = timeLaserInfoCur;
+            RCLCPP_WARN(get_logger(),
+                "[跨任务状态修复][mapOptimization::Run] this=%p, member_addr=%p, call=%llu, current_stamp=%.9f, object_last_stamp=%.9f, delta=%.9f, interval=%.9f, keyposes=%zu",
+                static_cast<void*>(this),
+                static_cast<void*>(&timeLastProcessing_),
+                static_cast<unsigned long long>(diagnosticRunCalls),
+                timeLaserInfoCur, timeLastProcessing_, intervalFromLastProcessing,
+                mappingProcessInterval,
+                cloudKeyPoses6D ? cloudKeyPoses6D->size() : 0U);
+        }
+        if (intervalFromLastProcessing >= mappingProcessInterval)
+        {
+            timeLastProcessing_ = timeLaserInfoCur;
+            lastRunExecuted = true;
+            ++diagnosticExecutedCalls;
 
             const auto t0 = std::chrono::steady_clock::now();
             resetFrameQuality();
@@ -238,6 +265,15 @@ bool mapOptimization::Run(LioSamCloudInfo& msgIn){
             return true;
         }
 
+        ++diagnosticSkippedCalls;
+        if (diagnosticSkippedCalls <= 10 || diagnosticSkippedCalls % 100 == 0)
+        {
+            RCLCPP_ERROR(get_logger(),
+                "[跨任务状态诊断][mapOptimization::Run] 本帧未进入前端优化 this=%p, skipped=%llu, current_stamp=%.9f, object_last_stamp=%.9f, delta=%.9f",
+                static_cast<void*>(this),
+                static_cast<unsigned long long>(diagnosticSkippedCalls),
+                timeLaserInfoCur, timeLastProcessing_, intervalFromLastProcessing);
+        }
         cloudInfoPtr = nullptr;
         return true;
     }
@@ -623,7 +659,7 @@ bool mapOptimization::rawCloudICPFallback(
         if (!prepareCurrentRawCloudForRegistration())
             return false;
 
-        pcl::IterativeClosestPoint<PointType, PointType> icp;
+        static pcl::IterativeClosestPoint<PointType, PointType> icp;
         icp.setInputSource(laserCloudRawLast);
         icp.setInputTarget(laserCloudRawFromMapDS);
         icp.setMaxCorrespondenceDistance(1.0);
@@ -815,7 +851,7 @@ void mapOptimization::performLoopClosure(){
         }
 
         // ICP Settings
-        static pcl::IterativeClosestPoint<PointType, PointType> icp;
+        pcl::IterativeClosestPoint<PointType, PointType> icp;
         icp.setMaxCorrespondenceDistance(historyKeyframeSearchRadius * 2);
         icp.setMaximumIterations(100);
         icp.setTransformationEpsilon(1e-6);
@@ -919,9 +955,18 @@ void mapOptimization::loopFindNearKeyframes(pcl::PointCloud<PointType>::Ptr& nea
 void mapOptimization::updateInitialGuess(){
         incrementalOdometryAffineFront = trans2Affine3f(transformTobeMapped);
 
-        static Eigen::Affine3f lastImuTransformation = Eigen::Affine3f::Identity();
-        static bool lastImuPreTransAvailable = false;
-        static Eigen::Affine3f lastImuPreTransformation = Eigen::Affine3f::Identity();
+        ++diagnosticInitialGuessCalls;
+        if (diagnosticInitialGuessCalls <= 3)
+        {
+            RCLCPP_WARN(get_logger(),
+                "[跨任务状态修复][updateInitialGuess] this=%p, call=%llu, keyposes=%zu, imu_member_addr=%p, pre_available_member_addr=%p, pre_available=%d",
+                static_cast<void*>(this),
+                static_cast<unsigned long long>(diagnosticInitialGuessCalls),
+                cloudKeyPoses3D ? cloudKeyPoses3D->size() : 0U,
+                static_cast<void*>(&lastImuTransformation_),
+                static_cast<void*>(&lastImuPreTransAvailable_),
+                static_cast<int>(lastImuPreTransAvailable_));
+        }
 
         if (cloudKeyPoses3D->points.empty())
         {
@@ -932,7 +977,7 @@ void mapOptimization::updateInitialGuess(){
                 transformTobeMapped[0] = cloudInfoPtr->imu_roll_init;
                 transformTobeMapped[1] = cloudInfoPtr->imu_pitch_init;
                 transformTobeMapped[2] = cloudInfoPtr->imu_yaw_init;
-                lastImuTransformation = pcl::getTransformation(
+                lastImuTransformation_ = pcl::getTransformation(
                     0.0f, 0.0f, 0.0f,
                     cloudInfoPtr->imu_roll_init,
                     cloudInfoPtr->imu_pitch_init,
@@ -943,7 +988,7 @@ void mapOptimization::updateInitialGuess(){
                 transformTobeMapped[0] = 0.0f;
                 transformTobeMapped[1] = 0.0f;
                 transformTobeMapped[2] = 0.0f;
-                lastImuTransformation = Eigen::Affine3f::Identity();
+                lastImuTransformation_ = Eigen::Affine3f::Identity();
             }
 
             if (!useImuHeadingInitialization)
@@ -952,7 +997,7 @@ void mapOptimization::updateInitialGuess(){
             transformTobeMapped[3] = 0.0f;
             transformTobeMapped[4] = 0.0f;
             transformTobeMapped[5] = 0.0f;
-            lastImuPreTransAvailable = false;
+            lastImuPreTransAvailable_ = false;
 
             copyTransform(transformTobeMapped, frameInitialGuessTransform);
             return;
@@ -976,7 +1021,7 @@ void mapOptimization::updateInitialGuess(){
                     cloudInfoPtr->imu_pitch_init,
                     cloudInfoPtr->imu_yaw_init);
                 initialGuessAffine = initialGuessAffine * acceptedImuAffine.inverse() * currentImuAffine;
-                lastImuTransformation = currentImuAffine;
+                lastImuTransformation_ = currentImuAffine;
             }
 
             const double dtAccepted = timeLaserInfoCur - trusted.last_time;
@@ -1031,22 +1076,22 @@ void mapOptimization::updateInitialGuess(){
                 cloudInfoPtr->initial_guess_roll,
                 cloudInfoPtr->initial_guess_pitch,
                 cloudInfoPtr->initial_guess_yaw);
-            if (!lastImuPreTransAvailable)
+            if (!lastImuPreTransAvailable_)
             {
-                lastImuPreTransformation = transBack;
-                lastImuPreTransAvailable = true;
+                lastImuPreTransformation_ = transBack;
+                lastImuPreTransAvailable_ = true;
             }
             else
             {
-                Eigen::Affine3f transIncre = lastImuPreTransformation.inverse() * transBack;
+                Eigen::Affine3f transIncre = lastImuPreTransformation_.inverse() * transBack;
                 Eigen::Affine3f transTobe = trans2Affine3f(transformTobeMapped);
                 Eigen::Affine3f transFinal = transTobe * transIncre;
                 setTransformFromAffine(transFinal);
-                lastImuPreTransformation = transBack;
+                lastImuPreTransformation_ = transBack;
 
                 if (cloudInfoPtr->imu_available)
                 {
-                    lastImuTransformation = pcl::getTransformation(
+                    lastImuTransformation_ = pcl::getTransformation(
                         0.0f, 0.0f, 0.0f,
                         cloudInfoPtr->imu_roll_init,
                         cloudInfoPtr->imu_pitch_init,
@@ -1064,11 +1109,11 @@ void mapOptimization::updateInitialGuess(){
                 cloudInfoPtr->imu_roll_init,
                 cloudInfoPtr->imu_pitch_init,
                 cloudInfoPtr->imu_yaw_init);
-            Eigen::Affine3f transIncre = lastImuTransformation.inverse() * transBack;
+            Eigen::Affine3f transIncre = lastImuTransformation_.inverse() * transBack;
             Eigen::Affine3f transTobe = trans2Affine3f(transformTobeMapped);
             Eigen::Affine3f transFinal = transTobe * transIncre;
             setTransformFromAffine(transFinal);
-            lastImuTransformation = transBack;
+            lastImuTransformation_ = transBack;
             copyTransform(transformTobeMapped, frameInitialGuessTransform);
             return;
         }

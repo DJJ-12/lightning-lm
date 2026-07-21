@@ -28,7 +28,7 @@ class PangolinWindowImpl {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
     PangolinWindowImpl() = default;
-    ~PangolinWindowImpl() = default;
+    ~PangolinWindowImpl();
 
     PangolinWindowImpl(const PangolinWindowImpl &) = delete;
     PangolinWindowImpl &operator=(const PangolinWindowImpl &) = delete;
@@ -50,9 +50,6 @@ class PangolinWindowImpl {
     std::string GetWindowName() const;
 
    public:
-    /// 后台渲染线程
-    std::thread render_thread_;
-
     /// 一些辅助的锁和原子变量
     std::mutex mtx_map_cloud_;
     std::mutex mtx_current_scan_;

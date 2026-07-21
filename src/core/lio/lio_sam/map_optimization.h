@@ -161,6 +161,19 @@ public:
     bool lastLMRan = false;
     bool lastLMConverged = false;
     bool hasLastOutputPose = false;
+    bool lastRunExecuted = false;
+
+    // 这些状态必须属于当前 mapOptimization 对象。
+    // 不能使用函数内 static，否则后续任务会继承上一个任务的时间戳和 IMU 初值。
+    double timeLastProcessing_ = -1.0;
+    Eigen::Affine3f lastImuTransformation_ = Eigen::Affine3f::Identity();
+    bool lastImuPreTransAvailable_ = false;
+    Eigen::Affine3f lastImuPreTransformation_ = Eigen::Affine3f::Identity();
+
+    std::uint64_t diagnosticRunCalls = 0;
+    std::uint64_t diagnosticExecutedCalls = 0;
+    std::uint64_t diagnosticSkippedCalls = 0;
+    std::uint64_t diagnosticInitialGuessCalls = 0;
     Eigen::Affine3f lastOutputAffine = Eigen::Affine3f::Identity();
     double lastOutputTime = -1.0;
     HybridTrustedPoseState hybrid_trusted_pose_;
@@ -192,6 +205,7 @@ public:
     ~mapOptimization();
     void allocateMemory();
     bool Run(LioSamCloudInfo& msgIn);
+    bool LastRunExecuted() const { return lastRunExecuted; }
     double TimeLaserInfoCur() const;
     const float* TransformTobeMapped() const;
     bool CreatedNewKeyframe() const;

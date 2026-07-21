@@ -19,7 +19,13 @@
 namespace lightning::modules {
 
 MappingSystem::~MappingSystem() {
+    LOG(INFO) << "[跨任务状态诊断][MappingSystem] 进入析构"
+              << ", this=" << this
+              << ", lio_sam=" << lio_sam_.get()
+              << ", lio=" << lio_.get()
+              << ", ui=" << ui_.get();
     Reset();
+    LOG(INFO) << "[跨任务状态诊断][MappingSystem] 析构完成, this=" << this;
 }
 
 bool MappingSystem::Init(const std::string& yaml_path, const MappingSystemOptions& options) {
@@ -113,6 +119,11 @@ void MappingSystem::Stop() {
 }
 
 void MappingSystem::Reset() {
+    LOG(INFO) << "[跨任务状态诊断][MappingSystem::Reset] 开始"
+              << ", this=" << this
+              << ", lio_sam=" << lio_sam_.get()
+              << ", lio=" << lio_.get()
+              << ", ui=" << ui_.get();
     running_ = false;
     cur_kf_.reset();
     mapping_update_pending_ = false;
@@ -137,6 +148,7 @@ void MappingSystem::Reset() {
     lio_sam_.reset();
     lio_.reset();
     preprocess_.reset();
+    LOG(INFO) << "[跨任务状态诊断][MappingSystem::Reset] 完成, this=" << this;
 }
 
 void MappingSystem::ProcessIMU(const sensor_msgs::msg::Imu::SharedPtr& imu) {

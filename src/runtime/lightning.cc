@@ -261,6 +261,7 @@ void Lightning::StopOnlineMappingWorkerLocked(bool drain) {
 void Lightning::OnlineMappingWorkerLoop() {
     LOG(INFO) << "[在线建图线程] 开始 thread_id=" << std::this_thread::get_id();
     std::uint64_t processed = 0;
+    std::uint64_t imu_processed = 0;
     std::uint64_t lidar_processed = 0;
     std::uint64_t last_lidar_sequence = 0;
     std::uint64_t sequence_gap_count = 0;
@@ -292,8 +293,15 @@ void Lightning::OnlineMappingWorkerLoop() {
             max_process_ms = process_ms;
         }
         ++processed;
+        if (input.type == InputType::IMU) {
+            ++imu_processed;
+        }
         if (input.lidar_sequence != 0) {
             ++lidar_processed;
+            if (lidar_processed % 100 == 0) {
+                LOG(INFO) << "[在线建图线程] 雷达点云累计处理=" << lidar_processed
+                          << ", 当前FIFO总处理=" << processed;
+            }
             if (queue_wait_ms > 200.0 || process_ms > 200.0) {
                 LOG(WARNING) << "[数据链路诊断][在线建图] 延迟异常"
                              << ", lidar_sequence=" << input.lidar_sequence
@@ -303,13 +311,17 @@ void Lightning::OnlineMappingWorkerLoop() {
             }
         }
         if (processed % 1000 == 0) {
-            LOG(INFO) << "[在线建图线程] FIFO累计处理=" << processed;
+            LOG(INFO) << "[在线建图线程] FIFO累计处理(含IMU和雷达)=" << processed
+                      << ", 其中IMU=" << imu_processed
+                      << ", 雷达=" << lidar_processed;
         }
     }
     LOG(INFO) << "[数据链路诊断][在线建图] 工作线程退出汇总"
               << ", lidar_received=" << mapping_lidar_received_.load()
               << ", lidar_enqueued=" << mapping_lidar_enqueued_.load()
               << ", lidar_processed=" << lidar_processed
+              << ", imu_processed=" << imu_processed
+              << ", total_processed=" << processed
               << ", lidar_dropped=" << mapping_lidar_dropped_.load()
               << ", sequence_gap_count=" << sequence_gap_count
               << ", max_queue_wait_ms=" << max_queue_wait_ms
@@ -458,7 +470,9 @@ void Lightning::ClearMappingSystemLocked() {
     if (!mapping_system_) {
         return;
     }
-    LOG(INFO) << "[析构流程][MappingSystem] 准备释放 ptr=" << mapping_system_.get();
+    LOG(INFO) << "[析构流程][MappingSystem] 准备释放"
+              << ", generation=" << mapping_task_generation_
+              << ", ptr=" << mapping_system_.get();
     mapping_system_.reset();
     LOG(INFO) << "[析构流程][MappingSystem] 已释放";
 }
@@ -502,6 +516,10 @@ ServiceResult Lightning::StartMapping(const std::string& save_path) {
     }
 
     mapping_system_ = std::make_unique<modules::MappingSystem>();
+    ++mapping_task_generation_;
+    LOG(INFO) << "[跨任务状态诊断][建图任务] 创建在线建图任务"
+              << ", generation=" << mapping_task_generation_
+              << ", MappingSystem=" << mapping_system_.get();
     modules::MappingSystemOptions mapping_options;
     mapping_options.online_input = true;
     if (!mapping_system_->Init(yaml_path_, mapping_options) || !mapping_system_->Start()) {
@@ -538,6 +556,10 @@ ServiceResult Lightning::LoadBag(const std::string& bag_path) {
 
     ClearMappingSystemLocked();
     mapping_system_ = std::make_unique<modules::MappingSystem>();
+    ++mapping_task_generation_;
+    LOG(INFO) << "[跨任务状态诊断][建图任务] 创建离线建图任务"
+              << ", generation=" << mapping_task_generation_
+              << ", MappingSystem=" << mapping_system_.get();
     modules::MappingSystemOptions mapping_options;
     mapping_options.online_input = false;
     if (!mapping_system_->Init(yaml_path_, mapping_options) || !mapping_system_->Start()) {

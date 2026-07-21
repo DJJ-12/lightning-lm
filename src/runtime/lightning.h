@@ -130,6 +130,7 @@ class Lightning {
     std::atomic<std::uint64_t> localization_lidar_received_{0};
     std::atomic<std::uint64_t> localization_lidar_enqueued_{0};
     std::atomic<std::uint64_t> localization_lidar_dropped_{0};
+    std::uint64_t mapping_task_generation_ = 0;
 
     MessageQueue<InputMessage> mapping_queue_;
     MessageQueue<InputMessage> localization_queue_;

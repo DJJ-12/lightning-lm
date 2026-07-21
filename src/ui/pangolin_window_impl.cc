@@ -1,4 +1,5 @@
 #include <pangolin/display/default_font.h>
+#include <glog/logging.h>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -10,6 +11,14 @@
 #include "ui/pangolin_window_impl.h"
 
 namespace lightning::ui {
+
+PangolinWindowImpl::~PangolinWindowImpl() {
+    LOG(INFO) << "[UI析构诊断][PangolinWindowImpl][01] 进入析构函数体"
+              << ", this=" << this
+              << ", thread_id=" << std::this_thread::get_id();
+    LOG(INFO) << "[UI析构诊断][PangolinWindowImpl][02] 析构函数体即将结束；"
+                 "随后C++将自动销毁GlText、Plotter、UiCloud和OpenGLRenderState等成员";
+}
 
 bool PangolinWindowImpl::Init() {
     // create a window and bind its context to the main thread
@@ -67,7 +76,11 @@ void PangolinWindowImpl::Reset(const std::vector<Keyframe::Ptr> &keyframes) {
 }
 
 bool PangolinWindowImpl::DeInit() {
+    LOG(INFO) << "[UI析构诊断][PangolinWindowImpl::DeInit][01] 开始"
+              << ", this=" << this
+              << ", thread_id=" << std::this_thread::get_id();
     ReleaseBuffer();
+    LOG(INFO) << "[UI析构诊断][PangolinWindowImpl::DeInit][02] ReleaseBuffer 已返回";
     return true;
 }
 
@@ -420,8 +433,11 @@ void PangolinWindowImpl::Render() {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
-    // unset the current context from the main thread
-    pangolin::GetBoundWindow()->RemoveCurrent();
+    // 不在这里解除或销毁OpenGL上下文。
+    // 外层渲染线程会先销毁 PangolinWindowImpl 及其 Plotter/GlText/GlBuffer 成员，
+    // 确认所有OpenGL资源都已释放后，再调用 pangolin::DestroyWindow 注销并销毁context。
+    LOG(INFO) << "[UI析构修复][渲染线程] Render 已返回，当前OpenGL上下文继续保持有效"
+              << ", thread_id=" << std::this_thread::get_id();
 }
 
 std::string PangolinWindowImpl::GetWindowName() const { return win_name_; }

@@ -59,6 +59,17 @@ LioSamMapping::LioSamMapping() : LioSamMapping(Options()) {}
 LioSamMapping::LioSamMapping(Options options) : options_(options) {}
 
 LioSamMapping::~LioSamMapping() {
+    LOG(INFO) << "[跨任务状态诊断][LioSamMapping] 开始析构"
+              << ", this=" << this
+              << ", mapOptimization=" << map_optimization_.get()
+              << ", cloud_inputs=" << diagnostic_cloud_inputs_
+              << ", synced_packages=" << diagnostic_synced_packages_
+              << ", map_opt_executed=" << diagnostic_map_optimization_executed_
+              << ", map_opt_skipped=" << diagnostic_map_optimization_skipped_
+              << ", keyframes=" << all_keyframes_.size()
+              << ", lidar_buffer=" << lidar_buffer_.size()
+              << ", imu_buffer=" << imu_buffer_.size()
+              << ", object_scan_duration=" << last_scan_duration_;
     deskew_feature_extractor_.reset();
     map_optimization_.reset();
     frontend_cloud_info_.reset();
@@ -79,6 +90,11 @@ bool LioSamMapping::Init(const std::string& config_yaml) {
     deskew_feature_extractor_ = std::make_unique<::DeskewFeatureExtractor>(node_options_);
     map_optimization_ = std::make_unique<::mapOptimization>(node_options_);
 
+    LOG(INFO) << "[跨任务状态诊断][LioSamMapping] 初始化新对象"
+              << ", this=" << this
+              << ", mapOptimization=" << map_optimization_.get()
+              << ", online=" << IsOnlineMapping()
+              << ", object_scan_duration_before_first_frame=" << last_scan_duration_;
     LOG(INFO) << "[LIO_SAM_FRONTEND] frontend=deskew_feature_extractor";
 
     return true;
@@ -122,7 +138,14 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
         SetParamOverride(overrides, "z_tollerance", params["z_tollerance"].as<double>());
         SetParamOverride(overrides, "rotation_tollerance", params["rotation_tollerance"].as<double>());
         SetParamOverride(overrides, "numberOfCores", params["numberOfCores"].as<int>());
-        SetParamOverride(overrides, "mappingProcessInterval", params["mappingProcessInterval"].as<double>());
+        const double configured_mapping_process_interval =
+            params["mappingProcessInterval"].as<double>();
+        SetParamOverride(overrides, "mappingProcessInterval",
+                         IsOnlineMapping() ? 0.0 : configured_mapping_process_interval);
+        LOG(INFO) << "[在线建图逐帧修复] mappingProcessInterval="
+                  << (IsOnlineMapping() ? 0.0 : configured_mapping_process_interval)
+                  << ", configured=" << configured_mapping_process_interval
+                  << ", online=" << IsOnlineMapping();
         SetParamOverride(overrides, "isOnlineMapping", IsOnlineMapping());
         SetParamOverride(overrides, "maxOptimizationIterations",
                          params["maxOptimizationIterations"]
@@ -195,6 +218,7 @@ void LioSamMapping::ProcessIMU(const IMUPtr& input) {
 }
 
 void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
+    ++diagnostic_cloud_inputs_;
     const double timestamp = math::ToSec(cloud->header.stamp);
 
     CloudPtr frontend_cloud(new PointCloudType());
@@ -223,8 +247,8 @@ void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
         frontend_cloud->push_back(point);
     }
 
-    static int lio_sam_time_log_count = 0;
-    if (!cloud->empty() && (++lio_sam_time_log_count <= 10 || lio_sam_time_log_count % 100 == 0)) {
+    if (!cloud->empty() &&
+        (++diagnostic_time_log_count_ <= 10 || diagnostic_time_log_count_ % 100 == 0)) {
         LOG(INFO) << "[LIO_SAM_TIME] preprocess_time_ms_min=" << min_source_time_ms
                   << " preprocess_time_ms_max=" << max_source_time_ms
                   << " final_time_sec_max=" << max_point_time
@@ -278,7 +302,7 @@ bool LioSamMapping::SyncPackages() {
 
         measures_.lidar_end_time = lidar_end_time_;
         lidar_pushed_ = true;
-        lo::lidar_time_interval = scan_duration;
+        last_scan_duration_ = scan_duration;
     }
 
     if (last_timestamp_imu_ < lidar_end_time_) {
@@ -340,6 +364,7 @@ bool LioSamMapping::Run() {
     if (!SyncPackages()) {
         return false;
     }
+    ++diagnostic_synced_packages_;
 
     LioSamCloudInfo& cloud_info = *frontend_cloud_info_;
     if (!deskew_feature_extractor_->Run(
@@ -367,6 +392,22 @@ bool LioSamMapping::Run() {
     if (!map_optimization_->Run(cloud_info)) {
         return false;
     }
+    if (!map_optimization_->LastRunExecuted()) {
+        ++diagnostic_map_optimization_skipped_;
+        if (diagnostic_map_optimization_skipped_ <= 10 ||
+            diagnostic_map_optimization_skipped_ % 100 == 0) {
+            LOG(WARNING) << "[前端跳帧诊断][LioSamMapping] 本帧未产生新位姿，不更新状态和UI"
+                         << ", this=" << this
+                         << ", mapOptimization=" << map_optimization_.get()
+                         << ", lidar_stamp=" << std::setprecision(14)
+                         << measures_.lidar_begin_time
+                         << ", synced_packages=" << diagnostic_synced_packages_
+                         << ", map_opt_executed=" << diagnostic_map_optimization_executed_
+                         << ", map_opt_skipped=" << diagnostic_map_optimization_skipped_;
+        }
+        return false;
+    }
+    ++diagnostic_map_optimization_executed_;
 
     const float* transform = map_optimization_->TransformTobeMapped();
     state_.timestamp_ = measures_.lidar_end_time;

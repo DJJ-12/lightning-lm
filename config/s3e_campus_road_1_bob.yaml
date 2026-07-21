@@ -1,28 +1,33 @@
-﻿# Leishen CX16 mapping/localization config.
-# Expected PointCloud2 fields: x y z intensity ring time.
-# The point time field is per-frame relative time in seconds.
+# S3E Campus_Road_1 - Bob mapping/localization config.
+# Dataset platform: S3Ev1.0, Velodyne VLP-16 + Xsens IMU.
+# PointCloud2 fields: x y z intensity ring time; IMU rate: 100 Hz; LiDAR rate: 10 Hz.
+# base_link is assumed coincident with the IMU frame.
+# extrinsicBaseLidar* is T_base_lidar = T_imu_lidar, i.e. p_base = R * p_lidar + t.
 
 common:
-  lidar_topic: "/cx/cloud"
+  lidar_topic: "/Bob/velodyne_points"
   livox_lidar_topic: "/livox/lidar_192_168_1_3"
-  imu_topic: "/imu_data"
-  base_link_frame: "laser_link"
+  imu_topic: "/Bob/imu/data"
+  base_link_frame: "base_link"
 
   # Shared lidar adapter / range-image geometry.
-  # 2 = Velodyne-style XYZIRT path used by the existing CX16 input.
+  # 2 = Velodyne-style XYZIRT path.
+  # VLP-16 uses 16 scan lines; LIO-SAM convention uses 1800 horizontal bins.
   lidar_type: 2
   N_SCAN: 16
-  Horizon_SCAN: 512
+  Horizon_SCAN: 1800
   lidarMinRange: 1.0
   lidarMaxRange: 1000.0
   point_filter_num: 1
   time_scale: 1
 
-  # Shared IMU prediction noise, using LIO-SAM names.
-  imuAccNoise: 0.1
-  imuGyrNoise: 0.1
-  imuAccBiasN: 0.0001
-  imuGyrBiasN: 0.0001
+  # Bob IMU noise parameters from S3Ev1/Calibration/bob.yaml.
+  # Mapping: NoiseAcc -> imuAccNoise, NoiseGyro -> imuGyrNoise,
+  #          AccWalk -> imuAccBiasN, GyroWalk -> imuGyrBiasN.
+  imuAccNoise: 1.0557715622632996e-02
+  imuGyrNoise: 1.0084886221461694e-02
+  imuAccBiasN: 2.3084619195565281e-04
+  imuGyrBiasN: 9.8778648600726277e-05
 
   # Shared keyframe insertion thresholds. Angle unit: rad.
   surroundingkeyframeAddingDistThreshold: 1.0
@@ -30,11 +35,13 @@ common:
   surroundingKeyframeDensity: 2.0
   surroundingKeyframeSearchRadius: 50.0
 
-  # Keep the CX16 diagnostic config aligned with the native LIO-SAM input frame.
-  extrinsicBaseLidarTrans: [0.0, 0.0, 0.2]
-  extrinsicBaseLidarRot: [1.0, 0.0, 0.0,
-                          0.0, 1.0, 0.0,
-                          0.0, 0.0, 1.0]
+  # Bob LiDAR-to-IMU/base extrinsic derived from the official calibration:
+  # T_imu_lidar = T_imu_camera * inverse(T_lidar_camera).
+  # Translation is the LiDAR origin expressed in the IMU/base frame.
+  extrinsicBaseLidarTrans: [0.013931101421, -0.046448576743, 0.090321586435]
+  extrinsicBaseLidarRot: [ 0.999836003512,  0.017380188739, -0.005089103557,
+                           -0.017434631710,  0.999789063154, -0.010856022117,
+                            0.004899351171,  0.010942961843,  0.999928116809]
 
 fasterlio:
   skip_lidar_num: 0
@@ -120,5 +127,7 @@ localization:
     excellent_iteration_threshold: 20
 
 mapping:
+  # Bag and topic inputs share this non-dropping queue. When full, producers wait.
+  input_queue_capacity: 4096
   block_map_resolution: 20
   block_map_voxel_size: 0.1

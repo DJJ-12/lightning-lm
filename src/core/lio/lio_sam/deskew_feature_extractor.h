@@ -13,6 +13,7 @@ class DeskewFeatureExtractor : public ParamServer
 {
 public:
     explicit DeskewFeatureExtractor(const rclcpp::NodeOptions& options);
+    ~DeskewFeatureExtractor();
     bool Run(const PointCloudType::Ptr& inputCloud,
              const std::vector<sensor_msgs::msg::Imu>& imuWindow,
              double lidarBeginTime,

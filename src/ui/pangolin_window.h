@@ -1,9 +1,12 @@
 #pragma once
 
+#include <atomic>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <queue>
-#include <atomic>
+#include <thread>
+
 #include "common/eigen_types.h"
 #include "common/keyframe.h"
 #include "common/nav_state.h"
@@ -49,7 +52,7 @@ class PangolinWindow {
 
     void UpdateKF(std::shared_ptr<Keyframe> kf);
 
-    /// 等待显示线程结束，并释放资源
+    /// 等待显示线程结束，并在显示线程持有OpenGL上下文时释放全部UI资源
     void Quit();
 
     /// 用户是否已经退出UI
@@ -62,7 +65,11 @@ class PangolinWindow {
     void SetCurrentScanSize(int current_scan_size);
 
    private:
-    std::shared_ptr<PangolinWindowImpl> impl_ = nullptr;
+    // 渲染线程是 PangolinWindowImpl 的唯一强所有者。
+    // 外部更新接口只保存弱引用，保证 Impl 最终一定在渲染线程中析构。
+    std::weak_ptr<PangolinWindowImpl> impl_;
+    std::thread render_thread_;
+    std::mutex lifecycle_mutex_;
     std::atomic_bool closed_{false};
 };
 }  // namespace lightning::ui

@@ -117,6 +117,13 @@ class LioSamMapping {
     int kf_id_ = 0;
     size_t map_keyframe_count_ = 0;
 
+    std::uint64_t diagnostic_cloud_inputs_ = 0;
+    std::uint64_t diagnostic_synced_packages_ = 0;
+    std::uint64_t diagnostic_map_optimization_executed_ = 0;
+    std::uint64_t diagnostic_map_optimization_skipped_ = 0;
+    std::uint64_t diagnostic_time_log_count_ = 0;
+    double last_scan_duration_ = 0.1;
+
     std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
 };
 
