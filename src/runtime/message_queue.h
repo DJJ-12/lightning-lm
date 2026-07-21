@@ -88,6 +88,31 @@ class MessageQueue {
         return queue_.size();
     }
 
+    template <typename Predicate, typename RemovedCallback>
+    std::size_t KeepLastIf(std::size_t max_keep, Predicate pred, RemovedCallback on_removed) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::size_t matched = 0;
+        for (const auto& item : queue_) {
+            if (pred(item)) {
+                ++matched;
+            }
+        }
+
+        std::size_t removed = 0;
+        auto iter = queue_.begin();
+        while (matched > max_keep && iter != queue_.end()) {
+            if (pred(*iter)) {
+                on_removed(*iter);
+                iter = queue_.erase(iter);
+                --matched;
+                ++removed;
+            } else {
+                ++iter;
+            }
+        }
+        return removed;
+    }
+
     template <typename Predicate>
     std::size_t RemoveIf(Predicate pred) {
         std::lock_guard<std::mutex> lock(mutex_);

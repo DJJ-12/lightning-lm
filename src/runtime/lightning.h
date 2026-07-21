@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -90,6 +91,9 @@ class Lightning {
                     const TopicInput::LidarReceiveInfo& receive_info);
     void PushMappingMessage(InputMessage message);
     void PushLocalizationMessage(InputMessage message);
+    static bool IsLidarMessage(const InputMessage& input);
+    static std::size_t EstimateInputMessageBytes(const InputMessage& input);
+    std::size_t LimitMappingQueuedLidar();
 
     void StartOnlineMappingWorkerLocked();
     void StopOnlineMappingWorkerLocked(bool drain);
@@ -132,6 +136,7 @@ class Lightning {
     std::atomic<std::uint64_t> mapping_lidar_enqueued_{0};
     std::atomic<std::uint64_t> mapping_lidar_dropped_{0};
     std::atomic<std::uint64_t> mapping_queue_bytes_{0};
+    std::atomic<std::uint64_t> mapping_lidar_overflow_dropped_{0};
     std::atomic<std::uint64_t> localization_lidar_received_{0};
     std::atomic<std::uint64_t> localization_lidar_enqueued_{0};
     std::atomic<std::uint64_t> localization_lidar_dropped_{0};

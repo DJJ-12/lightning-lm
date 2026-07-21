@@ -12,6 +12,8 @@
 namespace lightning::runtime {
 namespace {
 
+constexpr std::size_t kMaxQueuedMappingLidarFrames = 10;
+
 double RuntimeSteadySeconds() {
     return std::chrono::duration<double>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -175,8 +177,10 @@ void Lightning::RouteImu(const sensor_msgs::msg::Imu::SharedPtr& imu) {
     if (online_route_.load(std::memory_order_acquire) != OnlineRoute::MAPPING) {
         return;
     }
+    const double now = RuntimeSteadySeconds();
     InputMessage input;
     input.sequence = ++online_sequence_;
+    input.receive_steady_sec = now;
     input.type = InputType::IMU;
     input.imu = imu;
     PushMappingMessage(std::move(input));
@@ -228,17 +232,55 @@ void Lightning::RouteLivox(const livox_ros_driver2::msg::CustomMsg::SharedPtr& c
     }
 }
 
-void Lightning::PushMappingMessage(InputMessage message) {
-    const bool is_lidar = message.type != InputType::IMU;
-    const std::uint64_t lidar_sequence = message.lidar_sequence;
+bool Lightning::IsLidarMessage(const InputMessage& input) {
+    return input.type == InputType::POINT_CLOUD2 || input.type == InputType::LIVOX;
+}
+
+std::size_t Lightning::EstimateInputMessageBytes(const InputMessage& input) {
     std::size_t message_bytes = sizeof(InputMessage);
-    if (message.cloud) {
-        message_bytes += message.cloud->data.size();
-    } else if (message.livox) {
-        message_bytes += message.livox->points.size() * sizeof(message.livox->points[0]);
-    } else if (message.imu) {
-        message_bytes += sizeof(*message.imu);
+    if (input.cloud) {
+        message_bytes += input.cloud->data.size();
+    } else if (input.livox) {
+        message_bytes += input.livox->points.size() * sizeof(input.livox->points[0]);
+    } else if (input.imu) {
+        message_bytes += sizeof(*input.imu);
     }
+    return message_bytes;
+}
+
+std::size_t Lightning::LimitMappingQueuedLidar() {
+    std::uint64_t removed_bytes = 0;
+    const std::size_t removed = mapping_queue_.KeepLastIf(
+        kMaxQueuedMappingLidarFrames,
+        [](const InputMessage& input) { return Lightning::IsLidarMessage(input); },
+        [&removed_bytes](const InputMessage& input) {
+            removed_bytes += Lightning::EstimateInputMessageBytes(input);
+        });
+    if (removed == 0) {
+        return 0;
+    }
+
+    SubtractAtomicBytes(mapping_queue_bytes_, removed_bytes);
+    const std::uint64_t dropped =
+        mapping_lidar_dropped_.fetch_add(removed) + removed;
+    const std::uint64_t overflow_dropped =
+        mapping_lidar_overflow_dropped_.fetch_add(removed) + removed;
+    LOG(WARNING) << "[在线建图队列] 雷达点云缓存超过"
+                 << kMaxQueuedMappingLidarFrames
+                 << "帧，丢弃最旧雷达帧"
+                 << ", removed=" << removed
+                 << ", lidar_dropped=" << dropped
+                 << ", overflow_dropped=" << overflow_dropped
+                 << ", queue_depth=" << mapping_queue_.Size()
+                 << ", estimated_queue_memory_mb="
+                 << mapping_queue_bytes_.load() / 1024.0 / 1024.0;
+    return removed;
+}
+
+void Lightning::PushMappingMessage(InputMessage message) {
+    const bool is_lidar = IsLidarMessage(message);
+    const std::uint64_t lidar_sequence = message.lidar_sequence;
+    const std::size_t message_bytes = EstimateInputMessageBytes(message);
     std::size_t depth = 0;
     if (!mapping_queue_.Push(std::move(message), &depth)) {
         if (is_lidar) {
@@ -248,13 +290,15 @@ void Lightning::PushMappingMessage(InputMessage message) {
         }
         return;
     }
-    const std::uint64_t queue_bytes = mapping_queue_bytes_.fetch_add(message_bytes) + message_bytes;
+    mapping_queue_bytes_.fetch_add(message_bytes);
     if (is_lidar) {
         ++mapping_lidar_enqueued_;
+        LimitMappingQueuedLidar();
     }
     if (depth == 10 || depth == 50 || depth % 100 == 0) {
-        LOG(WARNING) << "[在线建图队列] 当前积压=" << depth
-                     << ", estimated_memory_mb=" << queue_bytes / 1024.0 / 1024.0;
+        LOG(WARNING) << "[在线建图队列] 当前积压=" << mapping_queue_.Size()
+                     << ", estimated_memory_mb="
+                     << mapping_queue_bytes_.load() / 1024.0 / 1024.0;
     }
 }
 
@@ -287,6 +331,7 @@ void Lightning::StartOnlineMappingWorkerLocked() {
     mapping_lidar_enqueued_ = 0;
     mapping_lidar_dropped_ = 0;
     mapping_queue_bytes_ = 0;
+    mapping_lidar_overflow_dropped_ = 0;
     mapping_queue_.Open();
     mapping_worker_ = std::thread([this]() { OnlineMappingWorkerLoop(); });
     online_route_.store(OnlineRoute::MAPPING, std::memory_order_release);
@@ -324,14 +369,7 @@ void Lightning::OnlineMappingWorkerLoop() {
     double max_process_ms = 0.0;
     InputMessage input;
     while (mapping_queue_.WaitPop(&input) == QueuePopResult::MESSAGE) {
-        std::size_t message_bytes = sizeof(InputMessage);
-        if (input.cloud) {
-            message_bytes += input.cloud->data.size();
-        } else if (input.livox) {
-            message_bytes += input.livox->points.size() * sizeof(input.livox->points[0]);
-        } else if (input.imu) {
-            message_bytes += sizeof(*input.imu);
-        }
+        const std::size_t message_bytes = EstimateInputMessageBytes(input);
         SubtractAtomicBytes(mapping_queue_bytes_, message_bytes);
 
         const double process_begin = RuntimeSteadySeconds();
@@ -344,10 +382,12 @@ void Lightning::OnlineMappingWorkerLoop() {
         if (input.lidar_sequence != 0) {
             if (last_lidar_sequence != 0 && input.lidar_sequence != last_lidar_sequence + 1) {
                 ++sequence_gap_count;
-                LOG(ERROR) << "[数据链路诊断][在线建图] FIFO雷达序号不连续"
-                           << ", previous=" << last_lidar_sequence
-                           << ", current=" << input.lidar_sequence
-                           << ", header_stamp=" << input.header_stamp;
+                LOG(WARNING) << "[数据链路诊断][在线建图] 雷达序号不连续"
+                             << ", previous=" << last_lidar_sequence
+                             << ", current=" << input.lidar_sequence
+                             << ", header_stamp=" << input.header_stamp
+                             << ", lidar_overflow_dropped="
+                             << mapping_lidar_overflow_dropped_.load();
             }
             last_lidar_sequence = input.lidar_sequence;
         }
@@ -397,6 +437,7 @@ void Lightning::OnlineMappingWorkerLoop() {
               << ", imu_processed=" << imu_processed
               << ", total_processed=" << processed
               << ", lidar_dropped=" << mapping_lidar_dropped_.load()
+              << ", lidar_overflow_dropped=" << mapping_lidar_overflow_dropped_.load()
               << ", sequence_gap_count=" << sequence_gap_count
               << ", max_queue_wait_ms=" << max_queue_wait_ms
               << ", max_process_ms=" << max_process_ms
