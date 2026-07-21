@@ -20,16 +20,6 @@ double RuntimeSteadySeconds() {
         .count();
 }
 
-void SubtractAtomicBytes(std::atomic<std::uint64_t>& value, std::uint64_t bytes) {
-    std::uint64_t current = value.load();
-    while (current > 0) {
-        const std::uint64_t next = current > bytes ? current - bytes : 0;
-        if (value.compare_exchange_weak(current, next)) {
-            return;
-        }
-    }
-}
-
 }  // namespace
 
 Lightning::~Lightning() {
@@ -181,6 +171,7 @@ void Lightning::RouteImu(const sensor_msgs::msg::Imu::SharedPtr& imu) {
     InputMessage input;
     input.sequence = ++online_sequence_;
     input.receive_steady_sec = now;
+    input.header_stamp = rclcpp::Time(imu->header.stamp).seconds();
     input.type = InputType::IMU;
     input.imu = imu;
     PushMappingMessage(std::move(input));
@@ -236,51 +227,43 @@ bool Lightning::IsLidarMessage(const InputMessage& input) {
     return input.type == InputType::POINT_CLOUD2 || input.type == InputType::LIVOX;
 }
 
-std::size_t Lightning::EstimateInputMessageBytes(const InputMessage& input) {
-    std::size_t message_bytes = sizeof(InputMessage);
-    if (input.cloud) {
-        message_bytes += input.cloud->data.size();
-    } else if (input.livox) {
-        message_bytes += input.livox->points.size() * sizeof(input.livox->points[0]);
-    } else if (input.imu) {
-        message_bytes += sizeof(*input.imu);
-    }
-    return message_bytes;
-}
-
 std::size_t Lightning::LimitMappingQueuedLidar() {
-    std::uint64_t removed_bytes = 0;
+    double last_removed_lidar_stamp = 0.0;
     const std::size_t removed = mapping_queue_.KeepLastIf(
         kMaxQueuedMappingLidarFrames,
         [](const InputMessage& input) { return Lightning::IsLidarMessage(input); },
-        [&removed_bytes](const InputMessage& input) {
-            removed_bytes += Lightning::EstimateInputMessageBytes(input);
+        [&last_removed_lidar_stamp](const InputMessage& input) {
+            last_removed_lidar_stamp = std::max(last_removed_lidar_stamp, input.header_stamp);
         });
     if (removed == 0) {
         return 0;
     }
 
-    SubtractAtomicBytes(mapping_queue_bytes_, removed_bytes);
+    const std::size_t removed_imu = mapping_queue_.RemoveIf(
+        [last_removed_lidar_stamp](const InputMessage& input) {
+            return input.type == InputType::IMU &&
+                   input.header_stamp > 0.0 &&
+                   input.header_stamp <= last_removed_lidar_stamp;
+        });
     const std::uint64_t dropped =
         mapping_lidar_dropped_.fetch_add(removed) + removed;
     const std::uint64_t overflow_dropped =
         mapping_lidar_overflow_dropped_.fetch_add(removed) + removed;
     LOG(WARNING) << "[在线建图队列] 雷达点云缓存超过"
                  << kMaxQueuedMappingLidarFrames
-                 << "帧，丢弃最旧雷达帧"
-                 << ", removed=" << removed
+                 << "帧，丢弃最旧雷达帧及其之前的IMU"
+                 << ", removed_lidar=" << removed
+                 << ", removed_imu=" << removed_imu
+                 << ", cutoff_stamp=" << std::setprecision(15) << last_removed_lidar_stamp
                  << ", lidar_dropped=" << dropped
                  << ", overflow_dropped=" << overflow_dropped
-                 << ", queue_depth=" << mapping_queue_.Size()
-                 << ", estimated_queue_memory_mb="
-                 << mapping_queue_bytes_.load() / 1024.0 / 1024.0;
+                 << ", queue_depth=" << mapping_queue_.Size();
     return removed;
 }
 
 void Lightning::PushMappingMessage(InputMessage message) {
     const bool is_lidar = IsLidarMessage(message);
     const std::uint64_t lidar_sequence = message.lidar_sequence;
-    const std::size_t message_bytes = EstimateInputMessageBytes(message);
     std::size_t depth = 0;
     if (!mapping_queue_.Push(std::move(message), &depth)) {
         if (is_lidar) {
@@ -290,15 +273,12 @@ void Lightning::PushMappingMessage(InputMessage message) {
         }
         return;
     }
-    mapping_queue_bytes_.fetch_add(message_bytes);
     if (is_lidar) {
         ++mapping_lidar_enqueued_;
         LimitMappingQueuedLidar();
     }
     if (depth == 10 || depth == 50 || depth % 100 == 0) {
-        LOG(WARNING) << "[在线建图队列] 当前积压=" << mapping_queue_.Size()
-                     << ", estimated_memory_mb="
-                     << mapping_queue_bytes_.load() / 1024.0 / 1024.0;
+        LOG(WARNING) << "[在线建图队列] 当前积压=" << mapping_queue_.Size();
     }
 }
 
@@ -330,7 +310,6 @@ void Lightning::StartOnlineMappingWorkerLocked() {
     mapping_lidar_received_ = 0;
     mapping_lidar_enqueued_ = 0;
     mapping_lidar_dropped_ = 0;
-    mapping_queue_bytes_ = 0;
     mapping_lidar_overflow_dropped_ = 0;
     mapping_queue_.Open();
     mapping_worker_ = std::thread([this]() { OnlineMappingWorkerLoop(); });
@@ -350,12 +329,10 @@ void Lightning::StopOnlineMappingWorkerLocked(bool drain) {
     }
     const std::size_t pending = mapping_queue_.Close(drain);
     LOG(INFO) << "[在线建图] 关闭FIFO，drain=" << drain
-              << ", pending=" << pending
-              << ", estimated_memory_mb=" << mapping_queue_bytes_.load() / 1024.0 / 1024.0;
+              << ", pending=" << pending;
     if (mapping_worker_.joinable()) {
         mapping_worker_.join();
     }
-    mapping_queue_bytes_ = 0;
 }
 
 void Lightning::OnlineMappingWorkerLoop() {
@@ -369,9 +346,6 @@ void Lightning::OnlineMappingWorkerLoop() {
     double max_process_ms = 0.0;
     InputMessage input;
     while (mapping_queue_.WaitPop(&input) == QueuePopResult::MESSAGE) {
-        const std::size_t message_bytes = EstimateInputMessageBytes(input);
-        SubtractAtomicBytes(mapping_queue_bytes_, message_bytes);
-
         const double process_begin = RuntimeSteadySeconds();
         const double queue_wait_ms = input.receive_steady_sec > 0.0
             ? (process_begin - input.receive_steady_sec) * 1000.0
@@ -406,9 +380,7 @@ void Lightning::OnlineMappingWorkerLoop() {
             if (lidar_processed % 100 == 0) {
                 LOG(INFO) << "[在线建图线程] 雷达点云累计处理=" << lidar_processed
                           << ", 当前FIFO总处理=" << processed
-                          << ", queue_depth=" << mapping_queue_.Size()
-                          << ", estimated_queue_memory_mb="
-                          << mapping_queue_bytes_.load() / 1024.0 / 1024.0;
+                          << ", queue_depth=" << mapping_queue_.Size();
             }
             if (queue_wait_ms > 200.0 || process_ms > 200.0) {
                 LOG(WARNING) << "[数据链路诊断][在线建图] 延迟异常"
@@ -416,18 +388,14 @@ void Lightning::OnlineMappingWorkerLoop() {
                              << ", header_stamp=" << input.header_stamp
                              << ", queue_wait_ms=" << queue_wait_ms
                              << ", process_ms=" << process_ms
-                             << ", queue_depth=" << mapping_queue_.Size()
-                             << ", estimated_queue_memory_mb="
-                             << mapping_queue_bytes_.load() / 1024.0 / 1024.0;
+                             << ", queue_depth=" << mapping_queue_.Size();
             }
         }
         if (processed % 1000 == 0) {
             LOG(INFO) << "[在线建图线程] FIFO累计处理(含IMU和雷达)=" << processed
                       << ", 其中IMU=" << imu_processed
                       << ", 雷达=" << lidar_processed
-                      << ", queue_depth=" << mapping_queue_.Size()
-                      << ", estimated_queue_memory_mb="
-                      << mapping_queue_bytes_.load() / 1024.0 / 1024.0;
+                      << ", queue_depth=" << mapping_queue_.Size();
         }
     }
     LOG(INFO) << "[数据链路诊断][在线建图] 工作线程退出汇总"
@@ -440,8 +408,7 @@ void Lightning::OnlineMappingWorkerLoop() {
               << ", lidar_overflow_dropped=" << mapping_lidar_overflow_dropped_.load()
               << ", sequence_gap_count=" << sequence_gap_count
               << ", max_queue_wait_ms=" << max_queue_wait_ms
-              << ", max_process_ms=" << max_process_ms
-              << ", estimated_queue_memory_mb=" << mapping_queue_bytes_.load() / 1024.0 / 1024.0;
+              << ", max_process_ms=" << max_process_ms;
     LOG(INFO) << "[在线建图线程] 退出，累计处理=" << processed;
 }
 
