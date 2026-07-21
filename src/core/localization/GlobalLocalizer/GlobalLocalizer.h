@@ -61,6 +61,7 @@ private:
     MapManager::MapLoader map_loader_;
     QualityThresholds quality_thresholds_;  // 定位质量评估阈值
 
+    void ResetNdt();
     pclomp::NdtResult AlignPose(const Eigen::Matrix4d &initial_pose_with_cov);
 
     Eigen::Matrix4d last_last_pose_ = Eigen::Matrix4d::Identity();
@@ -95,7 +96,7 @@ public:
         map_loader_.Initialize(pcd_metadata_path_, pcd_directory_);
     }
 
-    void MapReset() {map_loader_.reset();}
+    void MapReset();
 };
 }
 

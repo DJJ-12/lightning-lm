@@ -46,11 +46,13 @@ class TopicInput {
                LivoxCallback livox_cb);
     void Shutdown();
     bool Running() const { return running_.load(); }
+    void SetEnabled(bool enabled) { input_enabled_.store(enabled); }
 
    private:
     void Spin();
 
     std::atomic_bool running_{false};
+    std::atomic_bool input_enabled_{false};
     std::atomic<std::uint64_t> imu_received_{0};
     std::atomic<std::uint64_t> cloud_received_{0};
     std::atomic<std::uint64_t> livox_received_{0};

@@ -82,6 +82,9 @@ void Lightning::Shutdown() {
 
     std::lock_guard<std::mutex> lock(control_mutex_);
     LOG(INFO) << "[程序退出] [01] 停止在线消息路由";
+    if (topic_input_) {
+        topic_input_->SetEnabled(false);
+    }
     online_route_ = OnlineRoute::NONE;
     task_.RequestCancel();
 
@@ -128,17 +131,18 @@ ServiceResult Lightning::SetMode(const std::string& mode_text) {
         return {false, "unknown mode: " + mode_text};
     }
 
-    if (new_mode != mode_) {
-        online_route_ = OnlineRoute::NONE;
-        StopAllOnlineWorkersLocked(false);
-        JoinOfflineThreadLocked();
-        ClearMappingSystemLocked();
-        ClearLocalizationSystemLocked();
-        mapping_save_path_.clear();
-        localization_map_path_.clear();
-        offline_bag_path_.clear();
-        mode_ = new_mode;
+    online_route_ = OnlineRoute::NONE;
+    StopAllOnlineWorkersLocked(false);
+    JoinOfflineThreadLocked();
+    if (mapping_system_) {
+        mapping_system_->Stop();
     }
+    ClearMappingSystemLocked();
+    ClearLocalizationSystemLocked();
+    mapping_save_path_.clear();
+    localization_map_path_.clear();
+    offline_bag_path_.clear();
+    mode_ = new_mode;
 
     task_.Reset(TaskState::IDLE, ModeToString(mode_) + " mode selected");
     return {true, "mode set to " + ModeToString(mode_)};
@@ -237,15 +241,24 @@ void Lightning::PushMappingMessage(InputMessage message) {
 void Lightning::PushLocalizationMessage(InputMessage message) {
     const std::uint64_t lidar_sequence = message.lidar_sequence;
     std::size_t depth = 0;
-    if (!localization_queue_.Push(std::move(message), &depth)) {
+    std::size_t replaced = 0;
+    if (!localization_queue_.PushLatest(std::move(message), &depth, &replaced)) {
         ++localization_lidar_dropped_;
         LOG(ERROR) << "[数据链路诊断][在线定位] FIFO已经关闭，消息未入队"
                    << ", lidar_sequence=" << lidar_sequence;
         return;
     }
     ++localization_lidar_enqueued_;
-    if (depth == 10 || depth == 50 || depth % 100 == 0) {
-        LOG(WARNING) << "[在线定位队列] 当前积压=" << depth;
+    if (replaced > 0) {
+        const std::uint64_t dropped =
+            localization_lidar_dropped_.fetch_add(replaced) + replaced;
+        if (dropped <= 20 || dropped % 100 == 0) {
+            LOG(INFO) << "[在线定位队列] 实时模式丢弃旧帧"
+                      << ", replaced=" << replaced
+                      << ", dropped_total=" << dropped
+                      << ", latest_lidar_sequence=" << lidar_sequence
+                      << ", depth=" << depth;
+        }
     }
 }
 
@@ -256,10 +269,16 @@ void Lightning::StartOnlineMappingWorkerLocked() {
     mapping_queue_.Open();
     mapping_worker_ = std::thread([this]() { OnlineMappingWorkerLoop(); });
     online_route_.store(OnlineRoute::MAPPING, std::memory_order_release);
+    if (topic_input_) {
+        topic_input_->SetEnabled(true);
+    }
     LOG(INFO) << "[在线建图] Topic路由已经打开，FIFO工作线程已经启动";
 }
 
 void Lightning::StopOnlineMappingWorkerLocked(bool drain) {
+    if (online_route_.load() == OnlineRoute::MAPPING && topic_input_) {
+        topic_input_->SetEnabled(false);
+    }
     if (online_route_.load() == OnlineRoute::MAPPING) {
         online_route_ = OnlineRoute::NONE;
     }
@@ -348,10 +367,16 @@ void Lightning::StartOnlineLocalizationWorkerLocked() {
     localization_queue_.Open();
     localization_worker_ = std::thread([this]() { OnlineLocalizationWorkerLoop(); });
     online_route_.store(OnlineRoute::LOCALIZATION, std::memory_order_release);
+    if (topic_input_) {
+        topic_input_->SetEnabled(true);
+    }
     LOG(INFO) << "[在线定位] Topic路由已经打开，FIFO工作线程已经启动";
 }
 
 void Lightning::StopOnlineLocalizationWorkerLocked(bool drain) {
+    if (online_route_.load() == OnlineRoute::LOCALIZATION && topic_input_) {
+        topic_input_->SetEnabled(false);
+    }
     if (online_route_.load() == OnlineRoute::LOCALIZATION) {
         online_route_ = OnlineRoute::NONE;
     }
@@ -406,11 +431,11 @@ void Lightning::OnlineLocalizationWorkerLoop() {
 
         if (last_lidar_sequence != 0 && input.lidar_sequence != last_lidar_sequence + 1) {
             ++sequence_gap_count;
-            LOG(ERROR) << "[在线定位输入诊断][Worker] FIFO任务序号不连续"
-                       << ", previous=" << last_lidar_sequence
-                       << ", current=" << input.lidar_sequence
-                       << ", topic_sequence=" << input.topic_lidar_sequence
-                       << ", header_stamp=" << std::setprecision(15) << input.header_stamp;
+            LOG(INFO) << "[在线定位输入诊断][Worker] 实时模式跳过旧帧"
+                      << ", previous=" << last_lidar_sequence
+                      << ", current=" << input.lidar_sequence
+                      << ", topic_sequence=" << input.topic_lidar_sequence
+                      << ", header_stamp=" << std::setprecision(15) << input.header_stamp;
         }
         last_lidar_sequence = input.lidar_sequence;
 
@@ -474,15 +499,27 @@ void Lightning::OnlineLocalizationWorkerLoop() {
         }
 
         const loc::LocalizationFrameOutcome outcome = ProcessLocalizationInput(input);
+        const double process_end = RuntimeSteadySeconds();
         if (outcome == loc::LocalizationFrameOutcome::NDT_EXECUTED) {
             ++ndt_executed;
         } else if (outcome == loc::LocalizationFrameOutcome::INITIALIZED_WITH_FRAME) {
             ++initialized_frames;
+            const std::size_t removed = localization_queue_.RemoveIf(
+                [process_end](const InputMessage& pending) {
+                    return pending.receive_steady_sec <= process_end;
+                });
+            if (removed > 0) {
+                const std::uint64_t dropped =
+                    localization_lidar_dropped_.fetch_add(removed) + removed;
+                LOG(INFO) << "[在线定位队列] 初始化完成，丢弃初始化期间缓存的旧帧"
+                          << ", removed=" << removed
+                          << ", dropped_total=" << dropped;
+            }
         } else {
             ++frames_not_sent_to_ndt;
         }
 
-        const double process_ms = (RuntimeSteadySeconds() - process_begin) * 1000.0;
+        const double process_ms = (process_end - process_begin) * 1000.0;
         max_process_ms = std::max(max_process_ms, process_ms);
         ++processed;
         if (processed <= 20 || processed % 100 == 0 ||
@@ -568,6 +605,9 @@ void Lightning::HandleLocalizationTimeout() {
 }
 
 void Lightning::StopAllOnlineWorkersLocked(bool drain) {
+    if (topic_input_) {
+        topic_input_->SetEnabled(false);
+    }
     online_route_ = OnlineRoute::NONE;
     StopOnlineMappingWorkerLocked(drain);
     StopOnlineLocalizationWorkerLocked(drain);

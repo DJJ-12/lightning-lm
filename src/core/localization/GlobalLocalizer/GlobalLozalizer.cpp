@@ -135,6 +135,12 @@ pclomp::NdtResult Localizer::AlignPose(const Eigen::Matrix4d &initial_pose_with_
 
 Localizer::Localizer()
 {
+    ResetNdt();
+    LOG(INFO) << "Localizer initialized";
+}
+
+void Localizer::ResetNdt()
+{
     ndt_ptr_ = std::make_shared<NormalDistributionsTransform>();
     pclomp::NdtParams ndt{};
     ndt.num_threads = 20;
@@ -152,7 +158,13 @@ Localizer::Localizer()
     ndt_rough.max_iterations = 30;
     ndt_rough.resolution = 5.0;
     ndt_rough_ptr_->setParams(ndt_rough);
-    LOG(INFO) << "Localizer initialized";
+}
+
+void Localizer::MapReset()
+{
+    map_loader_.reset();
+    ResetNdt();
+    ResetLocalizationState();
 }
 
 bool Localizer::GetInitPose(

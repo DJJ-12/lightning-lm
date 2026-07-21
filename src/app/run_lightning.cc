@@ -32,8 +32,8 @@ void InstallCrashSignalHandlers() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    LOG(INFO) << "=================build version : 2026-0720-dedicated-input=================";
     google::InitGoogleLogging(argv[0]);
+    LOG(INFO) << "=================build version : 2026-0720-dedicated-input=================";
     InstallCrashSignalHandlers();
     FLAGS_alsologtostderr = true;
     gflags::ParseCommandLineFlags(&argc, &argv, true);

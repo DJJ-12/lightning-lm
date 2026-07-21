@@ -141,9 +141,9 @@ bool LocalizationSystem::SetInitialGuess(const SE3& init_pose, bool* initialized
     const bool ok = loc_->SetExternalPose(q, t);
     has_initial_guess_ = true;
     if (initialized_now) {
-        *initialized_now = ok;
+        *initialized_now = false;
     }
-    return true;
+    return ok;
 }
 
 loc::LocalizationFrameOutcome LocalizationSystem::ProcessCloud(

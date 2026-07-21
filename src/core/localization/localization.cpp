@@ -256,6 +256,7 @@ LocalizationFrameOutcome Localization::ProcessLidarMsg(
     Mat4f T_base_lidar_matrix_f;
     std::string base_link_frame;
     double arrival_dt = 0.0;
+
     {
         UL lock(global_mutex_);
         map_loaded = map_loaded_;
@@ -292,7 +293,7 @@ LocalizationFrameOutcome Localization::ProcessLidarMsg(
     frame.diagnostic = diagnostic;
     if (!frame.cloud || frame.cloud->empty()) {
         ++diagnostic_empty_after_convert_;
-        LOG(ERROR) << "[在线定位输入诊断][Localization] PointCloud2转换后为空"
+        LOG(ERROR) << "[Localization] PointCloud2 convert produced empty cloud"
                    << ", sequence=" << diagnostic.pipeline_sequence
                    << ", message_points=" << frame.message_points;
         return LocalizationFrameOutcome::EMPTY_AFTER_CONVERT;
@@ -356,7 +357,7 @@ LocalizationFrameOutcome Localization::ProcessLivoxLidarMsg(
     frame.diagnostic = diagnostic;
     if (!frame.cloud || frame.cloud->empty()) {
         ++diagnostic_empty_after_convert_;
-        LOG(ERROR) << "[在线定位输入诊断][Localization] Livox转换后为空"
+        LOG(ERROR) << "[Localization] Livox convert produced empty cloud"
                    << ", sequence=" << diagnostic.pipeline_sequence
                    << ", message_points=" << frame.message_points;
         return LocalizationFrameOutcome::EMPTY_AFTER_CONVERT;
@@ -407,7 +408,7 @@ LocalizationFrameOutcome Localization::HandleCloudFrame(const LocCloudFrame& fra
             if (initialized_now) {
                 ++diagnostic_initialized_frames_;
                 LOG(INFO) << std::setprecision(15)
-                          << "[在线定位输入诊断][Initialization] 当前帧完成全局初始化"
+                          << "[Localization][Initialization] current frame initialized"
                           << ", sequence=" << frame.diagnostic.pipeline_sequence
                           << ", topic_sequence=" << frame.diagnostic.topic_sequence
                           << ", header_stamp=" << frame.timestamp
@@ -446,7 +447,7 @@ LocalizationFrameOutcome Localization::ProcessLocalizationCloud(const LocCloudFr
 
     if (!current_cloud || current_cloud->empty()) {
         ++diagnostic_empty_after_voxel_;
-        LOG(ERROR) << "[在线定位输入诊断][Localization] 体素滤波后为空"
+        LOG(ERROR) << "[Localization] voxel filter produced empty cloud"
                    << ", sequence=" << frame.diagnostic.pipeline_sequence
                    << ", input_points=" << frame.cloud->size();
         return LocalizationFrameOutcome::EMPTY_AFTER_VOXEL;
@@ -521,7 +522,7 @@ LocalizationFrameOutcome Localization::ProcessLocalizationCloud(const LocCloudFr
         frame.diagnostic.pipeline_sequence % 20 == 0 ||
         header_dt <= 0.0 || translation_jump > 1.0 || std::abs(yaw_jump) > 0.35) {
         LOG(INFO) << std::setprecision(15)
-                  << "[在线定位输入诊断][NDT链路] 一帧完整结果"
+                  << "[Localization][NDT] frame result"
                   << ", sequence=" << frame.diagnostic.pipeline_sequence
                   << ", topic_sequence=" << frame.diagnostic.topic_sequence
                   << ", online=" << frame.diagnostic.online
@@ -633,7 +634,7 @@ bool Localization::TryInitializeWithCurrentCloud() {
 }
 
 void Localization::Finish() {
-    LOG(INFO) << "[定位析构诊断][Localization::Finish][01] 开始"
+    LOG(INFO) << "[Localization::Finish] begin"
               << ", this=" << this
               << ", thread_id=" << std::this_thread::get_id()
               << ", ui=" << ui_.get()
@@ -654,10 +655,15 @@ void Localization::Finish() {
     if (ui_) {
         LOG(INFO) << "[定位析构诊断][Localization::Finish][02] 调用 PangolinWindow::Quit";
         ui_->Quit();
-        LOG(INFO) << "[定位析构诊断][Localization::Finish][03] PangolinWindow::Quit 已返回";
+        LOG(INFO) << "[Localization::Finish] UI quit returned";
         LOG(INFO) << "[定位析构诊断][Localization::Finish][04] 准备 reset PangolinWindow";
         ui_.reset();
         LOG(INFO) << "[定位析构诊断][Localization::Finish][05] PangolinWindow 已 reset";
+    }
+
+    {
+        std::lock_guard<std::mutex> loc_lock(localizer_mutex_);
+        localizer_.MapReset();
     }
 
     {
@@ -686,6 +692,13 @@ bool Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
     init_guess.block<3, 1>(0, 3) = t;
 
     {
+        std::lock_guard<std::mutex> cloud_lock(current_cloud_mutex_);
+        latest_cloud_.reset();
+        latest_cloud_timestamp_ = 0.0;
+        latest_cloud_diagnostic_ = LocalizationInputDiagnostic();
+    }
+
+    {
         std::lock_guard<std::mutex> loc_lock(localizer_mutex_);
         {
             UL lock(global_mutex_);
@@ -712,7 +725,7 @@ bool Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
     LOG(INFO) << "[SET_LOCATION] accepted new initial pose x=" << init_guess(0, 3)
               << ", y=" << init_guess(1, 3)
               << ", z=" << init_guess(2, 3);
-    return TryInitializeWithCurrentCloud();
+    return true;
 }
 
 void Localization::PublishResult(const LocalizationResult& result) {

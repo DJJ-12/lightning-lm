@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -39,6 +40,23 @@ class MessageQueue {
         return true;
     }
 
+    bool PushLatest(T value, std::size_t* depth = nullptr, std::size_t* replaced = nullptr) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!open_) {
+            return false;
+        }
+        if (replaced) {
+            *replaced = queue_.size();
+        }
+        queue_.clear();
+        queue_.push_back(std::move(value));
+        if (depth) {
+            *depth = queue_.size();
+        }
+        cv_.notify_one();
+        return true;
+    }
+
     QueuePopResult WaitPop(T* value) {
         std::unique_lock<std::mutex> lock(mutex_);
         cv_.wait(lock, [this]() { return !queue_.empty() || !open_; });
@@ -68,6 +86,14 @@ class MessageQueue {
     std::size_t Size() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return queue_.size();
+    }
+
+    template <typename Predicate>
+    std::size_t RemoveIf(Predicate pred) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const std::size_t before = queue_.size();
+        queue_.erase(std::remove_if(queue_.begin(), queue_.end(), pred), queue_.end());
+        return before - queue_.size();
     }
 
    private:

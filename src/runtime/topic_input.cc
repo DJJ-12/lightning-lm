@@ -37,6 +37,7 @@ bool TopicInput::Start(const std::string& yaml_path,
         LOG(ERROR) << "[Topic接收] 配置文件路径为空";
         return false;
     }
+    input_enabled_.store(false);
 
     YAML::Node yaml = YAML::LoadFile(yaml_path);
     if (!yaml["common"]) {
@@ -68,6 +69,9 @@ bool TopicInput::Start(const std::string& yaml_path,
         imu_sub_ = node_->create_subscription<sensor_msgs::msg::Imu>(
             imu_topic, qos,
             [this](sensor_msgs::msg::Imu::SharedPtr msg) {
+                if (!input_enabled_.load()) {
+                    return;
+                }
                 ++imu_received_;
                 try {
                     imu_cb_(msg);
@@ -83,6 +87,9 @@ bool TopicInput::Start(const std::string& yaml_path,
         cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
             cloud_topic, qos,
             [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+                if (!input_enabled_.load()) {
+                    return;
+                }
                 const double callback_begin = TopicSteadySeconds();
                 const std::uint64_t count = ++cloud_received_;
                 LidarReceiveInfo info;
@@ -154,6 +161,9 @@ bool TopicInput::Start(const std::string& yaml_path,
         livox_sub_ = node_->create_subscription<livox_ros_driver2::msg::CustomMsg>(
             livox_topic, qos,
             [this](livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
+                if (!input_enabled_.load()) {
+                    return;
+                }
                 const double callback_begin = TopicSteadySeconds();
                 const std::uint64_t count = ++livox_received_;
                 LidarReceiveInfo info;
@@ -239,6 +249,7 @@ void TopicInput::Spin() {
 }
 
 void TopicInput::Shutdown() {
+    input_enabled_.store(false);
     const bool was_running = running_.exchange(false);
     if (!was_running && !thread_.joinable() && !node_) {
         return;
