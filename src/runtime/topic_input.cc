@@ -57,17 +57,18 @@ bool TopicInput::Start(const std::string& yaml_path,
 
     node_ = std::make_shared<rclcpp::Node>("lightning_topic_input");
 
-    // 回调只负责入队。测试已经证明 BestEffort 回放大点云会大量丢帧，
-    // 因此 TopicInput 对 IMU 和两路雷达统一请求 KeepAll + Reliable + Volatile。
-    // 发布端必须同时提供 Reliable QoS，否则 ROS 2 QoS 不兼容，订阅不会收到消息。
-    rclcpp::QoS qos{rclcpp::KeepAll()};
-    qos.reliable();
-    //qos.best_effort();
-    qos.durability_volatile();
+    // 回调只负责入队。点云继续使用 Reliable；IMU 兼容常见传感器 BestEffort 发布。
+    rclcpp::QoS cloud_qos{rclcpp::KeepAll()};
+    cloud_qos.reliable();
+    cloud_qos.durability_volatile();
+
+    rclcpp::QoS imu_qos{rclcpp::KeepAll()};
+    imu_qos.best_effort();
+    imu_qos.durability_volatile();
 
     if (imu_cb_) {
         imu_sub_ = node_->create_subscription<sensor_msgs::msg::Imu>(
-            imu_topic, qos,
+            imu_topic, imu_qos,
             [this](sensor_msgs::msg::Imu::SharedPtr msg) {
                 if (!input_enabled_.load()) {
                     return;
@@ -85,7 +86,7 @@ bool TopicInput::Start(const std::string& yaml_path,
 
     if (cloud_cb_) {
         cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
-            cloud_topic, qos,
+            cloud_topic, cloud_qos,
             [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
                 if (!input_enabled_.load()) {
                     return;
@@ -159,7 +160,7 @@ bool TopicInput::Start(const std::string& yaml_path,
 
     if (livox_cb_) {
         livox_sub_ = node_->create_subscription<livox_ros_driver2::msg::CustomMsg>(
-            livox_topic, qos,
+            livox_topic, cloud_qos,
             [this](livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
                 if (!input_enabled_.load()) {
                     return;
@@ -237,8 +238,8 @@ bool TopicInput::Start(const std::string& yaml_path,
               << ", cloud=" << cloud_topic
               << ", livox=" << livox_topic
               << ", imu=" << imu_topic
-              << ", qos=KEEP_ALL+RELIABLE+VOLATILE"
-              << ", publisher_requirement=RELIABLE";
+              << ", cloud_qos=KEEP_ALL+RELIABLE+VOLATILE"
+              << ", imu_qos=KEEP_ALL+BEST_EFFORT+VOLATILE";
     return true;
 }
 

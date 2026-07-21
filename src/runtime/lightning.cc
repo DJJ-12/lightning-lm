@@ -18,6 +18,16 @@ double RuntimeSteadySeconds() {
         .count();
 }
 
+void SubtractAtomicBytes(std::atomic<std::uint64_t>& value, std::uint64_t bytes) {
+    std::uint64_t current = value.load();
+    while (current > 0) {
+        const std::uint64_t next = current > bytes ? current - bytes : 0;
+        if (value.compare_exchange_weak(current, next)) {
+            return;
+        }
+    }
+}
+
 }  // namespace
 
 Lightning::~Lightning() {
@@ -221,6 +231,14 @@ void Lightning::RouteLivox(const livox_ros_driver2::msg::CustomMsg::SharedPtr& c
 void Lightning::PushMappingMessage(InputMessage message) {
     const bool is_lidar = message.type != InputType::IMU;
     const std::uint64_t lidar_sequence = message.lidar_sequence;
+    std::size_t message_bytes = sizeof(InputMessage);
+    if (message.cloud) {
+        message_bytes += message.cloud->data.size();
+    } else if (message.livox) {
+        message_bytes += message.livox->points.size() * sizeof(message.livox->points[0]);
+    } else if (message.imu) {
+        message_bytes += sizeof(*message.imu);
+    }
     std::size_t depth = 0;
     if (!mapping_queue_.Push(std::move(message), &depth)) {
         if (is_lidar) {
@@ -230,11 +248,13 @@ void Lightning::PushMappingMessage(InputMessage message) {
         }
         return;
     }
+    const std::uint64_t queue_bytes = mapping_queue_bytes_.fetch_add(message_bytes) + message_bytes;
     if (is_lidar) {
         ++mapping_lidar_enqueued_;
     }
     if (depth == 10 || depth == 50 || depth % 100 == 0) {
-        LOG(WARNING) << "[在线建图队列] 当前积压=" << depth;
+        LOG(WARNING) << "[在线建图队列] 当前积压=" << depth
+                     << ", estimated_memory_mb=" << queue_bytes / 1024.0 / 1024.0;
     }
 }
 
@@ -266,6 +286,7 @@ void Lightning::StartOnlineMappingWorkerLocked() {
     mapping_lidar_received_ = 0;
     mapping_lidar_enqueued_ = 0;
     mapping_lidar_dropped_ = 0;
+    mapping_queue_bytes_ = 0;
     mapping_queue_.Open();
     mapping_worker_ = std::thread([this]() { OnlineMappingWorkerLoop(); });
     online_route_.store(OnlineRoute::MAPPING, std::memory_order_release);
@@ -283,10 +304,13 @@ void Lightning::StopOnlineMappingWorkerLocked(bool drain) {
         online_route_ = OnlineRoute::NONE;
     }
     const std::size_t pending = mapping_queue_.Close(drain);
-    LOG(INFO) << "[在线建图] 关闭FIFO，drain=" << drain << ", pending=" << pending;
+    LOG(INFO) << "[在线建图] 关闭FIFO，drain=" << drain
+              << ", pending=" << pending
+              << ", estimated_memory_mb=" << mapping_queue_bytes_.load() / 1024.0 / 1024.0;
     if (mapping_worker_.joinable()) {
         mapping_worker_.join();
     }
+    mapping_queue_bytes_ = 0;
 }
 
 void Lightning::OnlineMappingWorkerLoop() {
@@ -300,6 +324,16 @@ void Lightning::OnlineMappingWorkerLoop() {
     double max_process_ms = 0.0;
     InputMessage input;
     while (mapping_queue_.WaitPop(&input) == QueuePopResult::MESSAGE) {
+        std::size_t message_bytes = sizeof(InputMessage);
+        if (input.cloud) {
+            message_bytes += input.cloud->data.size();
+        } else if (input.livox) {
+            message_bytes += input.livox->points.size() * sizeof(input.livox->points[0]);
+        } else if (input.imu) {
+            message_bytes += sizeof(*input.imu);
+        }
+        SubtractAtomicBytes(mapping_queue_bytes_, message_bytes);
+
         const double process_begin = RuntimeSteadySeconds();
         const double queue_wait_ms = input.receive_steady_sec > 0.0
             ? (process_begin - input.receive_steady_sec) * 1000.0
@@ -331,20 +365,29 @@ void Lightning::OnlineMappingWorkerLoop() {
             ++lidar_processed;
             if (lidar_processed % 100 == 0) {
                 LOG(INFO) << "[在线建图线程] 雷达点云累计处理=" << lidar_processed
-                          << ", 当前FIFO总处理=" << processed;
+                          << ", 当前FIFO总处理=" << processed
+                          << ", queue_depth=" << mapping_queue_.Size()
+                          << ", estimated_queue_memory_mb="
+                          << mapping_queue_bytes_.load() / 1024.0 / 1024.0;
             }
             if (queue_wait_ms > 200.0 || process_ms > 200.0) {
                 LOG(WARNING) << "[数据链路诊断][在线建图] 延迟异常"
                              << ", lidar_sequence=" << input.lidar_sequence
                              << ", header_stamp=" << input.header_stamp
                              << ", queue_wait_ms=" << queue_wait_ms
-                             << ", process_ms=" << process_ms;
+                             << ", process_ms=" << process_ms
+                             << ", queue_depth=" << mapping_queue_.Size()
+                             << ", estimated_queue_memory_mb="
+                             << mapping_queue_bytes_.load() / 1024.0 / 1024.0;
             }
         }
         if (processed % 1000 == 0) {
             LOG(INFO) << "[在线建图线程] FIFO累计处理(含IMU和雷达)=" << processed
                       << ", 其中IMU=" << imu_processed
-                      << ", 雷达=" << lidar_processed;
+                      << ", 雷达=" << lidar_processed
+                      << ", queue_depth=" << mapping_queue_.Size()
+                      << ", estimated_queue_memory_mb="
+                      << mapping_queue_bytes_.load() / 1024.0 / 1024.0;
         }
     }
     LOG(INFO) << "[数据链路诊断][在线建图] 工作线程退出汇总"
@@ -356,7 +399,8 @@ void Lightning::OnlineMappingWorkerLoop() {
               << ", lidar_dropped=" << mapping_lidar_dropped_.load()
               << ", sequence_gap_count=" << sequence_gap_count
               << ", max_queue_wait_ms=" << max_queue_wait_ms
-              << ", max_process_ms=" << max_process_ms;
+              << ", max_process_ms=" << max_process_ms
+              << ", estimated_queue_memory_mb=" << mapping_queue_bytes_.load() / 1024.0 / 1024.0;
     LOG(INFO) << "[在线建图线程] 退出，累计处理=" << processed;
 }
 
