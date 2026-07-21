@@ -92,7 +92,6 @@ class Lightning {
     void PushMappingMessage(InputMessage message);
     void PushLocalizationMessage(InputMessage message);
     static bool IsLidarMessage(const InputMessage& input);
-    std::size_t LimitMappingQueuedLidar();
 
     void StartOnlineMappingWorkerLocked();
     void StopOnlineMappingWorkerLocked(bool drain);

@@ -57,6 +57,55 @@ class MessageQueue {
         return true;
     }
 
+    template <typename LimitedPredicate, typename RemovedCallback, typename CleanupPredicate>
+    bool PushWithLimit(T value,
+                       std::size_t max_limited,
+                       LimitedPredicate limited_pred,
+                       RemovedCallback on_removed,
+                       CleanupPredicate cleanup_pred,
+                       std::size_t* depth = nullptr) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!open_) {
+            return false;
+        }
+
+        if (max_limited > 0 && limited_pred(value)) {
+            std::size_t limited_count = 0;
+            for (const auto& item : queue_) {
+                if (limited_pred(item)) {
+                    ++limited_count;
+                }
+            }
+
+            auto iter = queue_.begin();
+            while (limited_count >= max_limited && iter != queue_.end()) {
+                if (limited_pred(*iter)) {
+                    on_removed(*iter);
+                    iter = queue_.erase(iter);
+                    --limited_count;
+                } else {
+                    ++iter;
+                }
+            }
+
+            iter = queue_.begin();
+            while (iter != queue_.end()) {
+                if (cleanup_pred(*iter)) {
+                    iter = queue_.erase(iter);
+                } else {
+                    ++iter;
+                }
+            }
+        }
+
+        queue_.push_back(std::move(value));
+        if (depth) {
+            *depth = queue_.size();
+        }
+        cv_.notify_one();
+        return true;
+    }
+
     QueuePopResult WaitPop(T* value) {
         std::unique_lock<std::mutex> lock(mutex_);
         cv_.wait(lock, [this]() { return !queue_.empty() || !open_; });
@@ -86,31 +135,6 @@ class MessageQueue {
     std::size_t Size() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return queue_.size();
-    }
-
-    template <typename Predicate, typename RemovedCallback>
-    std::size_t KeepLastIf(std::size_t max_keep, Predicate pred, RemovedCallback on_removed) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        std::size_t matched = 0;
-        for (const auto& item : queue_) {
-            if (pred(item)) {
-                ++matched;
-            }
-        }
-
-        std::size_t removed = 0;
-        auto iter = queue_.begin();
-        while (matched > max_keep && iter != queue_.end()) {
-            if (pred(*iter)) {
-                on_removed(*iter);
-                iter = queue_.erase(iter);
-                --matched;
-                ++removed;
-            } else {
-                ++iter;
-            }
-        }
-        return removed;
     }
 
     template <typename Predicate>

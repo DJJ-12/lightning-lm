@@ -227,45 +227,37 @@ bool Lightning::IsLidarMessage(const InputMessage& input) {
     return input.type == InputType::POINT_CLOUD2 || input.type == InputType::LIVOX;
 }
 
-std::size_t Lightning::LimitMappingQueuedLidar() {
-    double last_removed_lidar_stamp = 0.0;
-    const std::size_t removed = mapping_queue_.KeepLastIf(
-        kMaxQueuedMappingLidarFrames,
-        [](const InputMessage& input) { return Lightning::IsLidarMessage(input); },
-        [&last_removed_lidar_stamp](const InputMessage& input) {
-            last_removed_lidar_stamp = std::max(last_removed_lidar_stamp, input.header_stamp);
-        });
-    if (removed == 0) {
-        return 0;
-    }
-
-    const std::size_t removed_imu = mapping_queue_.RemoveIf(
-        [last_removed_lidar_stamp](const InputMessage& input) {
-            return input.type == InputType::IMU &&
-                   input.header_stamp > 0.0 &&
-                   input.header_stamp <= last_removed_lidar_stamp;
-        });
-    const std::uint64_t dropped =
-        mapping_lidar_dropped_.fetch_add(removed) + removed;
-    const std::uint64_t overflow_dropped =
-        mapping_lidar_overflow_dropped_.fetch_add(removed) + removed;
-    LOG(WARNING) << "[在线建图队列] 雷达点云缓存超过"
-                 << kMaxQueuedMappingLidarFrames
-                 << "帧，丢弃最旧雷达帧及其之前的IMU"
-                 << ", removed_lidar=" << removed
-                 << ", removed_imu=" << removed_imu
-                 << ", cutoff_stamp=" << std::setprecision(15) << last_removed_lidar_stamp
-                 << ", lidar_dropped=" << dropped
-                 << ", overflow_dropped=" << overflow_dropped
-                 << ", queue_depth=" << mapping_queue_.Size();
-    return removed;
-}
-
 void Lightning::PushMappingMessage(InputMessage message) {
     const bool is_lidar = IsLidarMessage(message);
     const std::uint64_t lidar_sequence = message.lidar_sequence;
     std::size_t depth = 0;
-    if (!mapping_queue_.Push(std::move(message), &depth)) {
+    std::size_t removed_lidar = 0;
+    std::size_t removed_imu = 0;
+    double removed_lidar_stamp = 0.0;
+    bool pushed = false;
+    if (is_lidar) {
+        pushed = mapping_queue_.PushWithLimit(
+            std::move(message),
+            kMaxQueuedMappingLidarFrames,
+            [](const InputMessage& input) { return Lightning::IsLidarMessage(input); },
+            [&removed_lidar, &removed_lidar_stamp](const InputMessage& input) {
+                ++removed_lidar;
+                removed_lidar_stamp = std::max(removed_lidar_stamp, input.header_stamp);
+            },
+            [&removed_imu, &removed_lidar_stamp](const InputMessage& input) {
+                const bool remove = input.type == InputType::IMU &&
+                                    input.header_stamp > 0.0 &&
+                                    input.header_stamp <= removed_lidar_stamp;
+                if (remove) {
+                    ++removed_imu;
+                }
+                return remove;
+            },
+            &depth);
+    } else {
+        pushed = mapping_queue_.Push(std::move(message), &depth);
+    }
+    if (!pushed) {
         if (is_lidar) {
             ++mapping_lidar_dropped_;
             LOG(ERROR) << "[数据链路诊断][在线建图] FIFO已经关闭，消息未入队"
@@ -275,7 +267,20 @@ void Lightning::PushMappingMessage(InputMessage message) {
     }
     if (is_lidar) {
         ++mapping_lidar_enqueued_;
-        LimitMappingQueuedLidar();
+        if (removed_lidar > 0) {
+            const std::uint64_t dropped =
+                mapping_lidar_dropped_.fetch_add(removed_lidar) + removed_lidar;
+            const std::uint64_t overflow_dropped =
+                mapping_lidar_overflow_dropped_.fetch_add(removed_lidar) + removed_lidar;
+            LOG(WARNING) << "[在线建图队列] 雷达队列已满，顶掉最旧雷达帧及其之前的IMU"
+                         << ", max_lidar_frames=" << kMaxQueuedMappingLidarFrames
+                         << ", removed_lidar=" << removed_lidar
+                         << ", removed_imu=" << removed_imu
+                         << ", cutoff_stamp=" << std::setprecision(15) << removed_lidar_stamp
+                         << ", lidar_dropped=" << dropped
+                         << ", overflow_dropped=" << overflow_dropped
+                         << ", queue_depth=" << depth;
+        }
     }
     if (depth == 10 || depth == 50 || depth % 100 == 0) {
         LOG(WARNING) << "[在线建图队列] 当前积压=" << mapping_queue_.Size();
@@ -326,7 +331,7 @@ void Lightning::StopOnlineMappingWorkerLocked(bool drain) {
     }
     if (online_route_.load() == OnlineRoute::MAPPING) {
         online_route_ = OnlineRoute::NONE;
-    }
+    } 
     const std::size_t pending = mapping_queue_.Close(drain);
     LOG(INFO) << "[在线建图] 关闭FIFO，drain=" << drain
               << ", pending=" << pending;
