@@ -96,7 +96,7 @@ lio_sam:
 
   # CPU params
   numberOfCores: 4
-  mappingProcessInterval: 0.0
+  mappingProcessInterval: 0.15
   maxOptimizationIterations: 30
   onlineMaxOptimizationIterations: 10
   onlineLimitOptimizationPoints: true

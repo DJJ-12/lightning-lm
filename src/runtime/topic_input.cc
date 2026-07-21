@@ -56,9 +56,12 @@ bool TopicInput::Start(const std::string& yaml_path,
 
     node_ = std::make_shared<rclcpp::Node>("lightning_topic_input");
 
-    // 使用 KeepAll，应用层回调只入队；可靠性保持 BestEffort，以兼容常见雷达和 rosbag 发布端。
+    // 回调只负责入队。测试已经证明 BestEffort 回放大点云会大量丢帧，
+    // 因此 TopicInput 对 IMU 和两路雷达统一请求 KeepAll + Reliable + Volatile。
+    // 发布端必须同时提供 Reliable QoS，否则 ROS 2 QoS 不兼容，订阅不会收到消息。
     rclcpp::QoS qos{rclcpp::KeepAll()};
-    qos.best_effort();
+    qos.reliable();
+    //qos.best_effort();
     qos.durability_volatile();
 
     if (imu_cb_) {
@@ -223,7 +226,9 @@ bool TopicInput::Start(const std::string& yaml_path,
     LOG(INFO) << "[Topic接收] 独立节点和独立线程已启动"
               << ", cloud=" << cloud_topic
               << ", livox=" << livox_topic
-              << ", imu=" << imu_topic;
+              << ", imu=" << imu_topic
+              << ", qos=KEEP_ALL+RELIABLE+VOLATILE"
+              << ", publisher_requirement=RELIABLE";
     return true;
 }
 
