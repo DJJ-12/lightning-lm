@@ -1,6 +1,7 @@
 #ifndef FASTER_LIO_POINTCLOUD_PROCESSING_H
 #define FASTER_LIO_POINTCLOUD_PROCESSING_H
 
+#include <cstdint>
 #include <string>
 
 #include <pcl_conversions/pcl_conversions.h>
@@ -64,6 +65,8 @@ class PointCloudPreprocess {
     double blind_ = 0.01;
     float time_scale_ = 1e-3;
     bool given_offset_time_ = false;
+    std::uint64_t diagnostic_velodyne_frames_ = 0;
+    double diagnostic_last_velodyne_header_stamp_ = 0.0;
 
     float height_max_ = 1.0;
     float height_min_ = -1.0;

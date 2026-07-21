@@ -146,18 +146,34 @@ bool LocalizationSystem::SetInitialGuess(const SE3& init_pose, bool* initialized
     return true;
 }
 
-void LocalizationSystem::ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
+loc::LocalizationFrameOutcome LocalizationSystem::ProcessCloud(
+    const sensor_msgs::msg::PointCloud2::SharedPtr& cloud,
+    const loc::LocalizationInputDiagnostic& diagnostic) {
+    ++diagnostic_process_calls_;
     if (!loc_ || !map_ready_) {
-        return;
+        ++diagnostic_system_not_ready_;
+        LOG(ERROR) << "[在线定位输入诊断][LocalizationSystem] 消息未送入Localization"
+                   << ", sequence=" << diagnostic.pipeline_sequence
+                   << ", loc=" << loc_.get()
+                   << ", map_ready=" << map_ready_;
+        return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
     }
-    loc_->ProcessLidarMsg(cloud);
+    return loc_->ProcessLidarMsg(cloud, diagnostic);
 }
 
-void LocalizationSystem::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
+loc::LocalizationFrameOutcome LocalizationSystem::ProcessCloud(
+    const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud,
+    const loc::LocalizationInputDiagnostic& diagnostic) {
+    ++diagnostic_process_calls_;
     if (!loc_ || !map_ready_) {
-        return;
+        ++diagnostic_system_not_ready_;
+        LOG(ERROR) << "[在线定位输入诊断][LocalizationSystem] Livox消息未送入Localization"
+                   << ", sequence=" << diagnostic.pipeline_sequence
+                   << ", loc=" << loc_.get()
+                   << ", map_ready=" << map_ready_;
+        return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
     }
-    loc_->ProcessLivoxLidarMsg(cloud);
+    return loc_->ProcessLivoxLidarMsg(cloud, diagnostic);
 }
 
 void LocalizationSystem::MarkPoor(const std::string& message) {
@@ -175,7 +191,9 @@ loc::LocalizationResult LocalizationSystem::GetLatestResult() const {
 
 void LocalizationSystem::Reset() {
     LOG(INFO) << "[定位析构诊断][LocalizationSystem::Reset][01] 开始"
-              << ", this=" << this << ", loc=" << loc_.get();
+              << ", this=" << this << ", loc=" << loc_.get()
+              << ", diagnostic_process_calls=" << diagnostic_process_calls_
+              << ", diagnostic_system_not_ready=" << diagnostic_system_not_ready_;
     if (loc_) {
         LOG(INFO) << "[定位析构诊断][LocalizationSystem::Reset][02] 调用 Localization::Finish";
         loc_->Finish();
@@ -191,6 +209,8 @@ void LocalizationSystem::Reset() {
     map_ready_ = false;
     has_initial_guess_ = false;
     map_path_.clear();
+    diagnostic_process_calls_ = 0;
+    diagnostic_system_not_ready_ = 0;
     LOG(INFO) << "[定位析构诊断][LocalizationSystem::Reset][06] 完成";
 }
 

@@ -1,6 +1,8 @@
 #include "runtime/lightning.h"
 
+#include <algorithm>
 #include <chrono>
+#include <iomanip>
 #include <utility>
 
 #include <glog/logging.h>
@@ -56,8 +58,14 @@ bool Lightning::Init(rclcpp::Node::SharedPtr node, const std::string& yaml_path)
     if (!topic_input_->Start(
             yaml_path_,
             [this](const sensor_msgs::msg::Imu::SharedPtr& imu) { RouteImu(imu); },
-            [this](const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) { RouteCloud(cloud); },
-            [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) { RouteLivox(cloud); })) {
+            [this](const sensor_msgs::msg::PointCloud2::SharedPtr& cloud,
+                   const TopicInput::LidarReceiveInfo& receive_info) {
+                RouteCloud(cloud, receive_info);
+            },
+            [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud,
+                   const TopicInput::LidarReceiveInfo& receive_info) {
+                RouteLivox(cloud, receive_info);
+            })) {
         topic_input_.reset();
         return false;
     }
@@ -160,7 +168,8 @@ void Lightning::RouteImu(const sensor_msgs::msg::Imu::SharedPtr& imu) {
     PushMappingMessage(std::move(input));
 }
 
-void Lightning::RouteCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
+void Lightning::RouteCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud,
+                           const TopicInput::LidarReceiveInfo& receive_info) {
     const OnlineRoute route = online_route_.load(std::memory_order_acquire);
     if (route == OnlineRoute::NONE) {
         return;
@@ -168,8 +177,9 @@ void Lightning::RouteCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud
 
     InputMessage input;
     input.sequence = ++online_sequence_;
-    input.receive_steady_sec = RuntimeSteadySeconds();
-    input.header_stamp = rclcpp::Time(cloud->header.stamp).seconds();
+    input.topic_lidar_sequence = receive_info.topic_sequence;
+    input.receive_steady_sec = receive_info.receive_steady_sec;
+    input.header_stamp = receive_info.header_stamp;
     input.type = InputType::POINT_CLOUD2;
     input.cloud = cloud;
     if (route == OnlineRoute::MAPPING) {
@@ -181,7 +191,8 @@ void Lightning::RouteCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud
     }
 }
 
-void Lightning::RouteLivox(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
+void Lightning::RouteLivox(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud,
+                           const TopicInput::LidarReceiveInfo& receive_info) {
     const OnlineRoute route = online_route_.load(std::memory_order_acquire);
     if (route == OnlineRoute::NONE) {
         return;
@@ -189,8 +200,9 @@ void Lightning::RouteLivox(const livox_ros_driver2::msg::CustomMsg::SharedPtr& c
 
     InputMessage input;
     input.sequence = ++online_sequence_;
-    input.receive_steady_sec = RuntimeSteadySeconds();
-    input.header_stamp = rclcpp::Time(cloud->header.stamp).seconds();
+    input.topic_lidar_sequence = receive_info.topic_sequence;
+    input.receive_steady_sec = receive_info.receive_steady_sec;
+    input.header_stamp = receive_info.header_stamp;
     input.type = InputType::LIVOX;
     input.livox = cloud;
     if (route == OnlineRoute::MAPPING) {
@@ -353,11 +365,22 @@ void Lightning::StopOnlineLocalizationWorkerLocked(bool drain) {
 void Lightning::OnlineLocalizationWorkerLoop() {
     LOG(INFO) << "[在线定位线程] 开始 thread_id=" << std::this_thread::get_id();
     std::uint64_t processed = 0;
+    std::uint64_t pointcloud2_processed = 0;
+    std::uint64_t livox_processed = 0;
+    std::uint64_t ndt_executed = 0;
+    std::uint64_t initialized_frames = 0;
+    std::uint64_t frames_not_sent_to_ndt = 0;
     std::uint64_t last_lidar_sequence = 0;
     std::uint64_t sequence_gap_count = 0;
+    std::uint64_t non_monotonic_header_count = 0;
+    std::uint64_t source_large_header_gap_count = 0;
+    double last_header_stamp = 0.0;
+    double last_pointcloud2_stamp = 0.0;
+    double last_livox_stamp = 0.0;
     double max_queue_wait_ms = 0.0;
     double max_process_ms = 0.0;
     bool timeout_reported = false;
+    bool mixed_source_reported = false;
     InputMessage input;
     const auto timeout = std::chrono::duration<double>(localization_cloud_timeout_sec_);
 
@@ -379,41 +402,114 @@ void Lightning::OnlineLocalizationWorkerLoop() {
         const double queue_wait_ms = input.receive_steady_sec > 0.0
             ? (process_begin - input.receive_steady_sec) * 1000.0
             : 0.0;
-        if (queue_wait_ms > max_queue_wait_ms) {
-            max_queue_wait_ms = queue_wait_ms;
-        }
+        max_queue_wait_ms = std::max(max_queue_wait_ms, queue_wait_ms);
+
         if (last_lidar_sequence != 0 && input.lidar_sequence != last_lidar_sequence + 1) {
             ++sequence_gap_count;
-            LOG(ERROR) << "[数据链路诊断][在线定位] FIFO雷达序号不连续"
+            LOG(ERROR) << "[在线定位输入诊断][Worker] FIFO任务序号不连续"
                        << ", previous=" << last_lidar_sequence
                        << ", current=" << input.lidar_sequence
-                       << ", header_stamp=" << input.header_stamp;
+                       << ", topic_sequence=" << input.topic_lidar_sequence
+                       << ", header_stamp=" << std::setprecision(15) << input.header_stamp;
         }
         last_lidar_sequence = input.lidar_sequence;
 
-        ProcessLocalizationInput(input);
+        const double merged_header_dt = last_header_stamp == 0.0
+            ? 0.0 : input.header_stamp - last_header_stamp;
+        if (last_header_stamp != 0.0 && merged_header_dt <= 0.0) {
+            ++non_monotonic_header_count;
+            LOG(ERROR) << std::setprecision(15)
+                       << "[在线定位输入诊断][Worker] 合并后的雷达时间戳不递增"
+                       << ", task_sequence=" << input.lidar_sequence
+                       << ", topic_sequence=" << input.topic_lidar_sequence
+                       << ", previous_stamp=" << last_header_stamp
+                       << ", current_stamp=" << input.header_stamp
+                       << ", header_dt=" << merged_header_dt
+                       << ", source="
+                       << (input.type == InputType::POINT_CLOUD2 ? "PointCloud2" : "Livox");
+        }
+        last_header_stamp = input.header_stamp;
+
+        double source_header_dt = 0.0;
+        if (input.type == InputType::POINT_CLOUD2) {
+            ++pointcloud2_processed;
+            source_header_dt = last_pointcloud2_stamp == 0.0
+                ? 0.0 : input.header_stamp - last_pointcloud2_stamp;
+            last_pointcloud2_stamp = input.header_stamp;
+        } else {
+            ++livox_processed;
+            source_header_dt = last_livox_stamp == 0.0
+                ? 0.0 : input.header_stamp - last_livox_stamp;
+            last_livox_stamp = input.header_stamp;
+        }
+        if (source_header_dt > 0.15) {
+            ++source_large_header_gap_count;
+            LOG(WARNING) << std::setprecision(15)
+                         << "[在线定位输入诊断][Worker] FIFO中相邻同源点云时间间隔过大"
+                         << ", task_sequence=" << input.lidar_sequence
+                         << ", topic_sequence=" << input.topic_lidar_sequence
+                         << ", source="
+                         << (input.type == InputType::POINT_CLOUD2 ? "PointCloud2" : "Livox")
+                         << ", source_header_dt=" << source_header_dt;
+        }
+        if (!mixed_source_reported && pointcloud2_processed > 0 && livox_processed > 0) {
+            mixed_source_reported = true;
+            LOG(ERROR) << "[在线定位输入诊断][Worker] 同一定位任务同时收到PointCloud2和Livox"
+                       << ", PointCloud2=" << pointcloud2_processed
+                       << ", Livox=" << livox_processed
+                       << "; 两路雷达消息会被合并进同一个NDT序列，请检查是否重复发布同一雷达";
+        }
+
+        if (processed < 20 || (processed + 1) % 100 == 0) {
+            LOG(INFO) << std::setprecision(15)
+                      << "[在线定位输入诊断][Worker] 准备送入LocalizationSystem"
+                      << ", task_sequence=" << input.lidar_sequence
+                      << ", topic_sequence=" << input.topic_lidar_sequence
+                      << ", source="
+                      << (input.type == InputType::POINT_CLOUD2 ? "PointCloud2" : "Livox")
+                      << ", header_stamp=" << input.header_stamp
+                      << ", merged_header_dt=" << merged_header_dt
+                      << ", source_header_dt=" << source_header_dt
+                      << ", queue_wait_ms=" << queue_wait_ms;
+        }
+
+        const loc::LocalizationFrameOutcome outcome = ProcessLocalizationInput(input);
+        if (outcome == loc::LocalizationFrameOutcome::NDT_EXECUTED) {
+            ++ndt_executed;
+        } else if (outcome == loc::LocalizationFrameOutcome::INITIALIZED_WITH_FRAME) {
+            ++initialized_frames;
+        } else {
+            ++frames_not_sent_to_ndt;
+        }
+
         const double process_ms = (RuntimeSteadySeconds() - process_begin) * 1000.0;
-        if (process_ms > max_process_ms) {
-            max_process_ms = process_ms;
-        }
+        max_process_ms = std::max(max_process_ms, process_ms);
         ++processed;
-        if (queue_wait_ms > 200.0 || process_ms > 200.0) {
-            LOG(WARNING) << "[数据链路诊断][在线定位] 延迟异常"
-                         << ", lidar_sequence=" << input.lidar_sequence
-                         << ", header_stamp=" << input.header_stamp
-                         << ", queue_wait_ms=" << queue_wait_ms
-                         << ", process_ms=" << process_ms;
-        }
-        if (processed % 1000 == 0) {
-            LOG(INFO) << "[在线定位线程] FIFO累计处理=" << processed;
+        if (processed <= 20 || processed % 100 == 0 ||
+            outcome != loc::LocalizationFrameOutcome::NDT_EXECUTED) {
+            LOG(INFO) << std::setprecision(15)
+                      << "[在线定位输入诊断][Worker] LocalizationSystem返回"
+                      << ", task_sequence=" << input.lidar_sequence
+                      << ", topic_sequence=" << input.topic_lidar_sequence
+                      << ", header_stamp=" << input.header_stamp
+                      << ", outcome=" << loc::LocalizationFrameOutcomeName(outcome)
+                      << ", queue_wait_ms=" << queue_wait_ms
+                      << ", process_ms=" << process_ms;
         }
     }
-    LOG(INFO) << "[数据链路诊断][在线定位] 工作线程退出汇总"
+    LOG(INFO) << "[在线定位输入诊断][Worker] 退出汇总"
               << ", lidar_received=" << localization_lidar_received_.load()
               << ", lidar_enqueued=" << localization_lidar_enqueued_.load()
               << ", lidar_processed=" << processed
+              << ", pointcloud2_processed=" << pointcloud2_processed
+              << ", livox_processed=" << livox_processed
+              << ", ndt_executed=" << ndt_executed
+              << ", initialized_frames=" << initialized_frames
+              << ", frames_not_sent_to_ndt=" << frames_not_sent_to_ndt
               << ", lidar_dropped=" << localization_lidar_dropped_.load()
               << ", sequence_gap_count=" << sequence_gap_count
+              << ", non_monotonic_header_count=" << non_monotonic_header_count
+              << ", source_large_header_gap_count=" << source_large_header_gap_count
               << ", max_queue_wait_ms=" << max_queue_wait_ms
               << ", max_process_ms=" << max_process_ms;
     LOG(INFO) << "[在线定位线程] 退出，累计处理=" << processed;
@@ -439,15 +535,26 @@ void Lightning::ProcessMappingInput(const InputMessage& input) {
     }
 }
 
-void Lightning::ProcessLocalizationInput(const InputMessage& input) {
+loc::LocalizationFrameOutcome Lightning::ProcessLocalizationInput(const InputMessage& input) {
     if (!localization_system_) {
-        return;
+        return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
     }
+
+    loc::LocalizationInputDiagnostic diagnostic;
+    diagnostic.pipeline_sequence = input.lidar_sequence;
+    diagnostic.topic_sequence = input.topic_lidar_sequence;
+    diagnostic.online = input.topic_lidar_sequence != 0;
+    diagnostic.topic_receive_steady_sec = input.receive_steady_sec;
+    diagnostic.worker_begin_steady_sec = RuntimeSteadySeconds();
+    diagnostic.header_stamp = input.header_stamp;
+
     if (input.type == InputType::POINT_CLOUD2) {
-        localization_system_->ProcessCloud(input.cloud);
-    } else if (input.type == InputType::LIVOX) {
-        localization_system_->ProcessCloud(input.livox);
+        return localization_system_->ProcessCloud(input.cloud, diagnostic);
     }
+    if (input.type == InputType::LIVOX) {
+        return localization_system_->ProcessCloud(input.livox, diagnostic);
+    }
+    return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
 }
 
 void Lightning::HandleLocalizationTimeout() {
@@ -712,6 +819,11 @@ ServiceResult Lightning::SetMapPath(const std::string& map_path) {
     ClearLocalizationSystemLocked();
 
     localization_system_ = std::make_unique<modules::LocalizationSystem>();
+    ++localization_task_generation_;
+    LOG(INFO) << "[在线定位输入诊断][定位任务] 创建LocalizationSystem"
+              << ", generation=" << localization_task_generation_
+              << ", mode=" << ModeToString(mode_)
+              << ", ptr=" << localization_system_.get();
     if (!localization_system_->Init(yaml_path_, node_)) {
         ClearLocalizationSystemLocked();
         task_.SetFinished(false, "failed to initialize LocalizationSystem");
@@ -772,18 +884,25 @@ ServiceResult Lightning::SetLocation(const SE3& init_pose, bool* initialized_now
 void Lightning::StartBagLocalizationTaskLocked(const std::string& bag_path) {
     offline_thread_ = std::thread([this, bag_path]() {
         LOG(INFO) << "[离线定位线程] 开始读取Bag";
+        offline_localization_sequence_ = 0;
         BagInput bag_input;
         const bool bag_ok = bag_input.Run(
             bag_path, yaml_path_,
             nullptr,
             [this](const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
                 InputMessage input;
+                input.lidar_sequence = ++offline_localization_sequence_;
+                input.receive_steady_sec = RuntimeSteadySeconds();
+                input.header_stamp = rclcpp::Time(cloud->header.stamp).seconds();
                 input.type = InputType::POINT_CLOUD2;
                 input.cloud = cloud;
                 ProcessLocalizationInput(input);
             },
             [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
                 InputMessage input;
+                input.lidar_sequence = ++offline_localization_sequence_;
+                input.receive_steady_sec = RuntimeSteadySeconds();
+                input.header_stamp = rclcpp::Time(cloud->header.stamp).seconds();
                 input.type = InputType::LIVOX;
                 input.livox = cloud;
                 ProcessLocalizationInput(input);

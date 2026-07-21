@@ -7,6 +7,8 @@
 #include <string>
 #include <thread>
 
+#include "core/localization/localization_diagnostic.h"
+
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/executors/single_threaded_executor.hpp>
 #include <sensor_msgs/msg/imu.hpp>
@@ -20,9 +22,20 @@ namespace lightning::runtime {
 // 回调只负责把消息交给上层队列，不执行建图、定位或服务逻辑。
 class TopicInput {
    public:
+    struct LidarReceiveInfo {
+        std::uint64_t topic_sequence = 0;
+        std::uint64_t source_sequence = 0;
+        double receive_steady_sec = 0.0;
+        double header_stamp = 0.0;
+        double header_dt = 0.0;
+        double arrival_dt = 0.0;
+    };
+
     using ImuCallback = std::function<void(const sensor_msgs::msg::Imu::SharedPtr&)>;
-    using CloudCallback = std::function<void(const sensor_msgs::msg::PointCloud2::SharedPtr&)>;
-    using LivoxCallback = std::function<void(const livox_ros_driver2::msg::CustomMsg::SharedPtr&)>;
+    using CloudCallback = std::function<void(
+        const sensor_msgs::msg::PointCloud2::SharedPtr&, const LidarReceiveInfo&)>;
+    using LivoxCallback = std::function<void(
+        const livox_ros_driver2::msg::CustomMsg::SharedPtr&, const LidarReceiveInfo&)>;
 
     TopicInput() = default;
     ~TopicInput();
@@ -41,6 +54,19 @@ class TopicInput {
     std::atomic<std::uint64_t> imu_received_{0};
     std::atomic<std::uint64_t> cloud_received_{0};
     std::atomic<std::uint64_t> livox_received_{0};
+    std::uint64_t lidar_topic_sequence_ = 0;
+    double last_cloud_header_stamp_ = 0.0;
+    double last_cloud_receive_steady_sec_ = 0.0;
+    double last_livox_header_stamp_ = 0.0;
+    double last_livox_receive_steady_sec_ = 0.0;
+    double max_cloud_callback_ms_ = 0.0;
+    double max_livox_callback_ms_ = 0.0;
+    std::uint64_t cloud_non_monotonic_stamp_count_ = 0;
+    std::uint64_t livox_non_monotonic_stamp_count_ = 0;
+    std::uint64_t cloud_large_header_gap_count_ = 0;
+    std::uint64_t livox_large_header_gap_count_ = 0;
+    std::string cloud_topic_;
+    std::string livox_topic_;
 
     ImuCallback imu_cb_;
     CloudCallback cloud_cb_;

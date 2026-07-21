@@ -235,8 +235,14 @@ void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
     // performs exactly one fixed ms -> s conversion. Do not auto-detect units here;
     // set fasterlio.time_scale correctly for each lidar/bag.
     float min_source_time_ms = std::numeric_limits<float>::max();
-    float max_source_time_ms = 0.0f;
+    float max_source_time_ms = std::numeric_limits<float>::lowest();
+    float first_source_time = 0.0f;
+    float last_source_time = 0.0f;
     float max_point_time = 0.0f;
+    if (!cloud->empty()) {
+        first_source_time = static_cast<float>(cloud->points.front().time);
+        last_source_time = static_cast<float>(cloud->points.back().time);
+    }
     for (const auto& source : cloud->points) {
         min_source_time_ms = std::min(min_source_time_ms, static_cast<float>(source.time));
         max_source_time_ms = std::max(max_source_time_ms, static_cast<float>(source.time));
@@ -247,12 +253,34 @@ void LioSamMapping::ProcessPointCloud2(CloudPtr cloud) {
         frontend_cloud->push_back(point);
     }
 
+    const double header_dt = diagnostic_previous_cloud_stamp_ == 0.0
+        ? 0.0 : timestamp - diagnostic_previous_cloud_stamp_;
+    diagnostic_previous_cloud_stamp_ = timestamp;
     if (!cloud->empty() &&
-        (++diagnostic_time_log_count_ <= 10 || diagnostic_time_log_count_ % 100 == 0)) {
-        LOG(INFO) << "[LIO_SAM_TIME] preprocess_time_ms_min=" << min_source_time_ms
-                  << " preprocess_time_ms_max=" << max_source_time_ms
-                  << " final_time_sec_max=" << max_point_time
-                  << " stamp=" << std::setprecision(14) << timestamp;
+        (++diagnostic_time_log_count_ <= 20 || diagnostic_time_log_count_ % 100 == 0)) {
+        LOG(INFO) << std::setprecision(15)
+                  << "[扫描周期诊断][LioSamMapping] PointCloudPreprocess到LIO-SAM"
+                  << ", frame=" << diagnostic_time_log_count_
+                  << ", stamp=" << timestamp
+                  << ", header_dt=" << header_dt
+                  << ", points=" << cloud->size()
+                  << ", source_time_first=" << first_source_time
+                  << ", source_time_last=" << last_source_time
+                  << ", source_time_min=" << min_source_time_ms
+                  << ", source_time_max=" << max_source_time_ms
+                  << ", fixed_ms_to_sec_scale=0.001"
+                  << ", final_time_sec_max=" << max_point_time
+                  << ", final_to_header_ratio="
+                  << (header_dt > 0.0 ? max_point_time / header_dt : 0.0);
+    }
+    if (header_dt > 0.02 && max_point_time > 0.0 && max_point_time < header_dt * 0.1) {
+        LOG(WARNING) << std::setprecision(15)
+                     << "[扫描周期诊断][LioSamMapping] 计算出的scan_duration远小于相邻帧周期"
+                     << ", stamp=" << timestamp
+                     << ", header_dt=" << header_dt
+                     << ", source_time_max=" << max_source_time_ms
+                     << ", final_time_sec_max=" << max_point_time
+                     << ", ratio=" << max_point_time / header_dt;
     }
 
     frontend_cloud->height = 1;

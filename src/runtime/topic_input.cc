@@ -1,12 +1,24 @@
 #include "runtime/topic_input.h"
 
+#include <algorithm>
+#include <chrono>
 #include <exception>
+#include <iomanip>
 #include <utility>
 
 #include <glog/logging.h>
 #include <yaml-cpp/yaml.h>
 
 namespace lightning::runtime {
+namespace {
+
+double TopicSteadySeconds() {
+    return std::chrono::duration<double>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+}  // namespace
 
 TopicInput::~TopicInput() {
     LOG(INFO) << "[析构][TopicInput] 开始 this=" << this;
@@ -35,6 +47,8 @@ bool TopicInput::Start(const std::string& yaml_path,
     const std::string imu_topic = yaml["common"]["imu_topic"].as<std::string>();
     const std::string cloud_topic = yaml["common"]["lidar_topic"].as<std::string>();
     const std::string livox_topic = yaml["common"]["livox_lidar_topic"].as<std::string>();
+    cloud_topic_ = cloud_topic;
+    livox_topic_ = livox_topic;
 
     imu_cb_ = std::move(imu_cb);
     cloud_cb_ = std::move(cloud_cb);
@@ -66,16 +80,69 @@ bool TopicInput::Start(const std::string& yaml_path,
         cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
             cloud_topic, qos,
             [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+                const double callback_begin = TopicSteadySeconds();
                 const std::uint64_t count = ++cloud_received_;
-                if (count % 1000 == 0) {
-                    LOG(INFO) << "[Topic接收] PointCloud2累计接收=" << count;
+                LidarReceiveInfo info;
+                info.topic_sequence = ++lidar_topic_sequence_;
+                info.source_sequence = count;
+                info.receive_steady_sec = callback_begin;
+                info.header_stamp = rclcpp::Time(msg->header.stamp).seconds();
+                if (last_cloud_header_stamp_ != 0.0) {
+                    info.header_dt = info.header_stamp - last_cloud_header_stamp_;
+                }
+                if (last_cloud_receive_steady_sec_ != 0.0) {
+                    info.arrival_dt = callback_begin - last_cloud_receive_steady_sec_;
+                }
+                if (last_cloud_header_stamp_ != 0.0 && info.header_dt <= 0.0) {
+                    ++cloud_non_monotonic_stamp_count_;
+                    LOG(ERROR) << std::setprecision(15)
+                               << "[在线定位输入诊断][TopicInput][PointCloud2] 时间戳不递增"
+                               << ", topic_sequence=" << info.topic_sequence
+                               << ", source_sequence=" << info.source_sequence
+                               << ", previous_stamp=" << last_cloud_header_stamp_
+                               << ", current_stamp=" << info.header_stamp
+                               << ", header_dt=" << info.header_dt;
+                } else if (info.header_dt > 0.15) {
+                    ++cloud_large_header_gap_count_;
+                    LOG(WARNING) << std::setprecision(15)
+                                 << "[在线定位输入诊断][TopicInput][PointCloud2] 回调入口已出现大时间间隔"
+                                 << ", topic_sequence=" << info.topic_sequence
+                                 << ", source_sequence=" << info.source_sequence
+                                 << ", previous_stamp=" << last_cloud_header_stamp_
+                                 << ", current_stamp=" << info.header_stamp
+                                 << ", header_dt=" << info.header_dt
+                                 << "; 若雷达应为10Hz，缺帧或时间戳跳变发生在本程序回调之前";
+                }
+                last_cloud_header_stamp_ = info.header_stamp;
+                last_cloud_receive_steady_sec_ = callback_begin;
+
+                if (count <= 20 || count % 100 == 0) {
+                    LOG(INFO) << std::setprecision(15)
+                              << "[在线定位输入诊断][TopicInput][PointCloud2] 收到消息"
+                              << ", topic_sequence=" << info.topic_sequence
+                              << ", source_sequence=" << info.source_sequence
+                              << ", header_stamp=" << info.header_stamp
+                              << ", header_dt=" << info.header_dt
+                              << ", arrival_dt_ms=" << info.arrival_dt * 1000.0
+                              << ", width=" << msg->width
+                              << ", height=" << msg->height
+                              << ", point_step=" << msg->point_step
+                              << ", data_bytes=" << msg->data.size()
+                              << ", publisher_count=" << node_->count_publishers(cloud_topic_);
                 }
                 try {
-                    cloud_cb_(msg);
+                    cloud_cb_(msg, info);
                 } catch (const std::exception& e) {
                     LOG(ERROR) << "[Topic接收] PointCloud2入队回调异常: " << e.what();
                 } catch (...) {
                     LOG(ERROR) << "[Topic接收] PointCloud2入队回调发生未知异常";
+                }
+                const double callback_ms = (TopicSteadySeconds() - callback_begin) * 1000.0;
+                max_cloud_callback_ms_ = std::max(max_cloud_callback_ms_, callback_ms);
+                if (callback_ms > 5.0) {
+                    LOG(WARNING) << "[在线定位输入诊断][TopicInput][PointCloud2] 接收回调耗时异常"
+                                 << ", topic_sequence=" << info.topic_sequence
+                                 << ", callback_ms=" << callback_ms;
                 }
             });
     }
@@ -84,16 +151,66 @@ bool TopicInput::Start(const std::string& yaml_path,
         livox_sub_ = node_->create_subscription<livox_ros_driver2::msg::CustomMsg>(
             livox_topic, qos,
             [this](livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
+                const double callback_begin = TopicSteadySeconds();
                 const std::uint64_t count = ++livox_received_;
-                if (count % 1000 == 0) {
-                    LOG(INFO) << "[Topic接收] Livox累计接收=" << count;
+                LidarReceiveInfo info;
+                info.topic_sequence = ++lidar_topic_sequence_;
+                info.source_sequence = count;
+                info.receive_steady_sec = callback_begin;
+                info.header_stamp = rclcpp::Time(msg->header.stamp).seconds();
+                if (last_livox_header_stamp_ != 0.0) {
+                    info.header_dt = info.header_stamp - last_livox_header_stamp_;
+                }
+                if (last_livox_receive_steady_sec_ != 0.0) {
+                    info.arrival_dt = callback_begin - last_livox_receive_steady_sec_;
+                }
+                if (last_livox_header_stamp_ != 0.0 && info.header_dt <= 0.0) {
+                    ++livox_non_monotonic_stamp_count_;
+                    LOG(ERROR) << std::setprecision(15)
+                               << "[在线定位输入诊断][TopicInput][Livox] 时间戳不递增"
+                               << ", topic_sequence=" << info.topic_sequence
+                               << ", source_sequence=" << info.source_sequence
+                               << ", previous_stamp=" << last_livox_header_stamp_
+                               << ", current_stamp=" << info.header_stamp
+                               << ", header_dt=" << info.header_dt;
+                } else if (info.header_dt > 0.15) {
+                    ++livox_large_header_gap_count_;
+                    LOG(WARNING) << std::setprecision(15)
+                                 << "[在线定位输入诊断][TopicInput][Livox] 回调入口已出现大时间间隔"
+                                 << ", topic_sequence=" << info.topic_sequence
+                                 << ", source_sequence=" << info.source_sequence
+                                 << ", previous_stamp=" << last_livox_header_stamp_
+                                 << ", current_stamp=" << info.header_stamp
+                                 << ", header_dt=" << info.header_dt
+                                 << "; 若雷达应为10Hz，缺帧或时间戳跳变发生在本程序回调之前";
+                }
+                last_livox_header_stamp_ = info.header_stamp;
+                last_livox_receive_steady_sec_ = callback_begin;
+
+                if (count <= 20 || count % 100 == 0) {
+                    LOG(INFO) << std::setprecision(15)
+                              << "[在线定位输入诊断][TopicInput][Livox] 收到消息"
+                              << ", topic_sequence=" << info.topic_sequence
+                              << ", source_sequence=" << info.source_sequence
+                              << ", header_stamp=" << info.header_stamp
+                              << ", header_dt=" << info.header_dt
+                              << ", arrival_dt_ms=" << info.arrival_dt * 1000.0
+                              << ", point_num=" << msg->point_num
+                              << ", publisher_count=" << node_->count_publishers(livox_topic_);
                 }
                 try {
-                    livox_cb_(msg);
+                    livox_cb_(msg, info);
                 } catch (const std::exception& e) {
                     LOG(ERROR) << "[Topic接收] Livox入队回调异常: " << e.what();
                 } catch (...) {
                     LOG(ERROR) << "[Topic接收] Livox入队回调发生未知异常";
+                }
+                const double callback_ms = (TopicSteadySeconds() - callback_begin) * 1000.0;
+                max_livox_callback_ms_ = std::max(max_livox_callback_ms_, callback_ms);
+                if (callback_ms > 5.0) {
+                    LOG(WARNING) << "[在线定位输入诊断][TopicInput][Livox] 接收回调耗时异常"
+                                 << ", topic_sequence=" << info.topic_sequence
+                                 << ", callback_ms=" << callback_ms;
                 }
             });
     }
@@ -156,7 +273,14 @@ void TopicInput::Shutdown() {
     LOG(INFO) << "[Topic接收析构] [06] 完成"
               << ", imu_received=" << imu_received_.load()
               << ", cloud_received=" << cloud_received_.load()
-              << ", livox_received=" << livox_received_.load();
+              << ", livox_received=" << livox_received_.load()
+              << ", lidar_topic_sequence=" << lidar_topic_sequence_
+              << ", cloud_non_monotonic_stamp_count=" << cloud_non_monotonic_stamp_count_
+              << ", livox_non_monotonic_stamp_count=" << livox_non_monotonic_stamp_count_
+              << ", cloud_large_header_gap_count=" << cloud_large_header_gap_count_
+              << ", livox_large_header_gap_count=" << livox_large_header_gap_count_
+              << ", max_cloud_callback_ms=" << max_cloud_callback_ms_
+              << ", max_livox_callback_ms=" << max_livox_callback_ms_;
 }
 
 }  // namespace lightning::runtime

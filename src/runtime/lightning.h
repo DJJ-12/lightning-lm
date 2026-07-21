@@ -12,6 +12,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include "common/eigen_types.h"
+#include "core/localization/localization_diagnostic.h"
 #include "core/localization/localization_result.h"
 #include "modules/localizationSystem/localization_system.h"
 #include "modules/mappingSystem/mapping_system.h"
@@ -71,6 +72,7 @@ class Lightning {
     struct InputMessage {
         std::uint64_t sequence = 0;
         std::uint64_t lidar_sequence = 0;
+        std::uint64_t topic_lidar_sequence = 0;
         double receive_steady_sec = 0.0;
         double header_stamp = 0.0;
         InputType type = InputType::POINT_CLOUD2;
@@ -82,8 +84,10 @@ class Lightning {
     bool CanChangeModeLocked() const;
 
     void RouteImu(const sensor_msgs::msg::Imu::SharedPtr& imu);
-    void RouteCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud);
-    void RouteLivox(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud);
+    void RouteCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud,
+                    const TopicInput::LidarReceiveInfo& receive_info);
+    void RouteLivox(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud,
+                    const TopicInput::LidarReceiveInfo& receive_info);
     void PushMappingMessage(InputMessage message);
     void PushLocalizationMessage(InputMessage message);
 
@@ -96,7 +100,7 @@ class Lightning {
     void OnlineLocalizationWorkerLoop();
 
     void ProcessMappingInput(const InputMessage& input);
-    void ProcessLocalizationInput(const InputMessage& input);
+    loc::LocalizationFrameOutcome ProcessLocalizationInput(const InputMessage& input);
     void HandleLocalizationTimeout();
 
     void ClearMappingSystemLocked();
@@ -131,6 +135,8 @@ class Lightning {
     std::atomic<std::uint64_t> localization_lidar_enqueued_{0};
     std::atomic<std::uint64_t> localization_lidar_dropped_{0};
     std::uint64_t mapping_task_generation_ = 0;
+    std::uint64_t localization_task_generation_ = 0;
+    std::atomic<std::uint64_t> offline_localization_sequence_{0};
 
     MessageQueue<InputMessage> mapping_queue_;
     MessageQueue<InputMessage> localization_queue_;

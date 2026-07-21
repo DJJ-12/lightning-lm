@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -12,6 +13,7 @@
 #include <tf2_ros/transform_broadcaster.h>
 
 #include "common/eigen_types.h"
+#include "core/localization/localization_diagnostic.h"
 #include "core/localization/localization_result.h"
 #include "lightning_interfaces/msg/localization_pose.hpp"
 
@@ -32,8 +34,12 @@ class LocalizationSystem {
     bool Init(const std::string& yaml_path, rclcpp::Node::SharedPtr node = nullptr);
     bool SetMapPath(const std::string& map_path);
     bool SetInitialGuess(const SE3& init_pose, bool* initialized_now = nullptr);
-    void ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud);
-    void ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud);
+    loc::LocalizationFrameOutcome ProcessCloud(
+        const sensor_msgs::msg::PointCloud2::SharedPtr& cloud,
+        const loc::LocalizationInputDiagnostic& diagnostic = {});
+    loc::LocalizationFrameOutcome ProcessCloud(
+        const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud,
+        const loc::LocalizationInputDiagnostic& diagnostic = {});
     void MarkPoor(const std::string& message);
     loc::LocalizationResult GetLatestResult() const;
     void Reset();
@@ -48,6 +54,8 @@ class LocalizationSystem {
     std::string base_link_frame_ = "base_link";
     bool map_ready_ = false;
     bool has_initial_guess_ = false;
+    std::uint64_t diagnostic_process_calls_ = 0;
+    std::uint64_t diagnostic_system_not_ready_ = 0;
 
     std::shared_ptr<loc::Localization> loc_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;

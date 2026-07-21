@@ -4,6 +4,7 @@
 #include <pcl/filters/voxel_grid.h>
 #include <algorithm>
 #include <chrono>
+#include <iomanip>
 #include "GlobalLocalizer.h"
 
 namespace robot_localizer
@@ -280,14 +281,18 @@ void Localizer::ResetLocalizationState()
 {
     last_last_pose_ = Eigen::Matrix4d::Identity();
     last_pose_ = Eigen::Matrix4d::Identity();
+    register_frame_count_ = 0;
 }
 
 bool Localizer::RegisterFrame(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr &pc,
     pcl::PointCloud<pcl::PointXYZ>::Ptr &output_cloud,
     Eigen::Matrix4d &align_pose,
-    LocalizationQuality& quality)
+    LocalizationQuality& quality,
+    std::uint64_t diagnostic_sequence,
+    double diagnostic_timestamp)
 {
+    ++register_frame_count_;
     Eigen::Matrix4d init_guess = last_pose_ * last_last_pose_.inverse() * last_pose_;
 
     ndt_ptr_->setInputSource(pc);
@@ -303,8 +308,38 @@ bool Localizer::RegisterFrame(
     // 评估定位质量（使用配置的阈值）
     quality.evaluate(quality_thresholds_);
 
-        last_last_pose_ = last_pose_;
-        last_pose_ = align_pose;
+    const Eigen::Vector3d init_rpy = getRPYFromEigenMatrix(init_guess.block<3, 3>(0, 0));
+    const Eigen::Vector3d result_rpy = getRPYFromEigenMatrix(align_pose.block<3, 3>(0, 0));
+    const double result_jump =
+        (align_pose.block<3, 1>(0, 3) - last_pose_.block<3, 1>(0, 3)).norm();
+    double yaw_jump = result_rpy.z() - getRPYFromEigenMatrix(last_pose_.block<3, 3>(0, 0)).z();
+    while (yaw_jump > M_PI) yaw_jump -= 2.0 * M_PI;
+    while (yaw_jump < -M_PI) yaw_jump += 2.0 * M_PI;
+
+    if (diagnostic_sequence <= 20 || diagnostic_sequence % 20 == 0 ||
+        result_jump > 1.0 || std::abs(yaw_jump) > 0.35) {
+        LOG(INFO) << std::setprecision(15)
+                  << "[在线定位输入诊断][NDT内部] 配准输入与输出"
+                  << ", register_count=" << register_frame_count_
+                  << ", sequence=" << diagnostic_sequence
+                  << ", header_stamp=" << diagnostic_timestamp
+                  << ", input_points=" << (pc ? pc->size() : 0)
+                  << ", init_x=" << init_guess(0, 3)
+                  << ", init_y=" << init_guess(1, 3)
+                  << ", init_yaw=" << init_rpy.z()
+                  << ", result_x=" << align_pose(0, 3)
+                  << ", result_y=" << align_pose(1, 3)
+                  << ", result_yaw=" << result_rpy.z()
+                  << ", result_jump=" << result_jump
+                  << ", yaw_jump=" << yaw_jump
+                  << ", TP=" << quality.transform_probability
+                  << ", NVTL=" << quality.nearest_voxel_likelihood
+                  << ", iterations=" << quality.iteration_num
+                  << ", reliable=" << quality.is_reliable;
+    }
+
+    last_last_pose_ = last_pose_;
+    last_pose_ = align_pose;
 
     LOG_EVERY_N(INFO, 20) << "Localization quality: " << quality.quality_level
               << ", TP: " << quality.transform_probability

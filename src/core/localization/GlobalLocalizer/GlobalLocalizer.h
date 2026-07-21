@@ -1,6 +1,7 @@
 #ifndef __GLOBAL_LOCALIZER_H__
 #define __GLOBAL_LOCALIZER_H__ 
 
+#include <cstdint>
 #include <string>
 
 #include <Eigen/Core>
@@ -64,6 +65,7 @@ private:
 
     Eigen::Matrix4d last_last_pose_ = Eigen::Matrix4d::Identity();
     Eigen::Matrix4d last_pose_ = Eigen::Matrix4d::Identity();
+    std::uint64_t register_frame_count_ = 0;
     
 public:
     Localizer();
@@ -78,7 +80,13 @@ public:
 
     void ResetLocalizationState();
 
-    bool RegisterFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud, Eigen::Matrix4d& align_pose, LocalizationQuality& quality);
+    bool RegisterFrame(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc,
+        pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud,
+        Eigen::Matrix4d& align_pose,
+        LocalizationQuality& quality,
+        std::uint64_t diagnostic_sequence = 0,
+        double diagnostic_timestamp = 0.0);
 
     void SetStaticMap(std::string pcd_metadata_path, std::string pcd_directory)
     {

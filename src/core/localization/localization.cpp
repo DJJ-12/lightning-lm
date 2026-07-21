@@ -9,7 +9,9 @@
 #include <rclcpp/time.hpp>
 #include <yaml-cpp/yaml.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <iomanip>
 #include <map>
@@ -246,7 +248,9 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Localization::ConvertToBaseCloud(
     return cloud_base;
 }
 
-void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+LocalizationFrameOutcome Localization::ProcessLidarMsg(
+    const sensor_msgs::msg::PointCloud2::SharedPtr msg,
+    const LocalizationInputDiagnostic& diagnostic) {
     const double callback_start_steady_sec = SteadySeconds();
     bool map_loaded = false;
     Mat4f T_base_lidar_matrix_f;
@@ -266,66 +270,123 @@ void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPt
         }
     }
 
+    ++diagnostic_input_frames_;
     if (!map_loaded) {
-        return;
+        ++diagnostic_map_not_loaded_;
+        LOG(ERROR) << "[在线定位输入诊断][Localization] 地图未加载，丢弃PointCloud2"
+                   << ", sequence=" << diagnostic.pipeline_sequence;
+        return LocalizationFrameOutcome::MAP_NOT_LOADED;
     }
 
     LocCloudFrame frame;
     const double convert_start_steady_sec = SteadySeconds();
     frame.cloud = ConvertToBaseCloud(*msg, T_base_lidar_matrix_f, base_link_frame);
     frame.convert_ms = (SteadySeconds() - convert_start_steady_sec) * 1000.0;
+    diagnostic_max_convert_ms_ = std::max(diagnostic_max_convert_ms_, frame.convert_ms);
     frame.timestamp = rclcpp::Time(msg->header.stamp).seconds();
     frame.callback_start_steady_sec = callback_start_steady_sec;
     frame.arrival_dt = arrival_dt;
     frame.raw_points = frame.cloud ? frame.cloud->size() : 0;
-    HandleCloudFrame(frame);
-}
-
-void Localization::ProcessLivoxLidarMsg(
-    const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
-    const double callback_start_steady_sec = SteadySeconds();
-    bool map_loaded = false;
-    Mat4f T_base_lidar_matrix_f;
-    std::string base_link_frame;
-    double arrival_dt = 0.0;
-    {
-        UL lock(global_mutex_);
-        map_loaded = map_loaded_;
-        T_base_lidar_matrix_f = T_base_lidar_matrix_f_;
-        base_link_frame = base_link_frame_;
-        if (map_loaded) {
-            if (has_last_callback_start_steady_sec_) {
-                arrival_dt = callback_start_steady_sec - last_callback_start_steady_sec_;
-            }
-            last_callback_start_steady_sec_ = callback_start_steady_sec;
-            has_last_callback_start_steady_sec_ = true;
-        }
-    }
-
-    if (!map_loaded) {
-        return;
-    }
-
-    LocCloudFrame frame;
-    const double convert_start_steady_sec = SteadySeconds();
-    frame.cloud = ConvertToBaseCloud(*msg, T_base_lidar_matrix_f, base_link_frame);
-    frame.convert_ms = (SteadySeconds() - convert_start_steady_sec) * 1000.0;
-    frame.timestamp = rclcpp::Time(msg->header.stamp).seconds();
-    frame.callback_start_steady_sec = callback_start_steady_sec;
-    frame.arrival_dt = arrival_dt;
-    frame.raw_points = frame.cloud ? frame.cloud->size() : 0;
-    HandleCloudFrame(frame);
-}
-
-void Localization::HandleCloudFrame(const LocCloudFrame& frame) {
+    frame.message_points = static_cast<size_t>(msg->width) * static_cast<size_t>(msg->height);
+    frame.frame_id = msg->header.frame_id;
+    frame.diagnostic = diagnostic;
     if (!frame.cloud || frame.cloud->empty()) {
-        return;
+        ++diagnostic_empty_after_convert_;
+        LOG(ERROR) << "[在线定位输入诊断][Localization] PointCloud2转换后为空"
+                   << ", sequence=" << diagnostic.pipeline_sequence
+                   << ", message_points=" << frame.message_points;
+        return LocalizationFrameOutcome::EMPTY_AFTER_CONVERT;
+    }
+    if (diagnostic.pipeline_sequence <= 20 || diagnostic.pipeline_sequence % 100 == 0) {
+        LOG(INFO) << std::setprecision(15)
+                  << "[在线定位输入诊断][Localization] PointCloud2转换完成"
+                  << ", sequence=" << diagnostic.pipeline_sequence
+                  << ", topic_sequence=" << diagnostic.topic_sequence
+                  << ", header_stamp=" << frame.timestamp
+                  << ", arrival_dt_ms=" << frame.arrival_dt * 1000.0
+                  << ", message_points=" << frame.message_points
+                  << ", converted_points=" << frame.raw_points
+                  << ", convert_ms=" << frame.convert_ms
+                  << ", frame_id=" << frame.frame_id;
+    }
+    return HandleCloudFrame(frame);
+}
+
+LocalizationFrameOutcome Localization::ProcessLivoxLidarMsg(
+    const livox_ros_driver2::msg::CustomMsg::SharedPtr msg,
+    const LocalizationInputDiagnostic& diagnostic) {
+    const double callback_start_steady_sec = SteadySeconds();
+    bool map_loaded = false;
+    Mat4f T_base_lidar_matrix_f;
+    std::string base_link_frame;
+    double arrival_dt = 0.0;
+    {
+        UL lock(global_mutex_);
+        map_loaded = map_loaded_;
+        T_base_lidar_matrix_f = T_base_lidar_matrix_f_;
+        base_link_frame = base_link_frame_;
+        if (map_loaded) {
+            if (has_last_callback_start_steady_sec_) {
+                arrival_dt = callback_start_steady_sec - last_callback_start_steady_sec_;
+            }
+            last_callback_start_steady_sec_ = callback_start_steady_sec;
+            has_last_callback_start_steady_sec_ = true;
+        }
+    }
+
+    ++diagnostic_input_frames_;
+    if (!map_loaded) {
+        ++diagnostic_map_not_loaded_;
+        LOG(ERROR) << "[在线定位输入诊断][Localization] 地图未加载，丢弃Livox"
+                   << ", sequence=" << diagnostic.pipeline_sequence;
+        return LocalizationFrameOutcome::MAP_NOT_LOADED;
+    }
+
+    LocCloudFrame frame;
+    const double convert_start_steady_sec = SteadySeconds();
+    frame.cloud = ConvertToBaseCloud(*msg, T_base_lidar_matrix_f, base_link_frame);
+    frame.convert_ms = (SteadySeconds() - convert_start_steady_sec) * 1000.0;
+    diagnostic_max_convert_ms_ = std::max(diagnostic_max_convert_ms_, frame.convert_ms);
+    frame.timestamp = rclcpp::Time(msg->header.stamp).seconds();
+    frame.callback_start_steady_sec = callback_start_steady_sec;
+    frame.arrival_dt = arrival_dt;
+    frame.raw_points = frame.cloud ? frame.cloud->size() : 0;
+    frame.message_points = msg->points.size();
+    frame.frame_id = msg->header.frame_id;
+    frame.diagnostic = diagnostic;
+    if (!frame.cloud || frame.cloud->empty()) {
+        ++diagnostic_empty_after_convert_;
+        LOG(ERROR) << "[在线定位输入诊断][Localization] Livox转换后为空"
+                   << ", sequence=" << diagnostic.pipeline_sequence
+                   << ", message_points=" << frame.message_points;
+        return LocalizationFrameOutcome::EMPTY_AFTER_CONVERT;
+    }
+    if (diagnostic.pipeline_sequence <= 20 || diagnostic.pipeline_sequence % 100 == 0) {
+        LOG(INFO) << std::setprecision(15)
+                  << "[在线定位输入诊断][Localization] Livox转换完成"
+                  << ", sequence=" << diagnostic.pipeline_sequence
+                  << ", topic_sequence=" << diagnostic.topic_sequence
+                  << ", header_stamp=" << frame.timestamp
+                  << ", arrival_dt_ms=" << frame.arrival_dt * 1000.0
+                  << ", message_points=" << frame.message_points
+                  << ", converted_points=" << frame.raw_points
+                  << ", convert_ms=" << frame.convert_ms
+                  << ", frame_id=" << frame.frame_id;
+    }
+    return HandleCloudFrame(frame);
+}
+
+LocalizationFrameOutcome Localization::HandleCloudFrame(const LocCloudFrame& frame) {
+    if (!frame.cloud || frame.cloud->empty()) {
+        ++diagnostic_empty_after_convert_;
+        return LocalizationFrameOutcome::EMPTY_AFTER_CONVERT;
     }
 
     {
         std::lock_guard<std::mutex> cloud_lock(current_cloud_mutex_);
         latest_cloud_ = frame.cloud;
         latest_cloud_timestamp_ = frame.timestamp;
+        latest_cloud_diagnostic_ = frame.diagnostic;
     }
 
     bool initialized = false;
@@ -340,21 +401,37 @@ void Localization::HandleCloudFrame(const LocCloudFrame& frame) {
 
     if (!initialized) {
         if (has_init_pose && !initializing) {
-            TryInitializeWithCurrentCloud();
+            const double init_begin = SteadySeconds();
+            const bool initialized_now = TryInitializeWithCurrentCloud();
+            const double init_ms = (SteadySeconds() - init_begin) * 1000.0;
+            if (initialized_now) {
+                ++diagnostic_initialized_frames_;
+                LOG(INFO) << std::setprecision(15)
+                          << "[在线定位输入诊断][Initialization] 当前帧完成全局初始化"
+                          << ", sequence=" << frame.diagnostic.pipeline_sequence
+                          << ", topic_sequence=" << frame.diagnostic.topic_sequence
+                          << ", header_stamp=" << frame.timestamp
+                          << ", points=" << frame.cloud->size()
+                          << ", init_ms=" << init_ms;
+                return LocalizationFrameOutcome::INITIALIZED_WITH_FRAME;
+            }
         }
-        return;
+        ++diagnostic_waiting_initial_pose_;
+        return LocalizationFrameOutcome::WAITING_INITIAL_POSE;
     }
 
     if (initializing) {
-        return;
+        ++diagnostic_initializing_frames_;
+        return LocalizationFrameOutcome::INITIALIZATION_IN_PROGRESS;
     }
 
-    ProcessLocalizationCloud(frame);
+    return ProcessLocalizationCloud(frame);
 }
 
-void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
+LocalizationFrameOutcome Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
     if (!frame.cloud || frame.cloud->empty()) {
-        return;
+        ++diagnostic_empty_after_convert_;
+        return LocalizationFrameOutcome::EMPTY_AFTER_CONVERT;
     }
 
     XYZCloud::Ptr current_cloud(new XYZCloud);
@@ -365,27 +442,48 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
     voxel_grid.setInputCloud(frame.cloud);
     voxel_grid.filter(*current_cloud);
     const double voxel_ms = (SteadySeconds() - voxel_start_steady_sec) * 1000.0;
+    diagnostic_max_voxel_ms_ = std::max(diagnostic_max_voxel_ms_, voxel_ms);
 
     if (!current_cloud || current_cloud->empty()) {
-        return;
+        ++diagnostic_empty_after_voxel_;
+        LOG(ERROR) << "[在线定位输入诊断][Localization] 体素滤波后为空"
+                   << ", sequence=" << frame.diagnostic.pipeline_sequence
+                   << ", input_points=" << frame.cloud->size();
+        return LocalizationFrameOutcome::EMPTY_AFTER_VOXEL;
     }
 
     std::lock_guard<std::mutex> loc_lock(localizer_mutex_);
 
+    Eigen::Matrix4d previous_pose = Eigen::Matrix4d::Identity();
+    bool has_previous_pose = false;
+    double previous_timestamp = 0.0;
     {
         UL lock(global_mutex_);
         if (!localization_inited_ || init_in_progress_) {
-            return;
+            ++diagnostic_state_not_ready_;
+            return LocalizationFrameOutcome::STATE_NOT_READY;
         }
+        previous_pose = latest_pose_;
+        has_previous_pose = has_last_processed_cloud_timestamp_;
+        previous_timestamp = last_processed_cloud_timestamp_;
     }
+
+    const double ndt_begin_steady_sec = SteadySeconds();
+    const double topic_to_ndt_ms = frame.diagnostic.topic_receive_steady_sec > 0.0
+        ? (ndt_begin_steady_sec - frame.diagnostic.topic_receive_steady_sec) * 1000.0
+        : 0.0;
+    diagnostic_max_topic_to_ndt_ms_ = std::max(diagnostic_max_topic_to_ndt_ms_, topic_to_ndt_ms);
 
     Eigen::Matrix4d pose = Eigen::Matrix4d::Identity();
     XYZCloud::Ptr cloud_reg(new XYZCloud);
     robot_localizer::LocalizationQuality quality;
 
-    const double ndt_start_steady_sec = SteadySeconds();
-    const bool reliable = localizer_.RegisterFrame(current_cloud, cloud_reg, pose, quality);
-    const double ndt_ms = (SteadySeconds() - ndt_start_steady_sec) * 1000.0;
+    const bool reliable = localizer_.RegisterFrame(
+        current_cloud, cloud_reg, pose, quality,
+        frame.diagnostic.pipeline_sequence, frame.timestamp);
+    const double ndt_ms = (SteadySeconds() - ndt_begin_steady_sec) * 1000.0;
+    diagnostic_max_ndt_ms_ = std::max(diagnostic_max_ndt_ms_, ndt_ms);
+    ++diagnostic_ndt_frames_;
 
     LocalizationResult res;
     res.timestamp_ = frame.timestamp;
@@ -400,39 +498,62 @@ void Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
     res.iterations_ = quality.iteration_num;
     res.message_ = reliable ? "localization reliable" : "localization not reliable";
 
-    double header_dt = 0.0;
+    const double header_dt = has_previous_pose ? frame.timestamp - previous_timestamp : 0.0;
+    if (has_previous_pose && header_dt <= 0.0) {
+        ++diagnostic_non_monotonic_header_;
+    }
+    const Eigen::Vector3d translation_delta =
+        pose.block<3, 1>(0, 3) - previous_pose.block<3, 1>(0, 3);
+    const double translation_jump = translation_delta.norm();
+    const Eigen::Matrix3d relative_rotation =
+        previous_pose.block<3, 3>(0, 0).transpose() * pose.block<3, 3>(0, 0);
+    const double yaw_jump = std::atan2(relative_rotation(1, 0), relative_rotation(0, 0));
+
     {
         UL lock(global_mutex_);
         latest_pose_ = pose;
-        if (has_last_processed_cloud_timestamp_) {
-            header_dt = frame.timestamp - last_processed_cloud_timestamp_;
-        }
         last_processed_cloud_timestamp_ = frame.timestamp;
         has_last_processed_cloud_timestamp_ = true;
     }
 
     const double total_ms = (SteadySeconds() - frame.callback_start_steady_sec) * 1000.0;
-    /*
-    LOG(INFO) << std::setprecision(14)
-              << "[LOC_DIAG] header_stamp=" << frame.timestamp
-              << ", header_dt=" << header_dt
-              << ", arrival_dt=" << frame.arrival_dt
-              << ", raw_points=" << frame.raw_points
-              << ", voxel_points=" << current_cloud->size()
-              << ", convert_ms=" << frame.convert_ms
-              << ", voxel_ms=" << voxel_ms
-              << ", ndt_ms=" << ndt_ms
-              << ", total_ms=" << total_ms
-              << ", TP=" << quality.transform_probability
-              << ", NVTL=" << quality.nearest_voxel_likelihood
-              << ", iterations=" << quality.iteration_num;
-    */
+    if (frame.diagnostic.pipeline_sequence <= 20 ||
+        frame.diagnostic.pipeline_sequence % 20 == 0 ||
+        header_dt <= 0.0 || translation_jump > 1.0 || std::abs(yaw_jump) > 0.35) {
+        LOG(INFO) << std::setprecision(15)
+                  << "[在线定位输入诊断][NDT链路] 一帧完整结果"
+                  << ", sequence=" << frame.diagnostic.pipeline_sequence
+                  << ", topic_sequence=" << frame.diagnostic.topic_sequence
+                  << ", online=" << frame.diagnostic.online
+                  << ", header_stamp=" << frame.timestamp
+                  << ", header_dt=" << header_dt
+                  << ", arrival_dt_ms=" << frame.arrival_dt * 1000.0
+                  << ", message_points=" << frame.message_points
+                  << ", converted_points=" << frame.raw_points
+                  << ", voxel_points=" << current_cloud->size()
+                  << ", convert_ms=" << frame.convert_ms
+                  << ", voxel_ms=" << voxel_ms
+                  << ", topic_to_ndt_ms=" << topic_to_ndt_ms
+                  << ", ndt_ms=" << ndt_ms
+                  << ", total_ms=" << total_ms
+                  << ", pose_x=" << pose(0, 3)
+                  << ", pose_y=" << pose(1, 3)
+                  << ", pose_z=" << pose(2, 3)
+                  << ", translation_jump=" << translation_jump
+                  << ", yaw_jump_rad=" << yaw_jump
+                  << ", TP=" << quality.transform_probability
+                  << ", NVTL=" << quality.nearest_voxel_likelihood
+                  << ", iterations=" << quality.iteration_num
+                  << ", reliable=" << quality.is_reliable;
+    }
     PublishResult(res);
+    return LocalizationFrameOutcome::NDT_EXECUTED;
 }
 
 bool Localization::TryInitializeWithCurrentCloud() {
     pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud;
     double timestamp = 0.0;
+    LocalizationInputDiagnostic diagnostic;
     {
         std::lock_guard<std::mutex> cloud_lock(current_cloud_mutex_);
         if (!latest_cloud_ || latest_cloud_->empty()) {
@@ -440,6 +561,7 @@ bool Localization::TryInitializeWithCurrentCloud() {
         }
         input_cloud = latest_cloud_;
         timestamp = latest_cloud_timestamp_;
+        diagnostic = latest_cloud_diagnostic_;
     }
 
     std::lock_guard<std::mutex> loc_lock(localizer_mutex_);
@@ -462,8 +584,25 @@ bool Localization::TryInitializeWithCurrentCloud() {
         new pcl::PointCloud<pcl::PointXYZ>());
     robot_localizer::LocalizationQuality quality;
 
+    const double global_init_begin = SteadySeconds();
     localizer_.GetInitPose(
         init_guess, aligned_pose, input_cloud, output_cloud, quality);
+    const double global_init_ms = (SteadySeconds() - global_init_begin) * 1000.0;
+    LOG(INFO) << std::setprecision(15)
+              << "[在线定位输入诊断][Initialization] 全局定位算法返回"
+              << ", sequence=" << diagnostic.pipeline_sequence
+              << ", topic_sequence=" << diagnostic.topic_sequence
+              << ", header_stamp=" << timestamp
+              << ", input_points=" << input_cloud->size()
+              << ", output_points=" << output_cloud->size()
+              << ", global_init_ms=" << global_init_ms
+              << ", pose_x=" << aligned_pose(0, 3)
+              << ", pose_y=" << aligned_pose(1, 3)
+              << ", pose_z=" << aligned_pose(2, 3)
+              << ", TP=" << quality.transform_probability
+              << ", NVTL=" << quality.nearest_voxel_likelihood
+              << ", iterations=" << quality.iteration_num
+              << ", reliable=" << quality.is_reliable;
 
     {
         UL lock(global_mutex_);
@@ -497,7 +636,21 @@ void Localization::Finish() {
     LOG(INFO) << "[定位析构诊断][Localization::Finish][01] 开始"
               << ", this=" << this
               << ", thread_id=" << std::this_thread::get_id()
-              << ", ui=" << ui_.get();
+              << ", ui=" << ui_.get()
+              << ", input_frames=" << diagnostic_input_frames_
+              << ", map_not_loaded=" << diagnostic_map_not_loaded_
+              << ", empty_after_convert=" << diagnostic_empty_after_convert_
+              << ", waiting_initial_pose=" << diagnostic_waiting_initial_pose_
+              << ", initialized_frames=" << diagnostic_initialized_frames_
+              << ", initialization_in_progress=" << diagnostic_initializing_frames_
+              << ", empty_after_voxel=" << diagnostic_empty_after_voxel_
+              << ", state_not_ready=" << diagnostic_state_not_ready_
+              << ", ndt_frames=" << diagnostic_ndt_frames_
+              << ", non_monotonic_header=" << diagnostic_non_monotonic_header_
+              << ", max_convert_ms=" << diagnostic_max_convert_ms_
+              << ", max_voxel_ms=" << diagnostic_max_voxel_ms_
+              << ", max_ndt_ms=" << diagnostic_max_ndt_ms_
+              << ", max_topic_to_ndt_ms=" << diagnostic_max_topic_to_ndt_ms_;
     if (ui_) {
         LOG(INFO) << "[定位析构诊断][Localization::Finish][02] 调用 PangolinWindow::Quit";
         ui_->Quit();
@@ -514,6 +667,7 @@ void Localization::Finish() {
         has_pending_initial_pose_ = false;
         init_in_progress_ = false;
         latest_cloud_timestamp_ = 0.0;
+        latest_cloud_diagnostic_ = LocalizationInputDiagnostic();
         has_last_processed_cloud_timestamp_ = false;
         last_processed_cloud_timestamp_ = 0.0;
         has_last_callback_start_steady_sec_ = false;

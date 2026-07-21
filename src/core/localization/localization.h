@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <cstdint>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -12,6 +13,7 @@
 #include "common/eigen_types.h"
 #include "common/std_types.h"
 #include "core/localization/GlobalLocalizer/GlobalLocalizer.h"
+#include "core/localization/localization_diagnostic.h"
 #include "core/localization/localization_result.h"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "livox_ros_driver2/msg/custom_msg.hpp"
@@ -37,8 +39,12 @@ class Localization {
 
     bool Init(const std::string& yaml_path, const std::string& global_map_path);
 
-    void ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPtr laser_msg);
-    void ProcessLivoxLidarMsg(const livox_ros_driver2::msg::CustomMsg::SharedPtr laser_msg);
+    LocalizationFrameOutcome ProcessLidarMsg(
+        const sensor_msgs::msg::PointCloud2::SharedPtr laser_msg,
+        const LocalizationInputDiagnostic& diagnostic = {});
+    LocalizationFrameOutcome ProcessLivoxLidarMsg(
+        const livox_ros_driver2::msg::CustomMsg::SharedPtr laser_msg,
+        const LocalizationInputDiagnostic& diagnostic = {});
 
     bool SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vector3d& t);
     void Finish();
@@ -60,6 +66,9 @@ class Localization {
         double arrival_dt = 0.0;
         double convert_ms = 0.0;
         size_t raw_points = 0;
+        size_t message_points = 0;
+        std::string frame_id;
+        LocalizationInputDiagnostic diagnostic;
     };
 
     bool TryInitializeWithCurrentCloud();
@@ -71,8 +80,8 @@ class Localization {
         const livox_ros_driver2::msg::CustomMsg& msg,
         const Mat4f& T_base_lidar_matrix_f,
         const std::string& base_link_frame) const;
-    void HandleCloudFrame(const LocCloudFrame& frame);
-    void ProcessLocalizationCloud(const LocCloudFrame& frame);
+    LocalizationFrameOutcome HandleCloudFrame(const LocCloudFrame& frame);
+    LocalizationFrameOutcome ProcessLocalizationCloud(const LocCloudFrame& frame);
     void PublishResult(const LocalizationResult& result);
     void LoadTargetMapForUI(const std::string& global_map_path);
     static SE3 Matrix4dToSE3(const Eigen::Matrix4d& pose);
@@ -93,6 +102,7 @@ class Localization {
     Mat4f T_base_lidar_matrix_f_ = Mat4f::Identity();
     pcl::PointCloud<pcl::PointXYZ>::Ptr latest_cloud_ = nullptr;
     double latest_cloud_timestamp_ = 0.0;
+    LocalizationInputDiagnostic latest_cloud_diagnostic_;
     bool has_last_processed_cloud_timestamp_ = false;
     double last_processed_cloud_timestamp_ = 0.0;
     bool has_last_callback_start_steady_sec_ = false;
@@ -110,6 +120,21 @@ class Localization {
     std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
 
     std::string base_link_frame_ = "base_link";
+
+    std::uint64_t diagnostic_input_frames_ = 0;
+    std::uint64_t diagnostic_map_not_loaded_ = 0;
+    std::uint64_t diagnostic_empty_after_convert_ = 0;
+    std::uint64_t diagnostic_waiting_initial_pose_ = 0;
+    std::uint64_t diagnostic_initialized_frames_ = 0;
+    std::uint64_t diagnostic_initializing_frames_ = 0;
+    std::uint64_t diagnostic_empty_after_voxel_ = 0;
+    std::uint64_t diagnostic_state_not_ready_ = 0;
+    std::uint64_t diagnostic_ndt_frames_ = 0;
+    std::uint64_t diagnostic_non_monotonic_header_ = 0;
+    double diagnostic_max_convert_ms_ = 0.0;
+    double diagnostic_max_voxel_ms_ = 0.0;
+    double diagnostic_max_ndt_ms_ = 0.0;
+    double diagnostic_max_topic_to_ndt_ms_ = 0.0;
 };
 
 }  // namespace loc

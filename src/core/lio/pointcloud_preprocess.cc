@@ -1,5 +1,8 @@
 #include "pointcloud_preprocess.h"
+#include <algorithm>
 #include <execution>
+#include <iomanip>
+#include <limits>
 #include <glog/logging.h>
 #include <yaml-cpp/yaml.h>
 
@@ -23,6 +26,10 @@ bool PointCloudPreprocess::Init(const std::string& yaml_path) {
     height_min_ = roi["height_min"].as<float>();
 
     LOG(INFO) << "lidar_type " << lidar_type;
+    LOG(INFO) << "[扫描周期诊断][PointCloudPreprocess] 配置"
+              << ", lidar_type=" << lidar_type
+              << ", time_scale=" << time_scale_
+              << ", point_filter_num=" << point_filter_num_;
     if (lidar_type == 1) {
         lidar_type_ = LidarType::AVIA;
         LOG(INFO) << "Using AVIA Lidar";
@@ -229,6 +236,24 @@ void PointCloudPreprocess::VelodyneHandler(const sensor_msgs::msg::PointCloud2::
     pcl::fromROSMsg(*msg, pl_orig);
     int plsize = pl_orig.points.size();
     cloud_out_.reserve(plsize);
+    ++diagnostic_velodyne_frames_;
+    const double header_stamp = ToSec(msg->header.stamp);
+    const double header_dt = diagnostic_last_velodyne_header_stamp_ == 0.0
+        ? 0.0 : header_stamp - diagnostic_last_velodyne_header_stamp_;
+    diagnostic_last_velodyne_header_stamp_ = header_stamp;
+    if (plsize <= 0) {
+        LOG(ERROR) << "[扫描周期诊断][Velodyne预处理] 输入点云为空"
+                   << ", frame=" << diagnostic_velodyne_frames_
+                   << ", header_stamp=" << std::setprecision(15) << header_stamp;
+        return;
+    }
+
+    float raw_time_min = std::numeric_limits<float>::max();
+    float raw_time_max = std::numeric_limits<float>::lowest();
+    for (const auto& point : pl_orig.points) {
+        raw_time_min = std::min(raw_time_min, point.time);
+        raw_time_max = std::max(raw_time_max, point.time);
+    }
 
     /*** These variables only works when no point timestamps given ***/
     double omega_l = 3.61;  // scan angular velocity
@@ -301,6 +326,44 @@ void PointCloudPreprocess::VelodyneHandler(const sensor_msgs::msg::PointCloud2::
     cloud_out_.width = cloud_out_.size();
     cloud_out_.height = 1;
     cloud_out_.is_dense = false;
+
+    double output_time_min = std::numeric_limits<double>::max();
+    double output_time_max = std::numeric_limits<double>::lowest();
+    for (const auto& point : cloud_out_.points) {
+        output_time_min = std::min(output_time_min, point.time);
+        output_time_max = std::max(output_time_max, point.time);
+    }
+    if (cloud_out_.empty()) {
+        output_time_min = 0.0;
+        output_time_max = 0.0;
+    }
+    if (diagnostic_velodyne_frames_ <= 20 || diagnostic_velodyne_frames_ % 100 == 0) {
+        LOG(INFO) << std::setprecision(15)
+                  << "[扫描周期诊断][Velodyne预处理] 点时间完整链路"
+                  << ", frame=" << diagnostic_velodyne_frames_
+                  << ", header_stamp=" << header_stamp
+                  << ", header_dt=" << header_dt
+                  << ", input_points=" << plsize
+                  << ", output_points=" << cloud_out_.size()
+                  << ", raw_time_first=" << pl_orig.points.front().time
+                  << ", raw_time_last=" << pl_orig.points.back().time
+                  << ", raw_time_min=" << raw_time_min
+                  << ", raw_time_max=" << raw_time_max
+                  << ", configured_time_scale=" << time_scale_
+                  << ", output_time_min=" << output_time_min
+                  << ", output_time_max=" << output_time_max
+                  << ", given_offset_time=" << given_offset_time_;
+    }
+    if (header_dt > 0.02 && raw_time_max > 0.02 && raw_time_max < 0.5 &&
+        output_time_max > header_dt * 0.5 && output_time_max < header_dt * 1.5) {
+        LOG(WARNING) << std::setprecision(15)
+                     << "[扫描周期诊断][Velodyne预处理] 点时间数值与帧周期同量级"
+                     << ", header_dt=" << header_dt
+                     << ", raw_time_max=" << raw_time_max
+                     << ", time_scale=" << time_scale_
+                     << ", output_time_max=" << output_time_max
+                     << "; 当前PointType::time被声明为毫秒，但该数值很像秒，后续再乘0.001会得到约0.0001秒";
+    }
 }
 
 }  // namespace lightning

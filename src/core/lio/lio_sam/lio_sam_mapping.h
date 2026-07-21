@@ -122,6 +122,7 @@ class LioSamMapping {
     std::uint64_t diagnostic_map_optimization_executed_ = 0;
     std::uint64_t diagnostic_map_optimization_skipped_ = 0;
     std::uint64_t diagnostic_time_log_count_ = 0;
+    double diagnostic_previous_cloud_stamp_ = 0.0;
     double last_scan_duration_ = 0.1;
 
     std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
