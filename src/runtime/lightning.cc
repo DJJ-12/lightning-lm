@@ -811,7 +811,9 @@ void Lightning::StartBagMappingTaskLocked(const std::string& bag_path) {
         } else if (!bag_ok) {
             task_.SetFinished(false, "offline bag mapping failed");
         } else {
-            task_.SetState(TaskState::READY, "offline bag processed, waiting for finish_mapping");
+            mapping_system_->Stop();
+            const ServiceResult result = SaveMappingLocked(mapping_save_path_);
+            task_.SetFinished(result.success, result.message);
         }
         LOG(INFO) << "[离线建图线程] 读取Bag结束";
     });
