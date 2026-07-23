@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -54,6 +55,8 @@ class MappingSystem {
     CloudPtr BuildCurrentMapInBaseFrame();
     nav_msgs::msg::Path BuildCurrentPath();
     bool ConsumeMappingUpdate();
+    std::size_t GetKeyframeCount() const { return keyframe_count_.load(); }
+    std::size_t GetKeyframeCloudBytes() const { return keyframe_cloud_bytes_.load(); }
 
    private:
     bool BuildInputCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud, CloudPtr& input);
@@ -73,8 +76,8 @@ class MappingSystem {
     std::shared_ptr<ui::PangolinWindow> ui_;
     Keyframe::Ptr cur_kf_;
     bool mapping_update_pending_ = false;
-    std::size_t keyframe_count_ = 0;
-    std::size_t keyframe_cloud_bytes_ = 0;
+    std::atomic<std::size_t> keyframe_count_{0};
+    std::atomic<std::size_t> keyframe_cloud_bytes_{0};
 };
 
 }  // namespace modules

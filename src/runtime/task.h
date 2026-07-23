@@ -25,6 +25,8 @@ struct TaskSnapshot {
     bool running = false;
     bool finished = false;
     bool success = false;
+    std::uint64_t keyframe_count = 0;
+    double keyframe_memory_mb = 0.0;
     std::uint64_t total_frames = 0;
     std::uint64_t processed_frames = 0;
     float progress = 0.0f;

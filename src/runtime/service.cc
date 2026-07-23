@@ -48,6 +48,8 @@ bool Service::Init(rclcpp::Node::SharedPtr node, std::shared_ptr<Lightning> ligh
             response->running = status.running;
             response->finished = status.finished;
             response->task_success = status.success;
+            response->keyframe_count = status.keyframe_count;
+            response->keyframe_memory_mb = status.keyframe_memory_mb;
             response->total_frames = status.total_frames;
             response->processed_frames = status.processed_frames;
             response->progress = status.progress;

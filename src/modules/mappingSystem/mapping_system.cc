@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
-#include <iomanip>
 #include "core/lio/laser_mapping.h"
 #include "core/lio/lio_sam/lio_sam_mapping.h"
 #include "core/lio/pointcloud_preprocess.h"
@@ -274,16 +273,11 @@ void MappingSystem::HandleProcessedKeyframe(const Keyframe::Ptr& kf) {
     }
     cur_kf_ = kf;
     mapping_update_pending_ = true;
-    ++keyframe_count_;
     const CloudPtr cloud = kf->GetCloud();
     if (cloud) {
         keyframe_cloud_bytes_ += cloud->points.capacity() * sizeof(PointType);
     }
-    if (keyframe_count_ % 10 == 0) {
-        LOG(INFO) << "[关键帧内存] keyframes=" << keyframe_count_
-                  << ", memory_mb=" << std::fixed << std::setprecision(2)
-                  << static_cast<double>(keyframe_cloud_bytes_) / (1024.0 * 1024.0);
-    }
+    ++keyframe_count_;
     if (ui_) {
         ui_->UpdateKF(cur_kf_);
     }

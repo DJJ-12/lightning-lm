@@ -149,7 +149,15 @@ ServiceResult Lightning::SetMode(const std::string& mode_text) {
 }
 
 TaskSnapshot Lightning::GetStatus() const {
-    return task_.Snapshot();
+    TaskSnapshot status = task_.Snapshot();
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    if (IsMappingMode(mode_) && mapping_system_) {
+        status.keyframe_count = mapping_system_->GetKeyframeCount();
+        status.keyframe_memory_mb =
+            static_cast<double>(mapping_system_->GetKeyframeCloudBytes()) /
+            (1024.0 * 1024.0);
+    }
+    return status;
 }
 
 Mode Lightning::CurrentMode() const {
