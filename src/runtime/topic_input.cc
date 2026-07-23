@@ -57,7 +57,8 @@ bool TopicInput::Start(const std::string& yaml_path,
 
     // 回调只负责入队。点云继续使用 Reliable；IMU 兼容常见传感器 BestEffort 发布。
     rclcpp::QoS cloud_qos{rclcpp::KeepAll()};
-    cloud_qos.reliable();
+    //cloud_qos.reliable();
+    cloud_qos.best_effort();
     cloud_qos.durability_volatile();
 
     rclcpp::QoS imu_qos{rclcpp::KeepAll()};
