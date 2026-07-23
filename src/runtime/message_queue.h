@@ -57,47 +57,18 @@ class MessageQueue {
         return true;
     }
 
-    template <typename LimitedPredicate, typename RemovedCallback, typename CleanupPredicate>
-    bool PushWithLimit(T value,
-                       std::size_t max_limited,
-                       LimitedPredicate limited_pred,
-                       RemovedCallback on_removed,
-                       CleanupPredicate cleanup_pred,
-                       std::size_t* depth = nullptr) {
+    template <typename Predicate>
+    bool PushLatest(T value, Predicate replace_pred,
+                    std::size_t* depth = nullptr, std::size_t* replaced = nullptr) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!open_) {
             return false;
         }
-
-        if (max_limited > 0 && limited_pred(value)) {
-            std::size_t limited_count = 0;
-            for (const auto& item : queue_) {
-                if (limited_pred(item)) {
-                    ++limited_count;
-                }
-            }
-
-            auto iter = queue_.begin();
-            while (limited_count >= max_limited && iter != queue_.end()) {
-                if (limited_pred(*iter)) {
-                    on_removed(*iter);
-                    iter = queue_.erase(iter);
-                    --limited_count;
-                } else {
-                    ++iter;
-                }
-            }
-
-            iter = queue_.begin();
-            while (iter != queue_.end()) {
-                if (cleanup_pred(*iter)) {
-                    iter = queue_.erase(iter);
-                } else {
-                    ++iter;
-                }
-            }
+        const std::size_t before = queue_.size();
+        queue_.erase(std::remove_if(queue_.begin(), queue_.end(), replace_pred), queue_.end());
+        if (replaced) {
+            *replaced = before - queue_.size();
         }
-
         queue_.push_back(std::move(value));
         if (depth) {
             *depth = queue_.size();

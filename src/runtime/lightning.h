@@ -133,7 +133,6 @@ class Lightning {
     std::atomic<std::uint64_t> mapping_lidar_received_{0};
     std::atomic<std::uint64_t> mapping_lidar_enqueued_{0};
     std::atomic<std::uint64_t> mapping_lidar_dropped_{0};
-    std::atomic<std::uint64_t> mapping_lidar_overflow_dropped_{0};
     std::atomic<std::uint64_t> localization_lidar_received_{0};
     std::atomic<std::uint64_t> localization_lidar_enqueued_{0};
     std::atomic<std::uint64_t> localization_lidar_dropped_{0};

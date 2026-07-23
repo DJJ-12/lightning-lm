@@ -12,8 +12,6 @@
 namespace lightning::runtime {
 namespace {
 
-constexpr std::size_t kMaxQueuedMappingLidarFrames = 10;
-
 double RuntimeSteadySeconds() {
     return std::chrono::duration<double>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -231,32 +229,13 @@ void Lightning::PushMappingMessage(InputMessage message) {
     const bool is_lidar = IsLidarMessage(message);
     const std::uint64_t lidar_sequence = message.lidar_sequence;
     std::size_t depth = 0;
-    std::size_t removed_lidar = 0;
-    std::size_t removed_imu = 0;
-    double removed_lidar_stamp = 0.0;
-    bool pushed = false;
-    if (is_lidar) {
-        pushed = mapping_queue_.PushWithLimit(
-            std::move(message),
-            kMaxQueuedMappingLidarFrames,
-            [](const InputMessage& input) { return Lightning::IsLidarMessage(input); },
-            [&removed_lidar, &removed_lidar_stamp](const InputMessage& input) {
-                ++removed_lidar;
-                removed_lidar_stamp = std::max(removed_lidar_stamp, input.header_stamp);
-            },
-            [&removed_imu, &removed_lidar_stamp](const InputMessage& input) {
-                const bool remove = input.type == InputType::IMU &&
-                                    input.header_stamp > 0.0 &&
-                                    input.header_stamp <= removed_lidar_stamp;
-                if (remove) {
-                    ++removed_imu;
-                }
-                return remove;
-            },
-            &depth);
-    } else {
-        pushed = mapping_queue_.Push(std::move(message), &depth);
-    }
+    std::size_t replaced = 0;
+    const bool pushed = is_lidar
+        ? mapping_queue_.PushLatest(
+              std::move(message),
+              [](const InputMessage& input) { return Lightning::IsLidarMessage(input); },
+              &depth, &replaced)
+        : mapping_queue_.Push(std::move(message), &depth);
     if (!pushed) {
         if (is_lidar) {
             ++mapping_lidar_dropped_;
@@ -267,23 +246,17 @@ void Lightning::PushMappingMessage(InputMessage message) {
     }
     if (is_lidar) {
         ++mapping_lidar_enqueued_;
-        if (removed_lidar > 0) {
+        if (replaced > 0) {
             const std::uint64_t dropped =
-                mapping_lidar_dropped_.fetch_add(removed_lidar) + removed_lidar;
-            const std::uint64_t overflow_dropped =
-                mapping_lidar_overflow_dropped_.fetch_add(removed_lidar) + removed_lidar;
-            LOG(WARNING) << "[在线建图队列] 雷达队列已满，顶掉最旧雷达帧及其之前的IMU"
-                         << ", max_lidar_frames=" << kMaxQueuedMappingLidarFrames
-                         << ", removed_lidar=" << removed_lidar
-                         << ", removed_imu=" << removed_imu
-                         << ", cutoff_stamp=" << std::setprecision(15) << removed_lidar_stamp
-                         << ", lidar_dropped=" << dropped
-                         << ", overflow_dropped=" << overflow_dropped
-                         << ", queue_depth=" << depth;
+                mapping_lidar_dropped_.fetch_add(replaced) + replaced;
+            if (dropped <= 20 || dropped % 100 == 0) {
+                LOG(INFO) << "[在线建图队列] 实时模式丢弃旧点云"
+                          << ", replaced=" << replaced
+                          << ", dropped_total=" << dropped
+                          << ", latest_lidar_sequence=" << lidar_sequence
+                          << ", depth=" << depth;
+            }
         }
-    }
-    if (depth == 10 || depth == 50 || depth % 100 == 0) {
-        LOG(WARNING) << "[在线建图队列] 当前积压=" << mapping_queue_.Size();
     }
 }
 
@@ -315,7 +288,6 @@ void Lightning::StartOnlineMappingWorkerLocked() {
     mapping_lidar_received_ = 0;
     mapping_lidar_enqueued_ = 0;
     mapping_lidar_dropped_ = 0;
-    mapping_lidar_overflow_dropped_ = 0;
     mapping_queue_.Open();
     mapping_worker_ = std::thread([this]() { OnlineMappingWorkerLoop(); });
     online_route_.store(OnlineRoute::MAPPING, std::memory_order_release);
@@ -364,9 +336,7 @@ void Lightning::OnlineMappingWorkerLoop() {
                 LOG(WARNING) << "[数据链路诊断][在线建图] 雷达序号不连续"
                              << ", previous=" << last_lidar_sequence
                              << ", current=" << input.lidar_sequence
-                             << ", header_stamp=" << input.header_stamp
-                             << ", lidar_overflow_dropped="
-                             << mapping_lidar_overflow_dropped_.load();
+                             << ", header_stamp=" << input.header_stamp;
             }
             last_lidar_sequence = input.lidar_sequence;
         }
@@ -410,7 +380,6 @@ void Lightning::OnlineMappingWorkerLoop() {
               << ", imu_processed=" << imu_processed
               << ", total_processed=" << processed
               << ", lidar_dropped=" << mapping_lidar_dropped_.load()
-              << ", lidar_overflow_dropped=" << mapping_lidar_overflow_dropped_.load()
               << ", sequence_gap_count=" << sequence_gap_count
               << ", max_queue_wait_ms=" << max_queue_wait_ms
               << ", max_process_ms=" << max_process_ms;
