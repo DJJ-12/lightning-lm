@@ -48,8 +48,6 @@ bool TopicInput::Start(const std::string& yaml_path,
     const std::string imu_topic = yaml["common"]["imu_topic"].as<std::string>();
     const std::string cloud_topic = yaml["common"]["lidar_topic"].as<std::string>();
     const std::string livox_topic = yaml["common"]["livox_lidar_topic"].as<std::string>();
-    cloud_topic_ = cloud_topic;
-    livox_topic_ = livox_topic;
 
     imu_cb_ = std::move(imu_cb);
     cloud_cb_ = std::move(cloud_cb);
@@ -107,7 +105,7 @@ bool TopicInput::Start(const std::string& yaml_path,
                 if (last_cloud_header_stamp_ != 0.0 && info.header_dt <= 0.0) {
                     ++cloud_non_monotonic_stamp_count_;
                     LOG(ERROR) << std::setprecision(15)
-                               << "[在线定位输入诊断][TopicInput][PointCloud2] 时间戳不递增"
+                               << "[Topic接收诊断][PointCloud2] 时间戳不递增"
                                << ", topic_sequence=" << info.topic_sequence
                                << ", source_sequence=" << info.source_sequence
                                << ", previous_stamp=" << last_cloud_header_stamp_
@@ -116,7 +114,7 @@ bool TopicInput::Start(const std::string& yaml_path,
                 } else if (info.header_dt > 0.15) {
                     ++cloud_large_header_gap_count_;
                     LOG(WARNING) << std::setprecision(15)
-                                 << "[在线定位输入诊断][TopicInput][PointCloud2] 回调入口已出现大时间间隔"
+                                 << "[Topic接收诊断][PointCloud2] 回调入口已出现大时间间隔"
                                  << ", topic_sequence=" << info.topic_sequence
                                  << ", source_sequence=" << info.source_sequence
                                  << ", previous_stamp=" << last_cloud_header_stamp_
@@ -127,20 +125,6 @@ bool TopicInput::Start(const std::string& yaml_path,
                 last_cloud_header_stamp_ = info.header_stamp;
                 last_cloud_receive_steady_sec_ = callback_begin;
 
-                if (count <= 20 || count % 100 == 0) {
-                    LOG(INFO) << std::setprecision(15)
-                              << "[在线定位输入诊断][TopicInput][PointCloud2] 收到消息"
-                              << ", topic_sequence=" << info.topic_sequence
-                              << ", source_sequence=" << info.source_sequence
-                              << ", header_stamp=" << info.header_stamp
-                              << ", header_dt=" << info.header_dt
-                              << ", arrival_dt_ms=" << info.arrival_dt * 1000.0
-                              << ", width=" << msg->width
-                              << ", height=" << msg->height
-                              << ", point_step=" << msg->point_step
-                              << ", data_bytes=" << msg->data.size()
-                              << ", publisher_count=" << node_->count_publishers(cloud_topic_);
-                }
                 try {
                     cloud_cb_(msg, info);
                 } catch (const std::exception& e) {
@@ -151,7 +135,7 @@ bool TopicInput::Start(const std::string& yaml_path,
                 const double callback_ms = (TopicSteadySeconds() - callback_begin) * 1000.0;
                 max_cloud_callback_ms_ = std::max(max_cloud_callback_ms_, callback_ms);
                 if (callback_ms > 5.0) {
-                    LOG(WARNING) << "[在线定位输入诊断][TopicInput][PointCloud2] 接收回调耗时异常"
+                    LOG(WARNING) << "[Topic接收诊断][PointCloud2] 接收回调耗时异常"
                                  << ", topic_sequence=" << info.topic_sequence
                                  << ", callback_ms=" << callback_ms;
                 }
@@ -181,7 +165,7 @@ bool TopicInput::Start(const std::string& yaml_path,
                 if (last_livox_header_stamp_ != 0.0 && info.header_dt <= 0.0) {
                     ++livox_non_monotonic_stamp_count_;
                     LOG(ERROR) << std::setprecision(15)
-                               << "[在线定位输入诊断][TopicInput][Livox] 时间戳不递增"
+                               << "[Topic接收诊断][Livox] 时间戳不递增"
                                << ", topic_sequence=" << info.topic_sequence
                                << ", source_sequence=" << info.source_sequence
                                << ", previous_stamp=" << last_livox_header_stamp_
@@ -190,7 +174,7 @@ bool TopicInput::Start(const std::string& yaml_path,
                 } else if (info.header_dt > 0.15) {
                     ++livox_large_header_gap_count_;
                     LOG(WARNING) << std::setprecision(15)
-                                 << "[在线定位输入诊断][TopicInput][Livox] 回调入口已出现大时间间隔"
+                                 << "[Topic接收诊断][Livox] 回调入口已出现大时间间隔"
                                  << ", topic_sequence=" << info.topic_sequence
                                  << ", source_sequence=" << info.source_sequence
                                  << ", previous_stamp=" << last_livox_header_stamp_
@@ -201,17 +185,6 @@ bool TopicInput::Start(const std::string& yaml_path,
                 last_livox_header_stamp_ = info.header_stamp;
                 last_livox_receive_steady_sec_ = callback_begin;
 
-                if (count <= 20 || count % 100 == 0) {
-                    LOG(INFO) << std::setprecision(15)
-                              << "[在线定位输入诊断][TopicInput][Livox] 收到消息"
-                              << ", topic_sequence=" << info.topic_sequence
-                              << ", source_sequence=" << info.source_sequence
-                              << ", header_stamp=" << info.header_stamp
-                              << ", header_dt=" << info.header_dt
-                              << ", arrival_dt_ms=" << info.arrival_dt * 1000.0
-                              << ", point_num=" << msg->point_num
-                              << ", publisher_count=" << node_->count_publishers(livox_topic_);
-                }
                 try {
                     livox_cb_(msg, info);
                 } catch (const std::exception& e) {
@@ -222,7 +195,7 @@ bool TopicInput::Start(const std::string& yaml_path,
                 const double callback_ms = (TopicSteadySeconds() - callback_begin) * 1000.0;
                 max_livox_callback_ms_ = std::max(max_livox_callback_ms_, callback_ms);
                 if (callback_ms > 5.0) {
-                    LOG(WARNING) << "[在线定位输入诊断][TopicInput][Livox] 接收回调耗时异常"
+                    LOG(WARNING) << "[Topic接收诊断][Livox] 接收回调耗时异常"
                                  << ", topic_sequence=" << info.topic_sequence
                                  << ", callback_ms=" << callback_ms;
                 }

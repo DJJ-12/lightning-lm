@@ -67,8 +67,6 @@ class TopicInput {
     std::uint64_t livox_non_monotonic_stamp_count_ = 0;
     std::uint64_t cloud_large_header_gap_count_ = 0;
     std::uint64_t livox_large_header_gap_count_ = 0;
-    std::string cloud_topic_;
-    std::string livox_topic_;
 
     ImuCallback imu_cb_;
     CloudCallback cloud_cb_;
