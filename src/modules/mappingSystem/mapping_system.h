@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
@@ -72,6 +73,8 @@ class MappingSystem {
     std::shared_ptr<ui::PangolinWindow> ui_;
     Keyframe::Ptr cur_kf_;
     bool mapping_update_pending_ = false;
+    std::size_t keyframe_count_ = 0;
+    std::size_t keyframe_cloud_bytes_ = 0;
 };
 
 }  // namespace modules

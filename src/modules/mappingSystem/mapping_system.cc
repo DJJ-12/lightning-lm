@@ -110,6 +110,8 @@ bool MappingSystem::Init(const std::string& yaml_path, const MappingSystemOption
 bool MappingSystem::Start() {
     cur_kf_.reset();
     mapping_update_pending_ = false;
+    keyframe_count_ = 0;
+    keyframe_cloud_bytes_ = 0;
     running_ = true;
     return true;
 }
@@ -127,6 +129,8 @@ void MappingSystem::Reset() {
     running_ = false;
     cur_kf_.reset();
     mapping_update_pending_ = false;
+    keyframe_count_ = 0;
+    keyframe_cloud_bytes_ = 0;
 
     // 先让算法对象断开 UI，避免 LIO-SAM / LaserMapping 析构时再次持有 UI
     if (use_lio_sam_ && lio_sam_) {
@@ -270,6 +274,16 @@ void MappingSystem::HandleProcessedKeyframe(const Keyframe::Ptr& kf) {
     }
     cur_kf_ = kf;
     mapping_update_pending_ = true;
+    ++keyframe_count_;
+    const CloudPtr cloud = kf->GetCloud();
+    if (cloud) {
+        keyframe_cloud_bytes_ += cloud->points.capacity() * sizeof(PointType);
+    }
+    if (keyframe_count_ % 10 == 0) {
+        LOG(INFO) << "[关键帧内存] keyframes=" << keyframe_count_
+                  << ", memory_mb=" << std::fixed << std::setprecision(2)
+                  << static_cast<double>(keyframe_cloud_bytes_) / (1024.0 * 1024.0);
+    }
     if (ui_) {
         ui_->UpdateKF(cur_kf_);
     }
