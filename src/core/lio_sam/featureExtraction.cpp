@@ -182,84 +182,127 @@ void FeatureExtractor::markOccludedPoints() {
 void FeatureExtractor::extractFeatures() {
     cornerCloud->clear();
     surfaceCloud->clear();
+    surfaceCloudScan->clear();
+    surfaceCloudScanDS->clear();
 
-    for (int i = 0; i < N_SCAN; i++) {
+    const int cloudSize = static_cast<int>(extractedCloud->points.size());
+    const int validPointCount = std::min(
+        {cloudSize,
+            static_cast<int>(pointColInd.size()),
+            static_cast<int>(cloudCurvature.size()),
+            static_cast<int>(cloudNeighborPicked.size()),
+            static_cast<int>(cloudLabel.size()),
+            static_cast<int>(cloudSmoothness.size())});
+    if (validPointCount <= 0)
+        return;
+
+    for (int i = 0; i < N_SCAN; ++i)
+    {
         surfaceCloudScan->clear();
-
-        for (int j = 0; j < 6; j++) {
+        for (int j = 0; j < 6; ++j)
+        {
             const int sp = (startRingIndex[i] * (6 - j) + endRingIndex[i] * j) / 6;
             const int ep = (startRingIndex[i] * (5 - j) + endRingIndex[i] * (j + 1)) / 6 - 1;
-
-            if (sp >= ep || sp < 0 || ep >= static_cast<int>(cloudSmoothness.size())) {
+            if (sp >= ep)
                 continue;
-            }
+            if (sp < 0 || ep < 0 || sp >= validPointCount || ep >= validPointCount)
+                continue;
 
             std::sort(cloudSmoothness.begin() + sp, cloudSmoothness.begin() + ep, by_value());
 
             int largestPickedNum = 0;
-            for (int k = ep; k >= sp; k--) {
+            for (int k = ep; k >= sp; --k)
+            {
                 const int ind = cloudSmoothness[k].ind;
-                if (cloudNeighborPicked[ind] == 0 && cloudCurvature[ind] > edgeThreshold) {
-                    largestPickedNum++;
-                    if (largestPickedNum <= 20) {
+                if (ind < 0 || ind >= validPointCount)
+                    continue;
+                if (cloudNeighborPicked[ind] == 0 && cloudCurvature[ind] > edgeThreshold)
+                {
+                    ++largestPickedNum;
+                    if (largestPickedNum <= 20)
+                    {
                         cloudLabel[ind] = 1;
                         cornerCloud->push_back(extractedCloud->points[ind]);
-                    } else {
+                    }
+                    else
+                    {
                         break;
                     }
 
                     cloudNeighborPicked[ind] = 1;
-                    for (int l = 1; l <= 5; l++) {
-                        const int columnDiff = std::abs(pointColInd[ind + l] - pointColInd[ind + l - 1]);
-                        if (columnDiff > 10) {
+                    for (int l = 1; l <= 5; ++l)
+                    {
+                        const int currentIndex = ind + l;
+                        const int previousIndex = currentIndex - 1;
+                        if (currentIndex < 0 || currentIndex >= validPointCount ||
+                            previousIndex < 0 || previousIndex >= validPointCount)
                             break;
-                        }
-                        cloudNeighborPicked[ind + l] = 1;
+                        const int columnDiff = std::abs(pointColInd[currentIndex] - pointColInd[previousIndex]);
+                        if (columnDiff > 10)
+                            break;
+                        cloudNeighborPicked[currentIndex] = 1;
                     }
-                    for (int l = -1; l >= -5; l--) {
-                        const int columnDiff = std::abs(pointColInd[ind + l] - pointColInd[ind + l + 1]);
-                        if (columnDiff > 10) {
+                    for (int l = -1; l >= -5; --l)
+                    {
+                        const int currentIndex = ind + l;
+                        const int nextIndex = currentIndex + 1;
+                        if (currentIndex < 0 || currentIndex >= validPointCount ||
+                            nextIndex < 0 || nextIndex >= validPointCount)
                             break;
-                        }
-                        cloudNeighborPicked[ind + l] = 1;
+                        const int columnDiff =std::abs(pointColInd[currentIndex] - pointColInd[nextIndex]);
+                        if (columnDiff > 10)
+                            break;
+                        cloudNeighborPicked[currentIndex] = 1;
                     }
                 }
             }
 
-            for (int k = sp; k <= ep; k++) {
+            for (int k = sp; k <= ep; ++k)
+            {
                 const int ind = cloudSmoothness[k].ind;
-                if (cloudNeighborPicked[ind] == 0 && cloudCurvature[ind] < surfThreshold) {
+                if (ind < 0 || ind >= validPointCount)
+                    continue;
+                if (cloudNeighborPicked[ind] == 0 && cloudCurvature[ind] < surfThreshold)
+                {
                     cloudLabel[ind] = -1;
                     cloudNeighborPicked[ind] = 1;
-
-                    for (int l = 1; l <= 5; l++) {
-                        const int columnDiff = std::abs(pointColInd[ind + l] - pointColInd[ind + l - 1]);
-                        if (columnDiff > 10) {
+                    for (int l = 1; l <= 5; ++l)
+                    {
+                        const int currentIndex = ind + l;
+                        const int previousIndex = currentIndex - 1;
+                        if (currentIndex < 0 || currentIndex >= validPointCount ||
+                            previousIndex < 0 || previousIndex >= validPointCount)
                             break;
-                        }
-                        cloudNeighborPicked[ind + l] = 1;
+                        const int columnDiff = std::abs(pointColInd[currentIndex] - pointColInd[previousIndex]);
+                        if (columnDiff > 10)
+                            break;
+                        cloudNeighborPicked[currentIndex] = 1;
                     }
-                    for (int l = -1; l >= -5; l--) {
-                        const int columnDiff = std::abs(pointColInd[ind + l] - pointColInd[ind + l + 1]);
-                        if (columnDiff > 10) {
+                    for (int l = -1; l >= -5; --l)
+                    {
+                        const int currentIndex = ind + l;
+                        const int nextIndex = currentIndex + 1;
+                        if (currentIndex < 0 || currentIndex >= validPointCount ||
+                            nextIndex < 0 || nextIndex >= validPointCount)
                             break;
-                        }
-                        cloudNeighborPicked[ind + l] = 1;
+                        const int columnDiff = std::abs(pointColInd[currentIndex] - pointColInd[nextIndex]);
+                        if (columnDiff > 10)
+                            break;
+                        cloudNeighborPicked[currentIndex] = 1;
                     }
                 }
             }
 
-            for (int k = sp; k <= ep; k++) {
-                if (cloudLabel[k] <= 0) {
+            for (int k = sp; k <= ep; ++k)
+            {
+                if (cloudLabel[k] <= 0)
                     surfaceCloudScan->push_back(extractedCloud->points[k]);
-                }
             }
         }
 
         surfaceCloudScanDS->clear();
         downSizeFilter.setInputCloud(surfaceCloudScan);
         downSizeFilter.filter(*surfaceCloudScanDS);
-
         *surfaceCloud += *surfaceCloudScanDS;
     }
 }
