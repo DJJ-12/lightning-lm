@@ -439,7 +439,7 @@ bool MappingSystem::deskewInfo() {
     }
 
     imuDeskewInfo();
-    return cloudInfo_->imu_available;
+    return true;
 }
 
 bool MappingSystem::imuConverter(const sensor_msgs::msg::Imu& imu_in,
@@ -478,7 +478,6 @@ bool MappingSystem::imuConverter(const sensor_msgs::msg::Imu& imu_in,
 
 
 void MappingSystem::imuDeskewInfo() {
-    cloudInfo_->imu_available = false;
 
     while (!imuQueue_.empty()) {
         if (ToSec(imuQueue_.front().header.stamp) < timeScanCur_ - 0.01) {
@@ -545,7 +544,6 @@ void MappingSystem::imuDeskewInfo() {
     if (imuPointerCur_ <= 0) {
         return;
     }
-    cloudInfo_->imu_available = true;
 
     cloudInfo_->imu_roll_init = imuRollInit;
     cloudInfo_->imu_pitch_init = imuPitchInit;
@@ -588,7 +586,7 @@ void MappingSystem::findPosition(double /*relTime*/, float* posXCur, float* posY
 }
 
 PointType MappingSystem::deskewPoint(PointType* point, double relTime) {
-    if (deskewFlag_ == -1 || cloudInfo_->imu_available == false) {
+    if (deskewFlag_ == -1 ) {
         return *point;
     }
 

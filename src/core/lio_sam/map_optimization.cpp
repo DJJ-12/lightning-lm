@@ -250,7 +250,7 @@ void mapOptimization::updateInitialGuess()
     {
         // Old-version advantage: initialize the first map pose with IMU roll/pitch/yaw.
         // If heading initialization is disabled, only yaw is reset to zero.
-        if (cloudInfo && cloudInfo->imu_available)
+        if (cloudInfo )
         {
             transformTobeMapped[0] = cloudInfo->imu_roll_init;
             transformTobeMapped[1] = cloudInfo->imu_pitch_init;
@@ -280,58 +280,96 @@ void mapOptimization::updateInitialGuess()
         copyTransform(transformTobeMapped, frameInitialGuessTransform);
         return;
     }
+    /*
+    // use imu incremental estimation for pose guess (only rotation)
+    Eigen::Affine3f transBack = pcl::getTransformation(0, 0, 0, cloudInfo->imu_roll_init, cloudInfo->imu_pitch_init, cloudInfo->imu_yaw_init);
+    Eigen::Affine3f transIncre = lastImuTransformation_.inverse() * transBack;
 
-    // use imu pre-integration estimation for pose guess
-    if (cloudInfo->odom_available == true)
+    Eigen::Affine3f transTobe = trans2Affine3f(transformTobeMapped);
+    Eigen::Affine3f transFinal = transTobe * transIncre;
+    pcl::getTranslationAndEulerAngles(transFinal, transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5],
+                                                    transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]);
+
+    lastImuTransformation_ = pcl::getTransformation(0, 0, 0, cloudInfo->imu_roll_init, cloudInfo->imu_pitch_init, cloudInfo->imu_yaw_init); // save imu before return;
+    return;
+    */
+    TrustedPose& trusted = trusted_pose_;
+    if (mappingFailureCount == 0 && trusted.has_last && Finite6(trusted.last))
     {
-        Eigen::Affine3f transBack = pcl::getTransformation(
-            cloudInfo->initial_guess_x, cloudInfo->initial_guess_y, cloudInfo->initial_guess_z,
-            cloudInfo->initial_guess_roll, cloudInfo->initial_guess_pitch, cloudInfo->initial_guess_yaw);
-        if (lastImuPreTransAvailable_ == false)
+        Eigen::Affine3f initialGuessAffine = pcl::getTransformation(
+            trusted.last[3], trusted.last[4], trusted.last[5],
+            trusted.last[0], trusted.last[1], trusted.last[2]);
+        // 旋转部分使用imu增量估计
+        if (trusted.has_last_imu)
         {
-            lastImuPreTransformation_ = transBack;
-            lastImuPreTransAvailable_ = true;
-        } else {
-            Eigen::Affine3f transIncre = lastImuPreTransformation_.inverse() * transBack;
-            Eigen::Affine3f transTobe = trans2Affine3f(transformTobeMapped);
-            Eigen::Affine3f transFinal = transTobe * transIncre;
-            pcl::getTranslationAndEulerAngles(transFinal, transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5], 
-                                                            transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]);
-
-            lastImuPreTransformation_ = transBack;
-
-            lastImuTransformation_ = pcl::getTransformation(0, 0, 0, cloudInfo->imu_roll_init, cloudInfo->imu_pitch_init, cloudInfo->imu_yaw_init); // save imu before return;
-            
-            if (std::abs(pcl::rad2deg(transformTobeMapped[0])) > debugRollPitchWarnDeg ||
-                std::abs(pcl::rad2deg(transformTobeMapped[1])) > debugRollPitchWarnDeg)
+            Eigen::Affine3f acceptedImuAffine = pcl::getTransformation(
+                0.0f, 0.0f, 0.0f,
+                trusted.last_imu[0], trusted.last_imu[1], trusted.last_imu[2]);
+            Eigen::Affine3f currentImuAffine = pcl::getTransformation(
+                0.0f, 0.0f, 0.0f,
+                cloudInfo->imu_roll_init,
+                cloudInfo->imu_pitch_init,
+                cloudInfo->imu_yaw_init);
+            initialGuessAffine = initialGuessAffine * acceptedImuAffine.inverse() * currentImuAffine;
+            lastImuTransformation_ = currentImuAffine;
+        }
+        // 平移部分使用速度积分估计
+        const double dtAccepted = timeLaserInfoCur - trusted.last_time;
+        if (trusted.has_prev &&
+            std::isfinite(dtAccepted) &&
+            dtAccepted > 0.0 &&
+            dtAccepted <= kTrustedExtrapolateMaxDt)
+        {
+            const double dtHist = trusted.last_time - trusted.prev_time;
+            if (std::isfinite(dtHist) && dtHist > 1e-3)
             {
-                RCLCPP_WARN(this->get_logger(),
-                    "[RP-THRESH][updateInitialGuess-odom] roll=%.3f pitch=%.3f guess_rp=(%.3f, %.3f) thresh=%.3f deg",
-                    pcl::rad2deg(transformTobeMapped[0]),
-                    pcl::rad2deg(transformTobeMapped[1]),
-                    pcl::rad2deg(cloudInfo->initial_guess_roll),
-                    pcl::rad2deg(cloudInfo->initial_guess_pitch),
-                    debugRollPitchWarnDeg);
+                double vx = (trusted.last[3] - trusted.prev[3]) / dtHist;
+                double vy = (trusted.last[4] - trusted.prev[4]) / dtHist;
+                double vz = (trusted.last[5] - trusted.prev[5]) / dtHist;
+                const double speed = std::sqrt(vx * vx + vy * vy + vz * vz);
+                if (speed > kLowSpeedMaxTranslationSpeed)
+                {
+                    const double scale = kLowSpeedMaxTranslationSpeed / std::max(speed, 1e-6);
+                    vx *= scale;
+                    vy *= scale;
+                    vz *= scale;
+                }
+                initialGuessAffine.translation().x() += static_cast<float>(vx * dtAccepted);
+                initialGuessAffine.translation().y() += static_cast<float>(vy * dtAccepted);
+                initialGuessAffine.translation().z() += static_cast<float>(vz * dtAccepted);
             }
-            
-            return;
+        }
+
+        setTransformFromAffine(initialGuessAffine);
+        copyTransform(transformTobeMapped, frameInitialGuessTransform);
+        return;
+    }
+    // 连续失败帧
+    if ( debugTiming)
+    {
+        static int recovery_guess_log_count = 0;
+        if (++recovery_guess_log_count % 5 == 0)
+        {
+            RCLCPP_INFO(get_logger(),
+                "[INIT_GUESS][RECOVERY] failureCount=%d. Use new-version fallback/prior propagation, "
+                "not frozen last-trusted pose, so mapping can recover after weak geometry.",
+                mappingFailureCount);
         }
     }
 
-    // use imu incremental estimation for pose guess (only rotation)
-    if (cloudInfo->imu_available == true)
-    {
-        Eigen::Affine3f transBack = pcl::getTransformation(0, 0, 0, cloudInfo->imu_roll_init, cloudInfo->imu_pitch_init, cloudInfo->imu_yaw_init);
-        Eigen::Affine3f transIncre = lastImuTransformation_.inverse() * transBack;
 
-        Eigen::Affine3f transTobe = trans2Affine3f(transformTobeMapped);
-        Eigen::Affine3f transFinal = transTobe * transIncre;
-        pcl::getTranslationAndEulerAngles(transFinal, transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5], 
-                                                        transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]);
-
-        lastImuTransformation_ = pcl::getTransformation(0, 0, 0, cloudInfo->imu_roll_init, cloudInfo->imu_pitch_init, cloudInfo->imu_yaw_init); // save imu before return;
-        return;
-    }
+    Eigen::Affine3f transBack = pcl::getTransformation(
+        0.0f, 0.0f, 0.0f,
+        cloudInfo->imu_roll_init,
+        cloudInfo->imu_pitch_init,
+        cloudInfo->imu_yaw_init);
+    Eigen::Affine3f transIncre = lastImuTransformation_.inverse() * transBack;
+    Eigen::Affine3f transTobe = trans2Affine3f(transformTobeMapped);
+    Eigen::Affine3f transFinal = transTobe * transIncre;
+    setTransformFromAffine(transFinal);
+    lastImuTransformation_ = transBack;
+    copyTransform(transformTobeMapped, frameInitialGuessTransform);
+    return;
 }
 
 void mapOptimization::extractForLoopClosure()
@@ -821,49 +859,6 @@ void mapOptimization::copyTransform(const float src[6], float dst[6])
     std::copy(src, src + 6, dst);
 }
 
-bool mapOptimization::transformIsFinite(const float transformIn[6])
-{
-    for (int i = 0; i < 6; ++i)
-    {
-        if (!std::isfinite(transformIn[i]))
-            return false;
-    }
-    return true;
-}
-
-const char* mapOptimization::trackingStateName() const
-{
-    return mappingTrackingState == MappingTrackingState::TRACKING ? "TRACKING" : "LOST";
-}
-
-void mapOptimization::resetFrameQuality()
-{
-    mappingPoseReliable = true;
-    lidarCorrectionFlag = 0;
-    mappingPoseSource = "INIT";
-}
-
-bool mapOptimization::acceptMappingPose(const std::string& source)
-{
-    mappingPoseReliable = true;
-    lidarCorrectionFlag = 0;
-    mappingPoseSource = source;
-    mappingTrackingState = MappingTrackingState::TRACKING;
-    mappingFailureCount = 0;
-    mappingFirstFailureTime = -1.0;
-    return true;
-}
-
-void mapOptimization::rejectMappingPose(const std::string& source)
-{
-    mappingPoseReliable = false;
-    lidarCorrectionFlag = 2;
-    mappingPoseSource = source;
-    mappingTrackingState = MappingTrackingState::LOST;
-    if (mappingFailureCount++ == 0)
-        mappingFirstFailureTime = timeLaserInfoCur;
-}
-
 bool mapOptimization::isFinitePoint(const PointType& p) const
 {
     return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
@@ -944,111 +939,6 @@ bool mapOptimization::poseCloseToPrior(const Eigen::Affine3f& priorAffine,
     }
     return ok;
 }
-
-double mapOptimization::yawFromAffine(const Eigen::Affine3f& a)
-{
-    float x, y, z, r, p, yaw;
-    pcl::getTranslationAndEulerAngles(a, x, y, z, r, p, yaw);
-    return yaw;
-}
-
-double mapOptimization::xyDistance(const Eigen::Affine3f& a, const Eigen::Affine3f& b)
-{
-    float ax, ay, az, ar, ap, ayaw;
-    float bx, by, bz, br, bp, byaw;
-    pcl::getTranslationAndEulerAngles(a, ax, ay, az, ar, ap, ayaw);
-    pcl::getTranslationAndEulerAngles(b, bx, by, bz, br, bp, byaw);
-    const double dx = ax - bx;
-    const double dy = ay - by;
-    return std::sqrt(dx * dx + dy * dy);
-}
-
-mapOptimization::MotionContinuityInfo mapOptimization::evaluateMotionContinuity(const Eigen::Affine3f& candidateAffine, const char* tag)
-{
-    MotionContinuityInfo info;
-
-    if (!hasLastOutputPose)
-    {
-        RCLCPP_WARN(this->get_logger(),
-            "[MOTION_GATE][%s] no last published pose; treat as continuous.", tag);
-        return info;
-    }
-
-    info.dt = (lastOutputTime > 0.0) ? std::max(1e-3, timeLaserInfoCur - lastOutputTime) : 0.0;
-    info.ds = xyDistance(lastOutputAffine, candidateAffine);
-    info.dyawDeg = std::abs(pcl::rad2deg(normalizeAngleRad(yawFromAffine(candidateAffine) - yawFromAffine(lastOutputAffine))));
-    info.speed = info.ds / std::max(1e-3, info.dt);
-    info.yawRate = info.dyawDeg / std::max(1e-3, info.dt);
-
-    // Low-speed 10 Hz vehicle: single-frame ds can be very small, so use a floor.
-    // This makes curvature a smooth geometric indicator, not a division-by-noise detector.
-    const double curvatureDs = std::max(info.ds, 0.10);
-    info.curvature = (info.dyawDeg * M_PI / 180.0) / curvatureDs;
-
-    // Warm-up: before one previous published motion sample exists, do not reject.
-    // The previous sample is computed from the previous published pose to the current last published pose.
-    // This is NOT based on keyframes; it uses every published LiDAR odometry frame.
-    if (speedHist.empty() || yawRateHist.empty() || curvatureHist.empty())
-    {
-        RCLCPP_WARN(this->get_logger(),
-            "[MOTION_GATE][%s] warmup hist=%zu dt=%.3f ds=%.3f dyaw=%.2fdeg v=%.3f omega=%.2f kappa=%.3f; continuous.",
-            tag, speedHist.size(), info.dt, info.ds, info.dyawDeg, info.speed, info.yawRate, info.curvature);
-        return info;
-    }
-
-    info.ready = true;
-
-    // Adjacent-frame continuity:
-    //   acceleration        = |v_k     - v_{k-1}|     / dt_k
-    //   angular acceleration= |omega_k - omega_{k-1}| / dt_k
-    //   curvature jump      = |kappa_k - kappa_{k-1}|
-    // Here k-1 is the immediately previous published odometry interval, not a keyframe interval.
-    // This matches the physical meaning of a jump: a sudden change relative to the adjacent trajectory segment.
-    info.speedRef = speedHist.back();
-    info.yawRateRef = yawRateHist.back();
-    info.curvatureRef = curvatureHist.back();
-
-    info.speedJump = std::abs(info.speed - info.speedRef);
-    info.yawRateJump = std::abs(info.yawRate - info.yawRateRef);
-    info.curvatureJump = std::abs(info.curvature - info.curvatureRef);
-    info.accel = info.speedJump / std::max(1e-3, info.dt);
-    info.yawAccel = info.yawRateJump / std::max(1e-3, info.dt);
-
-    // Physical continuity gates for a <0.5 m/s ground vehicle.
-    // These are intentionally permissive: they should catch sudden LM false convergence, not normal slow turning.
-    // Since dt may be affected by mappingProcessInterval/CPU, require both a derivative jump and an absolute jump.
-    const bool speedBad = (info.speed > 1.50);
-    const bool accelBad = (info.accel > 1.20 && info.speedJump > 0.30);
-    const bool yawRateBad = (info.yawRate > 80.0);
-    const bool yawAccelBad = (info.yawAccel > 180.0 && info.yawRateJump > 18.0);
-    const bool curvatureBad = (info.curvatureJump > 1.80 && info.dyawDeg > 1.0 && info.ds > 0.03);
-
-    info.continuous = !(speedBad || accelBad || yawRateBad || yawAccelBad || curvatureBad);
-
-    RCLCPP_WARN(this->get_logger(),
-        "[MOTION_GATE][%s] ok=%d dt=%.3f ds=%.3f dyaw=%.2fdeg "
-        "v=%.3f(prev=%.3f,dv=%.3f,a=%.3f) "
-        "omega=%.2f(prev=%.2f,d=%.2f,alpha=%.2f) "
-        "kappa=%.3f(prev=%.3f,d=%.3f) bad(speed=%d accel=%d omega=%d alpha=%d kappa=%d)",
-        tag, (int)info.continuous, info.dt, info.ds, info.dyawDeg,
-        info.speed, info.speedRef, info.speedJump, info.accel,
-        info.yawRate, info.yawRateRef, info.yawRateJump, info.yawAccel,
-        info.curvature, info.curvatureRef, info.curvatureJump,
-        (int)speedBad, (int)accelBad, (int)yawRateBad, (int)yawAccelBad, (int)curvatureBad);
-
-    return info;
-}
-
-void mapOptimization::pushMotionHistory(double v, double omegaDeg, double kappa)
-{
-    speedHist.push_back(v); // 速度
-    yawRateHist.push_back(omegaDeg); // 角速度
-    curvatureHist.push_back(kappa); // 曲率
-    while ((int)speedHist.size() > motionHistoryWindow) speedHist.pop_front();
-    while ((int)yawRateHist.size() > motionHistoryWindow) yawRateHist.pop_front();
-    while ((int)curvatureHist.size() > motionHistoryWindow) curvatureHist.pop_front();
-}
-
 
 bool mapOptimization::prepareCurrentRawCloudForRegistration()
 {
@@ -1180,27 +1070,33 @@ bool mapOptimization::rawCloudICPFallback(const Eigen::Affine3f& initialGuess,
 
 void mapOptimization::scan2MapOptimization()
 {
+    const bool logThisFrame =
+        debugTiming && ((diagnosticExecutedCalls + 1) % 20 == 0);
+
+    resetFrameQuality();
+    copyTransform(transformTobeMapped, frameInitialGuessTransform);
+    const Eigen::Affine3f priorAffine = trans2Affine3f(transformTobeMapped);
+
     if (cloudKeyPoses3D->points.empty())
+    {
+        acceptMappingPose("INIT");
         return;
+    }
 
-    currentOdomCov = 0;
-    isDegenerate = false;
-
-    Eigen::Affine3f priorAffine = trans2Affine3f(transformTobeMapped);
-    bool lmRan = false;
-    bool lmMotionOk = false;
     bool lmConverged = false;
     int finalCoeffNum = 0;
     Eigen::Affine3f lmAffine = priorAffine;
+    MotionContinuityInfo lmMotion;
+    const int maxIterations =
+        isOnlineMapping ? onlineMaxOptimizationIterations : maxOptimizationIterations;
 
     if (laserCloudCornerLastDSNum > edgeFeatureMinValidNum &&
-        laserCloudSurfLastDSNum   > surfFeatureMinValidNum)
+        laserCloudSurfLastDSNum > surfFeatureMinValidNum)
     {
-        lmRan = true;
         kdtreeCornerFromMap->setInputCloud(laserCloudCornerFromMapDS);
         kdtreeSurfFromMap->setInputCloud(laserCloudSurfFromMapDS);
 
-        for (int iterCount = 0; iterCount < 30; iterCount++)
+        for (int iterCount = 0; iterCount < maxIterations; ++iterCount)
         {
             laserCloudOri->clear();
             coeffSel->clear();
@@ -1209,8 +1105,9 @@ void mapOptimization::scan2MapOptimization()
             surfOptimization();
             combineOptimizationCoeffs();
 
-            finalCoeffNum = (int)laserCloudOri->size();
+            finalCoeffNum = static_cast<int>(laserCloudOri->size());
             lmConverged = LMOptimization(iterCount);
+            lastLMIterationCount = iterCount + 1;
 
             if (lmConverged)
                 break;
@@ -1218,100 +1115,136 @@ void mapOptimization::scan2MapOptimization()
 
         transformUpdate();
         lmAffine = trans2Affine3f(transformTobeMapped);
-        MotionContinuityInfo lmMotion = evaluateMotionContinuity(lmAffine, "LM");
-        lmMotionOk = lmMotion.continuous;
+        lmMotion = evaluateMotionContinuity(lmAffine, "LM");
+
+        if (lmConverged &&
+            !isDegenerate &&
+            finalCoeffNum >= 80 &&
+            lmMotion.continuous)
+        {
+            acceptMappingPose("LM");
+            if (logThisFrame)
+            {
+                RCLCPP_INFO(get_logger(),
+                    "[LM][USE_HIGH] converged=%d degenerate=%d coeff=%d motionOK=%d cov=0 save=yes",
+                    int(lmConverged),
+                    int(isDegenerate),
+                    finalCoeffNum,
+                    int(lmMotion.continuous));
+            }
+            return;
+        }
     }
-    else
+    else if (logThisFrame)
     {
-        RCLCPP_WARN(this->get_logger(),
+        RCLCPP_INFO(get_logger(),
             "[LM][FEATURE_WEAK] cornerDS=%d/%d surfDS=%d/%d. Try raw ICP fallback.",
-            laserCloudCornerLastDSNum, edgeFeatureMinValidNum,
-            laserCloudSurfLastDSNum, surfFeatureMinValidNum);
+            laserCloudCornerLastDSNum,
+            edgeFeatureMinValidNum,
+            laserCloudSurfLastDSNum,
+            surfFeatureMinValidNum);
     }
-    
-    if (lmConverged && !isDegenerate && finalCoeffNum >= 80 && lmMotionOk)
+
+    if (logThisFrame && lastLMIterationCount > 0)
     {
-        currentOdomCov = 0;
-        RCLCPP_WARN(this->get_logger(),
-            "[LM][USE_HIGH] converged=%d degenerate=%d coeff=%d motionOK=%d cov=0 save=yes",
-            (int)lmConverged, (int)isDegenerate, finalCoeffNum, (int)lmMotionOk);
-        return;
+        RCLCPP_INFO(get_logger(),
+            "[LM][SUSPECT] converged=%d degenerate=%d coeff=%d motionOK=%d. Try raw ICP fallback.",
+            int(lmConverged),
+            int(isDegenerate),
+            finalCoeffNum,
+            int(lmMotion.continuous));
     }
-    // LM 优化失败
-    RCLCPP_WARN(this->get_logger(),
-        "[LM][SUSPECT] ran=%d converged=%d degenerate=%d coeff=%d motionOK=%d. Try raw ICP fallback.",
-        (int)lmRan, (int)lmConverged, (int)isDegenerate, finalCoeffNum, (int)lmMotionOk);
 
     setTransformFromAffine(priorAffine);
     Eigen::Affine3f icpAffine = priorAffine;
     double icpFitness = std::numeric_limits<double>::infinity();
     if (rawCloudICPFallback(priorAffine, icpAffine, icpFitness))
     {
-        MotionContinuityInfo icpMotion = evaluateMotionContinuity(icpAffine, "ICP");
-        const bool icpHigh = icpMotion.continuous && icpFitness < 0.3;
-        if (icpHigh){
+        const MotionContinuityInfo icpMotion =
+            evaluateMotionContinuity(icpAffine, "ICP");
+        if (icpMotion.continuous && icpFitness < 0.3)
+        {
             setTransformFromAffine(icpAffine);
             transformUpdate();
-            currentOdomCov = 0;
-            isDegenerate = false;
-
-            RCLCPP_WARN(this->get_logger(),
-                "[ICP][USE_HIGH] fitness=%.6f motionOK=%d cov=0 save=yes",
-                icpFitness, (int)icpMotion.continuous);
+            acceptMappingPose("ICP");
+            if (logThisFrame)
+            {
+                RCLCPP_INFO(get_logger(),
+                    "[ICP][USE_HIGH] fitness=%.6f motionOK=%d cov=0 save=yes",
+                    icpFitness,
+                    int(icpMotion.continuous));
+            }
             return;
         }
-        RCLCPP_WARN(this->get_logger(),
-            "[ICP][REJECT_WEAK] fitness=%.6f motionOK=%d. Continue fallback.",
-            icpFitness, (int)icpMotion.continuous);
-    }else{
-        RCLCPP_WARN(this->get_logger(),
-            "[ICP][FAILED] Continue fallback.");
+
+        if (logThisFrame)
+        {
+            RCLCPP_INFO(get_logger(),
+                "[ICP][REJECT_WEAK] fitness=%.6f motionOK=%d. Continue fallback.",
+                icpFitness,
+                int(icpMotion.continuous));
+        }
     }
-    // icp 也失败 ， 就使用LM 优化结果 ，但是要注意这个结果的位姿并不可靠
-    if (lmRan)
+    else if (logThisFrame)
     {
-        setTransformFromAffine(lmAffine);
-        transformUpdate();
-        currentOdomCov = lmMotionOk ? 1 : 2;
-        isDegenerate = true;
-        RCLCPP_WARN(this->get_logger(),
-            "[FALLBACK][PUBLISH_LM] ICP failed. lmMotionOK=%d cov=%d save=no",
-            (int)lmMotionOk, currentOdomCov);
+        RCLCPP_INFO(get_logger(), "[ICP][FAILED] Continue fallback.");
     }
-    else
+
+    if (lastLMIterationCount > 0)
     {
-        setTransformFromAffine(priorAffine);
+        float rawDeltaNorm = 0.0f;
+        float usedDeltaNorm = 0.0f;
+        const Eigen::Affine3f fallbackAffine = BuildFallbackAffine(
+            priorAffine, lmAffine, &rawDeltaNorm, &usedDeltaNorm);
+
+        setTransformFromAffine(fallbackAffine);
         transformUpdate();
-        currentOdomCov = 2;
-        isDegenerate = true;
-        RCLCPP_WARN(this->get_logger(),
+        rejectMappingPose("FALLBACK_LM");
+        currentOdomCov = lmMotion.continuous ? 1 : 2;
+
+        if (logThisFrame)
+        {
+            RCLCPP_INFO(get_logger(),
+                "[FALLBACK][PUBLISH_LM] ICP failed. Use bounded LM translation + prior rotation. "
+                "lmMotionOK=%d rawDelta=%.3f usedDelta=%.3f cov=%d save=no",
+                int(lmMotion.continuous),
+                rawDeltaNorm,
+                usedDeltaNorm,
+                currentOdomCov);
+        }
+        return;
+    }
+
+    setTransformFromAffine(priorAffine);
+    transformUpdate();
+    rejectMappingPose("FALLBACK_PRIOR");
+    if (logThisFrame)
+    {
+        RCLCPP_INFO(get_logger(),
             "[FALLBACK][PUBLISH_PRIOR] LM unavailable and ICP failed. cov=2 save=no");
     }
 }
 
 void mapOptimization::transformUpdate()
 {
-    if (cloudInfo->imu_available == true)
+    if (std::abs(cloudInfo->imu_pitch_init) < 1.4)
     {
-        if (std::abs(cloudInfo->imu_pitch_init) < 1.4)
-        {
-            double imuWeight = imuRPYWeight;
-            tf2::Quaternion imuQuaternion;
-            tf2::Quaternion transformQuaternion;
-            double rollMid, pitchMid, yawMid;
+        double imuWeight = imuRPYWeight;
+        tf2::Quaternion imuQuaternion;
+        tf2::Quaternion transformQuaternion;
+        double rollMid, pitchMid, yawMid;
 
-            // slerp roll
-            transformQuaternion.setRPY(transformTobeMapped[0], 0, 0);
-            imuQuaternion.setRPY(cloudInfo->imu_roll_init, 0, 0);
-            tf2::Matrix3x3(transformQuaternion.slerp(imuQuaternion, imuWeight)).getRPY(rollMid, pitchMid, yawMid);
-            transformTobeMapped[0] = rollMid;
+        // slerp roll
+        transformQuaternion.setRPY(transformTobeMapped[0], 0, 0);
+        imuQuaternion.setRPY(cloudInfo->imu_roll_init, 0, 0);
+        tf2::Matrix3x3(transformQuaternion.slerp(imuQuaternion, imuWeight)).getRPY(rollMid, pitchMid, yawMid);
+        transformTobeMapped[0] = rollMid;
 
-            // slerp pitch
-            transformQuaternion.setRPY(0, transformTobeMapped[1], 0);
-            imuQuaternion.setRPY(0, cloudInfo->imu_pitch_init, 0);
-            tf2::Matrix3x3(transformQuaternion.slerp(imuQuaternion, imuWeight)).getRPY(rollMid, pitchMid, yawMid);
-            transformTobeMapped[1] = pitchMid;
-        }
+        // slerp pitch
+        transformQuaternion.setRPY(0, transformTobeMapped[1], 0);
+        imuQuaternion.setRPY(0, cloudInfo->imu_pitch_init, 0);
+        tf2::Matrix3x3(transformQuaternion.slerp(imuQuaternion, imuWeight)).getRPY(rollMid, pitchMid, yawMid);
+        transformTobeMapped[1] = pitchMid;
     }
 
     transformTobeMapped[0] = constraintTransformation(transformTobeMapped[0], rotation_tollerance);
@@ -1526,27 +1459,4 @@ void mapOptimization::correctPoses()
         aLoopIsClosed = false;
     }
 }
-
-void mapOptimization::updateOutputTrajectoryHistory(){
-        if (!transformIsFinite(transformTobeMapped))
-            return;
-
-        Eigen::Affine3f outputAffine =
-            trans2Affine3f(transformTobeMapped);
-        if (hasLastOutputPose)
-        {
-            const double dt = std::max(1e-3, timeLaserInfoCur - lastOutputTime);
-            const double ds = xyDistance(lastOutputAffine, outputAffine);
-            const double dyawDeg = std::abs(pcl::rad2deg(normalizeAngleRad(yawFromAffine(outputAffine) - yawFromAffine(lastOutputAffine))));
-            const double v = ds / dt;
-            const double omega = dyawDeg / dt;
-            const double kappa = (dyawDeg * M_PI / 180.0) / std::max(ds, 0.10);
-            pushMotionHistory(v, omega, kappa);
-        }
-
-        lastOutputAffine = outputAffine;
-        lastOutputTime = timeLaserInfoCur;
-        hasLastOutputPose = true;
-
-    }
 

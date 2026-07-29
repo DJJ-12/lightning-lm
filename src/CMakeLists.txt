@@ -18,6 +18,7 @@ add_library(${PROJECT_NAME}.libs SHARED
         core/lio_sam/lio_sam_mapping.cc
         core/lio_sam/featureExtraction.cpp
         core/lio_sam/map_optimization.cpp
+        core/lio_sam/MotionContinuity.cpp
         core/lio_sam/loop.cpp
 
         core/localization/localization_result.cc

@@ -104,6 +104,9 @@ public:
     double timeLaserInfoCur;
 
     static constexpr int kMaxConsecutiveMappingFailures = 15;
+    static constexpr double kTrustedExtrapolateMaxDt = 0.50;
+    static constexpr double kLowSpeedMaxTranslationSpeed = 0.80;
+    static constexpr float kFallbackMaxTranslationStep = 0.30f;
 
     float transformTobeMapped[6];
     int currentOdomCov = 0;
@@ -133,7 +136,7 @@ public:
         double curvatureJump = 0.0;
     };
 
-    struct HybridTrustedPoseState {
+    struct TrustedPose {
         bool has_last = false;
         bool has_prev = false;
         bool has_last_imu = false;
@@ -157,10 +160,7 @@ public:
     int mappingFailureCount = 0;
     double mappingFirstFailureTime = -1.0;
     float frameInitialGuessTransform[6] = {0, 0, 0, 0, 0, 0};
-    int lastLMCloudSelNum = 0;
     int lastLMIterationCount = 0;
-    bool lastLMRan = false;
-    bool lastLMConverged = false;
     bool hasLastOutputPose = false;
     bool lastRunExecuted = false;
 
@@ -177,7 +177,7 @@ public:
     std::uint64_t diagnosticInitialGuessCalls = 0;
     Eigen::Affine3f lastOutputAffine = Eigen::Affine3f::Identity();
     double lastOutputTime = -1.0;
-    HybridTrustedPoseState hybrid_trusted_pose_;
+    TrustedPose trusted_pose_;
     std::deque<double> speedHist;
     std::deque<double> yawRateHist;
     std::deque<double> curvatureHist;
@@ -226,11 +226,15 @@ public:
     double normalizeAngleRad(double angle);
     void setTransformFromAffine(const Eigen::Affine3f& affine);
     void copyTransform(const float src[6], float dst[6]);
-    bool transformIsFinite(const float transformIn[6]);
+    bool Finite6(const std::array<float, 6>& transform) const;
     const char* trackingStateName() const;
     void resetFrameQuality();
-    bool acceptMappingPose(const std::string& source);
+    void acceptMappingPose(const std::string& source);
     void rejectMappingPose(const std::string& source);
+    Eigen::Affine3f BuildFallbackAffine(const Eigen::Affine3f& priorAffine,
+                                        const Eigen::Affine3f& lmAffine,
+                                        float* rawDeltaNorm,
+                                        float* usedDeltaNorm) const;
     bool isFinitePoint(const PointType& p) const;
     void filterInvalidAndRangeInPlace(pcl::PointCloud<PointType>::Ptr& cloud,
                                       const char* tag,

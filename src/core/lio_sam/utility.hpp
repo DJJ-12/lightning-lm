@@ -130,18 +130,9 @@ struct LioSamCloudInfo
     double timestamp = 0.0;
     std::string frame_id;
 
-    bool imu_available = false;
     float imu_roll_init = 0.0f;
     float imu_pitch_init = 0.0f;
     float imu_yaw_init = 0.0f;
-
-    bool odom_available = false;
-    float initial_guess_x = 0.0f;
-    float initial_guess_y = 0.0f;
-    float initial_guess_z = 0.0f;
-    float initial_guess_roll = 0.0f;
-    float initial_guess_pitch = 0.0f;
-    float initial_guess_yaw = 0.0f;
 
     std::vector<int> start_ring_index;
     std::vector<int> end_ring_index;
