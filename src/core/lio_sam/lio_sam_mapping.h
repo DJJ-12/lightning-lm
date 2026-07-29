@@ -43,7 +43,8 @@ class LioSamMapping {
     ~LioSamMapping();
 
     bool Init(const std::string& config_yaml);
-    bool Run(::LioSamCloudInfo& cloud_info);
+    bool Run(
+        const std::shared_ptr<::LioSamCloudInfo>& cloud_info);
 
     void SetUI(std::shared_ptr<ui::PangolinWindow> ui) { ui_ = std::move(ui); }
 
@@ -53,10 +54,7 @@ class LioSamMapping {
      NavState GetState() const { return state_; }
 
     CloudPtr GetScanUndist() const {
-        if (!recent_cloud_) {
-            return nullptr;
-        }
-        return CloudPtr(new PointCloudType(*recent_cloud_));
+        return recent_cloud_;
     }
     CloudPtr GetGlobalMap(bool use_lio_pose, bool use_voxel = true, float res = 0.1);
     void SyncOptimizedKeyframePoses();

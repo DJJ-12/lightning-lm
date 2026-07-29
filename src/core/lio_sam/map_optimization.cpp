@@ -109,20 +109,20 @@ void mapOptimization::allocateMemory(){
         curvatureHist.clear();
     }
 
-bool mapOptimization::Run(LioSamCloudInfo& msgIn){
+bool mapOptimization::Run(const std::shared_ptr<LioSamCloudInfo>& msgIn){
         createdNewKeyframe = false;
         lastRunExecuted = false;
         ++diagnosticRunCalls;
 
-        timeLaserInfoCur = msgIn.timestamp;
+        timeLaserInfoCur = msgIn->timestamp;
 
         // extract info and feature cloud
         cloudInfo = msgIn;
-        if (!msgIn.cloud_corner || !msgIn.cloud_surface || !msgIn.cloud_deskewed) {
+        if (!msgIn->cloud_corner || !msgIn->cloud_surface || !msgIn->cloud_deskewed) {
             return false;
         }
-        *laserCloudCornerLast = *msgIn.cloud_corner;
-        *laserCloudSurfLast = *msgIn.cloud_surface;
+        *laserCloudCornerLast = *msgIn->cloud_corner;
+        *laserCloudSurfLast = *msgIn->cloud_surface;
 
         std::lock_guard<std::mutex> lock(mtx);
 
@@ -143,7 +143,7 @@ bool mapOptimization::Run(LioSamCloudInfo& msgIn){
 
             correctPoses();
 
-            updateOdometryState();
+            updateOutputTrajectoryHistory();
             lastRunExecuted = true;
             ++diagnosticExecutedCalls;
         }
@@ -248,39 +248,45 @@ void mapOptimization::updateInitialGuess()
     // initialization
     if (cloudKeyPoses3D->points.empty())
     {
-        //transformTobeMapped[0] = cloudInfo.imu_roll_init;
-        //transformTobeMapped[1] = cloudInfo.imu_pitch_init;
-        //transformTobeMapped[2] = cloudInfo.imu_yaw_init;
-        transformTobeMapped[0] = 0.0;  // roll
-        transformTobeMapped[1] = 0.0;  // pitch
-        transformTobeMapped[2] = 0.0;  // yaw
+        // Old-version advantage: initialize the first map pose with IMU roll/pitch/yaw.
+        // If heading initialization is disabled, only yaw is reset to zero.
+        if (cloudInfo && cloudInfo->imu_available)
+        {
+            transformTobeMapped[0] = cloudInfo->imu_roll_init;
+            transformTobeMapped[1] = cloudInfo->imu_pitch_init;
+            transformTobeMapped[2] = cloudInfo->imu_yaw_init;
+            lastImuTransformation_ = pcl::getTransformation(
+                0.0f, 0.0f, 0.0f,
+                cloudInfo->imu_roll_init,
+                cloudInfo->imu_pitch_init,
+                cloudInfo->imu_yaw_init);
+        }
+        else
+        {
+            transformTobeMapped[0] = 0.0f;
+            transformTobeMapped[1] = 0.0f;
+            transformTobeMapped[2] = 0.0f;
+            lastImuTransformation_ = Eigen::Affine3f::Identity();
+        }
 
         if (!useImuHeadingInitialization)
-            transformTobeMapped[2] = 0;
+            transformTobeMapped[2] = 0.0f;
 
-        lastImuTransformation_ = pcl::getTransformation(0, 0, 0, cloudInfo.imu_roll_init, cloudInfo.imu_pitch_init, cloudInfo.imu_yaw_init); // save imu before return;
-        
-        {     //0429
-            if (std::abs(pcl::rad2deg(transformTobeMapped[0])) > debugRollPitchWarnDeg ||
-            std::abs(pcl::rad2deg(transformTobeMapped[1])) > debugRollPitchWarnDeg)
-            {
-                RCLCPP_WARN(this->get_logger(),
-                    "[RP-THRESH][updateInitialGuess-init] roll=%.3f pitch=%.3f thresh=%.3f deg",
-                    pcl::rad2deg(transformTobeMapped[0]),
-                    pcl::rad2deg(transformTobeMapped[1]),
-                    debugRollPitchWarnDeg);
-            }
-        
-        }
+        transformTobeMapped[3] = 0.0f;
+        transformTobeMapped[4] = 0.0f;
+        transformTobeMapped[5] = 0.0f;
+        lastImuPreTransAvailable_ = false;
+
+        copyTransform(transformTobeMapped, frameInitialGuessTransform);
         return;
     }
 
     // use imu pre-integration estimation for pose guess
-    if (cloudInfo.odom_available == true)
+    if (cloudInfo->odom_available == true)
     {
         Eigen::Affine3f transBack = pcl::getTransformation(
-            cloudInfo.initial_guess_x, cloudInfo.initial_guess_y, cloudInfo.initial_guess_z,
-            cloudInfo.initial_guess_roll, cloudInfo.initial_guess_pitch, cloudInfo.initial_guess_yaw);
+            cloudInfo->initial_guess_x, cloudInfo->initial_guess_y, cloudInfo->initial_guess_z,
+            cloudInfo->initial_guess_roll, cloudInfo->initial_guess_pitch, cloudInfo->initial_guess_yaw);
         if (lastImuPreTransAvailable_ == false)
         {
             lastImuPreTransformation_ = transBack;
@@ -294,7 +300,7 @@ void mapOptimization::updateInitialGuess()
 
             lastImuPreTransformation_ = transBack;
 
-            lastImuTransformation_ = pcl::getTransformation(0, 0, 0, cloudInfo.imu_roll_init, cloudInfo.imu_pitch_init, cloudInfo.imu_yaw_init); // save imu before return;
+            lastImuTransformation_ = pcl::getTransformation(0, 0, 0, cloudInfo->imu_roll_init, cloudInfo->imu_pitch_init, cloudInfo->imu_yaw_init); // save imu before return;
             
             if (std::abs(pcl::rad2deg(transformTobeMapped[0])) > debugRollPitchWarnDeg ||
                 std::abs(pcl::rad2deg(transformTobeMapped[1])) > debugRollPitchWarnDeg)
@@ -303,8 +309,8 @@ void mapOptimization::updateInitialGuess()
                     "[RP-THRESH][updateInitialGuess-odom] roll=%.3f pitch=%.3f guess_rp=(%.3f, %.3f) thresh=%.3f deg",
                     pcl::rad2deg(transformTobeMapped[0]),
                     pcl::rad2deg(transformTobeMapped[1]),
-                    pcl::rad2deg(cloudInfo.initial_guess_roll),
-                    pcl::rad2deg(cloudInfo.initial_guess_pitch),
+                    pcl::rad2deg(cloudInfo->initial_guess_roll),
+                    pcl::rad2deg(cloudInfo->initial_guess_pitch),
                     debugRollPitchWarnDeg);
             }
             
@@ -313,9 +319,9 @@ void mapOptimization::updateInitialGuess()
     }
 
     // use imu incremental estimation for pose guess (only rotation)
-    if (cloudInfo.imu_available == true)
+    if (cloudInfo->imu_available == true)
     {
-        Eigen::Affine3f transBack = pcl::getTransformation(0, 0, 0, cloudInfo.imu_roll_init, cloudInfo.imu_pitch_init, cloudInfo.imu_yaw_init);
+        Eigen::Affine3f transBack = pcl::getTransformation(0, 0, 0, cloudInfo->imu_roll_init, cloudInfo->imu_pitch_init, cloudInfo->imu_yaw_init);
         Eigen::Affine3f transIncre = lastImuTransformation_.inverse() * transBack;
 
         Eigen::Affine3f transTobe = trans2Affine3f(transformTobeMapped);
@@ -323,7 +329,7 @@ void mapOptimization::updateInitialGuess()
         pcl::getTranslationAndEulerAngles(transFinal, transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5], 
                                                         transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]);
 
-        lastImuTransformation_ = pcl::getTransformation(0, 0, 0, cloudInfo.imu_roll_init, cloudInfo.imu_pitch_init, cloudInfo.imu_yaw_init); // save imu before return;
+        lastImuTransformation_ = pcl::getTransformation(0, 0, 0, cloudInfo->imu_roll_init, cloudInfo->imu_pitch_init, cloudInfo->imu_yaw_init); // save imu before return;
         return;
     }
 }
@@ -1043,30 +1049,12 @@ void mapOptimization::pushMotionHistory(double v, double omegaDeg, double kappa)
     while ((int)curvatureHist.size() > motionHistoryWindow) curvatureHist.pop_front();
 }
 
-void mapOptimization::updateOutputTrajectoryHistory(const Eigen::Affine3f& outputAffine)
-{
-    if (hasLastOutputPose)
-    {
-        const double dt = std::max(1e-3, timeLaserInfoCur - lastOutputTime);
-        const double ds = xyDistance(lastOutputAffine, outputAffine);
-        const double dyawDeg = std::abs(pcl::rad2deg(normalizeAngleRad(yawFromAffine(outputAffine) - yawFromAffine(lastOutputAffine))));
-        const double v = ds / dt;
-        const double omega = dyawDeg / dt;
-        const double kappa = (dyawDeg * M_PI / 180.0) / std::max(ds, 0.10);
-        pushMotionHistory(v, omega, kappa);
-    }
-
-    lastOutputAffine = outputAffine;
-    lastOutputTime = timeLaserInfoCur;
-    hasLastOutputPose = true;
-}
 
 bool mapOptimization::prepareCurrentRawCloudForRegistration()
 {
-    laserCloudRawLast->clear();
-    if (!cloudInfo.cloud_deskewed)
+    if (!cloudInfo->cloud_deskewed)
         return false;
-    *laserCloudRawLast = *cloudInfo.cloud_deskewed;
+    laserCloudRawLast = cloudInfo->cloud_deskewed;
     if (laserCloudRawLast->empty())
         return false;
 
@@ -1303,9 +1291,9 @@ void mapOptimization::scan2MapOptimization()
 
 void mapOptimization::transformUpdate()
 {
-    if (cloudInfo.imu_available == true)
+    if (cloudInfo->imu_available == true)
     {
-        if (std::abs(cloudInfo.imu_pitch_init) < 1.4)
+        if (std::abs(cloudInfo->imu_pitch_init) < 1.4)
         {
             double imuWeight = imuRPYWeight;
             tf2::Quaternion imuQuaternion;
@@ -1314,13 +1302,13 @@ void mapOptimization::transformUpdate()
 
             // slerp roll
             transformQuaternion.setRPY(transformTobeMapped[0], 0, 0);
-            imuQuaternion.setRPY(cloudInfo.imu_roll_init, 0, 0);
+            imuQuaternion.setRPY(cloudInfo->imu_roll_init, 0, 0);
             tf2::Matrix3x3(transformQuaternion.slerp(imuQuaternion, imuWeight)).getRPY(rollMid, pitchMid, yawMid);
             transformTobeMapped[0] = rollMid;
 
             // slerp pitch
             transformQuaternion.setRPY(0, transformTobeMapped[1], 0);
-            imuQuaternion.setRPY(0, cloudInfo.imu_pitch_init, 0);
+            imuQuaternion.setRPY(0, cloudInfo->imu_pitch_init, 0);
             tf2::Matrix3x3(transformQuaternion.slerp(imuQuaternion, imuWeight)).getRPY(rollMid, pitchMid, yawMid);
             transformTobeMapped[1] = pitchMid;
         }
@@ -1490,10 +1478,11 @@ void mapOptimization::saveKeyFramesAndFactor()
     // laserCloudCornerLastDS / laserCloudSurfLastDS; for raw ICP fallback we
     // keep the original deskewed scan and downsample only when constructing
     // ICP source/target clouds.
-    pcl::PointCloud<PointType>::Ptr thisRawKeyFrame(new pcl::PointCloud<PointType>());
-    if (cloudInfo.cloud_deskewed) {
-        *thisRawKeyFrame = *cloudInfo.cloud_deskewed;
-    }
+    pcl::PointCloud<PointType>::Ptr thisRawKeyFrame =
+        cloudInfo->cloud_deskewed
+            ? cloudInfo->cloud_deskewed
+            : pcl::PointCloud<PointType>::Ptr(
+                  new pcl::PointCloud<PointType>());
     filterInvalidAndRangeInPlace(thisRawKeyFrame, "raw_keyframe_save", true);
 
     // save key frame cloud
@@ -1538,10 +1527,26 @@ void mapOptimization::correctPoses()
     }
 }
 
-void mapOptimization::updateOdometryState(){
+void mapOptimization::updateOutputTrajectoryHistory(){
         if (!transformIsFinite(transformTobeMapped))
             return;
 
-        updateOutputTrajectoryHistory(trans2Affine3f(transformTobeMapped));
+        Eigen::Affine3f outputAffine =
+            trans2Affine3f(transformTobeMapped);
+        if (hasLastOutputPose)
+        {
+            const double dt = std::max(1e-3, timeLaserInfoCur - lastOutputTime);
+            const double ds = xyDistance(lastOutputAffine, outputAffine);
+            const double dyawDeg = std::abs(pcl::rad2deg(normalizeAngleRad(yawFromAffine(outputAffine) - yawFromAffine(lastOutputAffine))));
+            const double v = ds / dt;
+            const double omega = dyawDeg / dt;
+            const double kappa = (dyawDeg * M_PI / 180.0) / std::max(ds, 0.10);
+            pushMotionHistory(v, omega, kappa);
+        }
+
+        lastOutputAffine = outputAffine;
+        lastOutputTime = timeLaserInfoCur;
+        hasLastOutputPose = true;
+
     }
 

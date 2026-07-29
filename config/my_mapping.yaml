@@ -8,8 +8,7 @@ common:
   base_link_frame: "base_link"
 
   # Shared lidar adapter / range-image geometry.
-  # 4 = RoboSense/Hesai-style XYZIRT handled by the existing RoboSense path.
-  lidar_type: 4
+  sensor: "hesai"
   N_SCAN: 128
   Horizon_SCAN: 1800
   lidarMinRange: 1.0

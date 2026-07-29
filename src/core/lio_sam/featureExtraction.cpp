@@ -46,39 +46,45 @@ FeatureExtractor::~FeatureExtractor() {
         static_cast<void*>(this));
 }
 
-bool FeatureExtractor::Run(LioSamCloudInfo& cloudInfo) {
-    if (!cloudInfo.cloud_deskewed || cloudInfo.cloud_deskewed->empty()) {
+bool FeatureExtractor::Run(
+    const std::shared_ptr<LioSamCloudInfo>& cloudInfo) {
+    if (!cloudInfo ||
+        !cloudInfo->cloud_deskewed ||
+        cloudInfo->cloud_deskewed->empty()) {
         RCLCPP_WARN(get_logger(), "[FeatureExtractor] empty deskewed cloud");
         return false;
     }
 
-    const size_t cloudSize = cloudInfo.cloud_deskewed->size();
+    const size_t cloudSize = cloudInfo->cloud_deskewed->size();
     if (cloudSize < 11) {
         RCLCPP_WARN(get_logger(),
             "[FeatureExtractor] too few projected points: %zu",
             cloudSize);
         return false;
     }
-    if (cloudInfo.start_ring_index.size() < static_cast<size_t>(N_SCAN) ||
-        cloudInfo.end_ring_index.size() < static_cast<size_t>(N_SCAN) ||
-        cloudInfo.point_col_ind.size() < cloudSize ||
-        cloudInfo.point_range.size() < cloudSize) {
+    if (cloudInfo->start_ring_index.size() <
+            static_cast<size_t>(N_SCAN) ||
+        cloudInfo->end_ring_index.size() <
+            static_cast<size_t>(N_SCAN) ||
+        cloudInfo->point_col_ind.size() < cloudSize ||
+        cloudInfo->point_range.size() < cloudSize) {
         RCLCPP_WARN(get_logger(),
             "[FeatureExtractor] incomplete projected cloud info: cloud=%zu rings=%zu/%zu col=%zu range=%zu",
             cloudSize,
-            cloudInfo.start_ring_index.size(),
-            cloudInfo.end_ring_index.size(),
-            cloudInfo.point_col_ind.size(),
-            cloudInfo.point_range.size());
+            cloudInfo->start_ring_index.size(),
+            cloudInfo->end_ring_index.size(),
+            cloudInfo->point_col_ind.size(),
+            cloudInfo->point_range.size());
         return false;
     }
 
+    extractedCloud.reset();
     resetParameters();
-    extractedCloud.reset(new PointCloudType(*cloudInfo.cloud_deskewed));
-    startRingIndex = cloudInfo.start_ring_index;
-    endRingIndex = cloudInfo.end_ring_index;
-    pointColInd = cloudInfo.point_col_ind;
-    pointRange = cloudInfo.point_range;
+    extractedCloud = cloudInfo->cloud_deskewed;
+    startRingIndex = cloudInfo->start_ring_index;
+    endRingIndex = cloudInfo->end_ring_index;
+    pointColInd = cloudInfo->point_col_ind;
+    pointRange = cloudInfo->point_range;
 
     if (cloudSmoothness.size() < cloudSize) {
         cloudSmoothness.resize(cloudSize);
@@ -91,10 +97,14 @@ bool FeatureExtractor::Run(LioSamCloudInfo& cloudInfo) {
     markOccludedPoints();
     extractFeatures();
 
-    cloudInfo.cloud_corner.reset(new PointCloudType(*cornerCloud));
-    cloudInfo.cloud_surface.reset(new PointCloudType(*surfaceCloud));
-    cloudInfo.cloud_corner->header = cloudInfo.cloud_deskewed->header;
-    cloudInfo.cloud_surface->header = cloudInfo.cloud_deskewed->header;
+    cloudInfo->cloud_corner.reset(
+        new PointCloudType(*cornerCloud));
+    cloudInfo->cloud_surface.reset(
+        new PointCloudType(*surfaceCloud));
+    cloudInfo->cloud_corner->header =
+        cloudInfo->cloud_deskewed->header;
+    cloudInfo->cloud_surface->header =
+        cloudInfo->cloud_deskewed->header;
     return true;
 }
 

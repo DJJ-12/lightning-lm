@@ -11,9 +11,8 @@ common:
   base_link_frame: "base_link"
 
   # Shared lidar adapter / range-image geometry.
-  # 2 = Velodyne-style XYZIRT path.
   # VLP-16 uses 16 scan lines; LIO-SAM convention uses 1800 horizontal bins.
-  lidar_type: 2
+  sensor: "velodyne"
   N_SCAN: 16
   Horizon_SCAN: 1800
   lidarMinRange: 1.0

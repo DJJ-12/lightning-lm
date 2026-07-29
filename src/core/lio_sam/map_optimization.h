@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <atomic>
 #include <limits>
+#include <memory>
 #include <thread>
 #include <unordered_set>
 #include <utility>
@@ -51,7 +52,7 @@ public:
     Values isamCurrentEstimate;
     Eigen::MatrixXd poseCovariance;
 
-    LioSamCloudInfo cloudInfo;
+    std::shared_ptr<LioSamCloudInfo> cloudInfo;
     bool createdNewKeyframe = false;
 
     vector<pcl::PointCloud<PointType>::Ptr> cornerCloudKeyFrames;
@@ -205,7 +206,8 @@ public:
     mapOptimization(const rclcpp::NodeOptions & options);
     ~mapOptimization();
     void allocateMemory();
-    bool Run(LioSamCloudInfo& msgIn);
+    bool Run(
+        const std::shared_ptr<LioSamCloudInfo>& msgIn);
     bool LastRunExecuted() const { return lastRunExecuted; }
     double TimeLaserInfoCur() const;
     const float* TransformTobeMapped() const;
@@ -251,7 +253,7 @@ public:
     MotionContinuityInfo evaluateMotionContinuity(const Eigen::Affine3f& candidateAffine,
                                                   const char* tag);
     void pushMotionHistory(double speed, double yawRateDeg, double curvature);
-    void updateOutputTrajectoryHistory(const Eigen::Affine3f& outputAffine);
+    void updateOutputTrajectoryHistory();
     void loopClosureThread();
     void performLoopClosure();
     bool detectLoopClosureDistance(int *latestID, int *closestID);
@@ -275,6 +277,5 @@ public:
     void addLoopFactor();
     void saveKeyFramesAndFactor();
     void correctPoses();
-    void updateOdometryState();
 
 };

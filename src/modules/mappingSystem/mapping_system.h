@@ -74,15 +74,19 @@ class MappingSystem {
     bool cachePointCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& laserCloudMsg);
     bool cachePointCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& laserCloudMsg);
     bool deskewInfo();
-    bool ConvertImu(const sensor_msgs::msg::Imu& imu_in, sensor_msgs::msg::Imu& imu_out) const;
+    bool imuConverter(const sensor_msgs::msg::Imu& imu_in, sensor_msgs::msg::Imu& imu_out) const;
     void imuDeskewInfo();
     void findRotation(double pointTime, float* rotXCur, float* rotYCur, float* rotZCur);
     void findPosition(double relTime, float* posXCur, float* posYCur, float* posZCur);
     PointType deskewPoint(PointType* point, double relTime);
     void projectPointCloud();
     void cloudExtraction();
-    void RunLioSamFrame(LioSamCloudInfo cloud_info);
+    void RunLioSamFrame(
+        const std::shared_ptr<LioSamCloudInfo>& cloud_info);
     void HandleProcessedKeyframe(const Keyframe::Ptr& kf);
+    rclcpp::Logger get_logger() const {
+        return rclcpp::get_logger("mapping_system");
+    }
 
     MappingSystemOptions options_;
     bool running_ = false;
@@ -96,8 +100,12 @@ class MappingSystem {
     int point_filter_num_ = 1;
     double lidarMinRange_ = 1.0;
     double lidarMaxRange_ = 1000.0;
-    Mat3d imuExtrinsicRot_ = Mat3d::Identity();
-    Quatd imuExtrinsicQRPY_ = Quatd::Identity();
+    Mat3d extRot = Mat3d::Identity();
+    Quatd extQRPY = Quatd::Identity();
+    bool useImuAccelRollPitchInitialization = false;
+    double imuRollInit = 0.0;
+    double imuPitchInit = 0.0;
+    double imuYawInit = 0.0;
 
     CloudPtr laserCloudIn_{new PointCloudType()};
     CloudPtr fullCloud_{new PointCloudType()};
@@ -121,7 +129,8 @@ class MappingSystem {
     int ringFlag_ = 0;
     int deskewFlag_ = 0;
 
-    LioSamCloudInfo cloudInfo_;
+    std::shared_ptr<LioSamCloudInfo> cloudInfo_{
+        std::make_shared<LioSamCloudInfo>()};
     double timeScanCur_ = 0.0;
     double timeScanEnd_ = 0.0;
     double timeScanHeader_ = 0.0;

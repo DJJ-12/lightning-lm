@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <memory>
 #include <vector>
 
 #include "core/lio_sam/utility.hpp"
@@ -10,7 +11,8 @@ class FeatureExtractor : public ParamServer
 public:
     explicit FeatureExtractor(const rclcpp::NodeOptions& options);
     ~FeatureExtractor();
-    bool Run(LioSamCloudInfo& cloudInfo);
+    bool Run(
+        const std::shared_ptr<LioSamCloudInfo>& cloudInfo);
     void resetParameters();
 
 private:

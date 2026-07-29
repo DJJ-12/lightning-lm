@@ -175,8 +175,11 @@ bool LioSamMapping::LoadParamsFromYAML(const std::string& yaml_path) {
     }
 }
 
-bool LioSamMapping::Run(::LioSamCloudInfo& cloud_info) {
-    if (!feature_extraction_ || !map_optimization_) {
+bool LioSamMapping::Run(
+    const std::shared_ptr<::LioSamCloudInfo>& cloud_info) {
+    if (!cloud_info ||
+        !feature_extraction_ ||
+        !map_optimization_) {
         return false;
     }
     if (!feature_extraction_->Run(cloud_info)) {
@@ -194,7 +197,7 @@ bool LioSamMapping::Run(::LioSamCloudInfo& cloud_info) {
                          << ", this=" << this
                          << ", mapOptimization=" << map_optimization_.get()
                          << ", lidar_stamp=" << std::setprecision(14)
-                         << cloud_info.timestamp
+                         << cloud_info->timestamp
                          << ", map_opt_executed=" << diagnostic_map_optimization_executed_
                          << ", map_opt_skipped=" << diagnostic_map_optimization_skipped_;
         }
@@ -203,14 +206,17 @@ bool LioSamMapping::Run(::LioSamCloudInfo& cloud_info) {
     ++diagnostic_map_optimization_executed_;
 
     const float* transform = map_optimization_->TransformTobeMapped();
-    state_.timestamp_ = cloud_info.timestamp;
+    state_.timestamp_ = cloud_info->timestamp;
     state_.pos_ = Vec3d(transform[3], transform[4], transform[5]);
     state_.rot_ = RpyToSO3(transform[0], transform[1], transform[2]);
     state_.pose_is_ok_ = map_optimization_->mappingPoseReliable;
     state_.lidar_odom_reliable_ = map_optimization_->mappingPoseReliable;
 
-    current_frame_id_ = cloud_info.frame_id.empty() ? std::string("lidar") : cloud_info.frame_id;
-    scan_undistort_ = cloud_info.cloud_deskewed;
+    current_frame_id_ =
+        cloud_info->frame_id.empty()
+            ? std::string("lidar")
+            : cloud_info->frame_id;
+    scan_undistort_ = cloud_info->cloud_deskewed;
     if (scan_undistort_) {
         scan_undistort_->header.stamp = static_cast<std::uint64_t>(std::llround(state_.timestamp_ * 1e9));
         scan_undistort_->header.frame_id = current_frame_id_;
@@ -239,9 +245,9 @@ bool LioSamMapping::MakeLightningKeyframeIfNeeded() {
     }
     PointCloudType::Ptr raw_cloud = map_optimization_->LatestRawCloudKeyFrame();
 
-    CloudPtr cloud(new PointCloudType());
-    if (raw_cloud) {
-        *cloud = *raw_cloud;
+    CloudPtr cloud = raw_cloud;
+    if (!cloud) {
+        cloud.reset(new PointCloudType());
     }
     cloud->header.frame_id = current_frame_id_;
     cloud->header.stamp = static_cast<std::uint64_t>(std::llround(state_.timestamp_ * 1e9));

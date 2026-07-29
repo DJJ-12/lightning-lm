@@ -52,6 +52,8 @@ void MappingSystem::LoadMappingParams(const YAML::Node& yaml) {
     if (lio_sam && lio_sam["downsampleRate"]) {
         downsampleRate_ = lio_sam["downsampleRate"].as<int>();
     }
+    useImuAccelRollPitchInitialization =
+        lio_sam["useImuAccelRollPitchInitialization"].as<bool>();
     std::vector<double> imu_extrinsic_rot{1.0, 0.0, 0.0,
                                           0.0, 1.0, 0.0,
                                           0.0, 0.0, 1.0};
@@ -64,13 +66,13 @@ void MappingSystem::LoadMappingParams(const YAML::Node& yaml) {
     }
     CHECK_EQ(imu_extrinsic_rot.size(), 9);
     CHECK_EQ(imu_extrinsic_rpy.size(), 9);
-    imuExtrinsicRot_ =
+    extRot =
         Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(
             imu_extrinsic_rot.data(), 3, 3);
     Mat3d imu_extrinsic_rpy_matrix =
         Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(
             imu_extrinsic_rpy.data(), 3, 3);
-    imuExtrinsicQRPY_ = Quatd(imu_extrinsic_rpy_matrix);
+    extQRPY = Quatd(imu_extrinsic_rpy_matrix);
 
     const size_t cloud_size = static_cast<size_t>(N_SCAN_) * static_cast<size_t>(Horizon_SCAN_);
     fullCloud_.reset(new PointCloudType());
@@ -197,8 +199,8 @@ void MappingSystem::ProcessIMU(const sensor_msgs::msg::Imu::SharedPtr& imu) {
     if (!running_) {
         return;
     }
-    sensor_msgs::msg::Imu converted_imu;
-    if (!ConvertImu(*imu, converted_imu)) {
+    sensor_msgs::msg::Imu converted_imu = *imu;
+    if (!imuConverter(*imu, converted_imu)) {
         return;
     }
     const double timestamp = ToSec(converted_imu.header.stamp);
@@ -227,17 +229,14 @@ void MappingSystem::ResetProjectionState() {
     fullCloud_->clear();
     fullCloud_->points.resize(cloud_size);
 
-    if (!extractedCloud_) {
-        extractedCloud_.reset(new PointCloudType());
-    }
-    extractedCloud_->clear();
+    extractedCloud_.reset(new PointCloudType());
     extractedCloud_->reserve(cloud_size);
 
-    cloudInfo_ = LioSamCloudInfo();
-    cloudInfo_.start_ring_index.assign(N_SCAN_, 0);
-    cloudInfo_.end_ring_index.assign(N_SCAN_, 0);
-    cloudInfo_.point_col_ind.assign(cloud_size, 0);
-    cloudInfo_.point_range.assign(cloud_size, 0.0f);
+    cloudInfo_ = std::make_shared<LioSamCloudInfo>();
+    cloudInfo_->start_ring_index.assign(N_SCAN_, 0);
+    cloudInfo_->end_ring_index.assign(N_SCAN_, 0);
+    cloudInfo_->point_col_ind.assign(cloud_size, 0);
+    cloudInfo_->point_range.assign(cloud_size, 0.0f);
     firstPointFlag_ = true;
     imuPointerCur_ = 0;
 }
@@ -361,8 +360,11 @@ bool MappingSystem::cachePointCloud(const sensor_msgs::msg::PointCloud2::SharedP
             LOG(WARNING) << "Point cloud timestamp not available, deskew function disabled, system will drift significantly!";
     }
 
-    cloudInfo_.timestamp = timeScanCur_;
-    cloudInfo_.frame_id = cloudHeader_.frame_id.empty() ? base_link_frame_ : cloudHeader_.frame_id;
+    cloudInfo_->timestamp = timeScanCur_;
+    cloudInfo_->frame_id =
+        cloudHeader_.frame_id.empty()
+            ? base_link_frame_
+            : cloudHeader_.frame_id;
     last_timestamp_lidar_ = timeScanHeader_;
     return true;
 }
@@ -419,8 +421,11 @@ bool MappingSystem::cachePointCloud(const livox_ros_driver2::msg::CustomMsg::Sha
     deskewFlag_ = 1;
     timeScanCur_ = timeScanHeader_;
     timeScanEnd_ = timeScanCur_ + laserCloudIn_->points.back().time;
-    cloudInfo_.timestamp = timeScanCur_;
-    cloudInfo_.frame_id = cloudHeader_.frame_id.empty() ? base_link_frame_ : cloudHeader_.frame_id;
+    cloudInfo_->timestamp = timeScanCur_;
+    cloudInfo_->frame_id =
+        cloudHeader_.frame_id.empty()
+            ? base_link_frame_
+            : cloudHeader_.frame_id;
     last_timestamp_lidar_ = timeScanHeader_;
     return true;
 }
@@ -434,7 +439,7 @@ bool MappingSystem::deskewInfo() {
     }
 
     imuDeskewInfo();
-    return cloudInfo_.imu_available;
+    return cloudInfo_->imu_available;
 }
 
 bool MappingSystem::imuConverter(const sensor_msgs::msg::Imu& imu_in,
@@ -473,7 +478,7 @@ bool MappingSystem::imuConverter(const sensor_msgs::msg::Imu& imu_in,
 
 
 void MappingSystem::imuDeskewInfo() {
-    cloudInfo_.imu_available = false;
+    cloudInfo_->imu_available = false;
 
     while (!imuQueue_.empty()) {
         if (ToSec(imuQueue_.front().header.stamp) < timeScanCur_ - 0.01) {
@@ -491,10 +496,22 @@ void MappingSystem::imuDeskewInfo() {
         sensor_msgs::msg::Imu thisImuMsg = imuQueue_[i];
         const double currentImuTime = ToSec(thisImuMsg.header.stamp);
 
-        if (currentImuTime <= timeScanCur_) {
-            imuRPY2rosRPY(&thisImuMsg, &cloudInfo_.imu_roll_init,
-                          &cloudInfo_.imu_pitch_init, &cloudInfo_.imu_yaw_init);
-        }
+        if (currentImuTime <= timeScanCur_)             
+        {
+                imuRPY2rosRPY(
+                    &thisImuMsg, &imuRollInit, &imuPitchInit, &imuYawInit);
+                if (useImuAccelRollPitchInitialization)
+                {
+                    double accRoll = 0.0;
+                    double accPitch = 0.0;
+                    if (imuAccel2rosRollPitch(&thisImuMsg, &accRoll, &accPitch))
+                    {
+                        imuRollInit = accRoll;
+                        imuPitchInit = accPitch;
+                    }
+                }
+            }
+
         if (currentImuTime > timeScanEnd_ + 0.01) {
             break;
         }
@@ -528,7 +545,11 @@ void MappingSystem::imuDeskewInfo() {
     if (imuPointerCur_ <= 0) {
         return;
     }
-    cloudInfo_.imu_available = true;
+    cloudInfo_->imu_available = true;
+
+    cloudInfo_->imu_roll_init = imuRollInit;
+    cloudInfo_->imu_pitch_init = imuPitchInit;
+    cloudInfo_->imu_yaw_init = imuYawInit;
 }
 
 void MappingSystem::findRotation(double pointTime, float* rotXCur, float* rotYCur, float* rotZCur) {
@@ -567,7 +588,7 @@ void MappingSystem::findPosition(double /*relTime*/, float* posXCur, float* posY
 }
 
 PointType MappingSystem::deskewPoint(PointType* point, double relTime) {
-    if (deskewFlag_ == -1 || cloudInfo_.imu_available == false) {
+    if (deskewFlag_ == -1 || cloudInfo_->imu_available == false) {
         return *point;
     }
 
@@ -651,35 +672,37 @@ void MappingSystem::projectPointCloud() {
 void MappingSystem::cloudExtraction() {
     int count = 0;
     for (int i = 0; i < N_SCAN_; ++i) {
-        cloudInfo_.start_ring_index[i] = count - 1 + 5;
+        cloudInfo_->start_ring_index[i] = count - 1 + 5;
         for (int j = 0; j < Horizon_SCAN_; ++j) {
             const int index = j + i * Horizon_SCAN_;
             if (rangeMat_[index] != FLT_MAX) {
-                if (count >= static_cast<int>(cloudInfo_.point_col_ind.size())) {
+                if (count >= static_cast<int>(
+                        cloudInfo_->point_col_ind.size())) {
                     break;
                 }
-                cloudInfo_.point_col_ind[count] = j;
-                cloudInfo_.point_range[count] = rangeMat_[index];
+                cloudInfo_->point_col_ind[count] = j;
+                cloudInfo_->point_range[count] =
+                    rangeMat_[index];
                 extractedCloud_->push_back(fullCloud_->points[index]);
                 ++count;
             }
         }
-        cloudInfo_.end_ring_index[i] = count - 1 - 5;
+        cloudInfo_->end_ring_index[i] = count - 1 - 5;
     }
 
     extractedCloud_->height = 1;
     extractedCloud_->width = extractedCloud_->size();
     extractedCloud_->is_dense = true;
-    extractedCloud_->header.frame_id = cloudInfo_.frame_id;
+    extractedCloud_->header.frame_id = cloudInfo_->frame_id;
     extractedCloud_->header.stamp = static_cast<std::uint64_t>(std::llround(timeScanHeader_ * 1e9));
 
-    cloudInfo_.point_col_ind.resize(count);
-    cloudInfo_.point_range.resize(count);
-    cloudInfo_.cloud_deskewed.reset(new PointCloudType(*extractedCloud_));
+    cloudInfo_->point_col_ind.resize(count);
+    cloudInfo_->point_range.resize(count);
+    cloudInfo_->cloud_deskewed = extractedCloud_;
 }
 
 void MappingSystem::ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
-    LioSamCloudInfo cloud_info;
+    std::shared_ptr<LioSamCloudInfo> cloud_info;
     {
         std::lock_guard<std::mutex> lock(mtx_);
         if (!running_ || !lio_sam_) {
@@ -693,18 +716,21 @@ void MappingSystem::ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr&
         }
         projectPointCloud();
         cloudExtraction();
-        if (!cloudInfo_.cloud_deskewed || cloudInfo_.cloud_deskewed->size() < 11) {
+        if (!cloudInfo_->cloud_deskewed ||
+            cloudInfo_->cloud_deskewed->size() < 11) {
             LOG(WARNING) << "[MappingSystem] too few deskewed points: "
-                         << (cloudInfo_.cloud_deskewed ? cloudInfo_.cloud_deskewed->size() : 0);
+                         << (cloudInfo_->cloud_deskewed
+                                 ? cloudInfo_->cloud_deskewed->size()
+                                 : 0);
             return;
         }
         cloud_info = cloudInfo_;
     }
-    RunLioSamFrame(std::move(cloud_info));
+    RunLioSamFrame(cloud_info);
 }
 
 void MappingSystem::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
-    LioSamCloudInfo cloud_info;
+    std::shared_ptr<LioSamCloudInfo> cloud_info;
     {
         std::lock_guard<std::mutex> lock(mtx_);
         if (!running_ || !lio_sam_) {
@@ -718,17 +744,24 @@ void MappingSystem::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::Shared
         }
         projectPointCloud();
         cloudExtraction();
-        if (!cloudInfo_.cloud_deskewed || cloudInfo_.cloud_deskewed->size() < 11) {
+        if (!cloudInfo_->cloud_deskewed ||
+            cloudInfo_->cloud_deskewed->size() < 11) {
             LOG(WARNING) << "[MappingSystem] too few deskewed Livox points: "
-                         << (cloudInfo_.cloud_deskewed ? cloudInfo_.cloud_deskewed->size() : 0);
+                         << (cloudInfo_->cloud_deskewed
+                                 ? cloudInfo_->cloud_deskewed->size()
+                                 : 0);
             return;
         }
         cloud_info = cloudInfo_;
     }
-    RunLioSamFrame(std::move(cloud_info));
+    RunLioSamFrame(cloud_info);
 }
 
-void MappingSystem::RunLioSamFrame(LioSamCloudInfo cloud_info) {
+void MappingSystem::RunLioSamFrame(
+    const std::shared_ptr<LioSamCloudInfo>& cloud_info) {
+    if (!cloud_info) {
+        return;
+    }
     std::shared_ptr<LioSamMapping> lio_sam;
     {
         std::lock_guard<std::mutex> lock(mtx_);

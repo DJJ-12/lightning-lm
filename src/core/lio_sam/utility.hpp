@@ -334,6 +334,7 @@ public:
 
         usleep(100);
     }
+};
 
 template<typename T>
 double stamp2Sec(const T& stamp)
