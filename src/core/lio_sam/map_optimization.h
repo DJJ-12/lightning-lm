@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/lio/lio_sam/utility.hpp"
+#include "core/lio_sam/utility.hpp"
 
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/geometry/Pose3.h>
@@ -51,7 +51,7 @@ public:
     Values isamCurrentEstimate;
     Eigen::MatrixXd poseCovariance;
 
-    const LioSamCloudInfo* cloudInfoPtr = nullptr;
+    LioSamCloudInfo cloudInfo;
     bool createdNewKeyframe = false;
 
     vector<pcl::PointCloud<PointType>::Ptr> cornerCloudKeyFrames;
@@ -183,6 +183,7 @@ public:
     const int motionHistoryWindow = 8;
     const float maxRawIcpSourceRange = 80.0f;
     const float maxRawIcpTargetRadius = 80.0f;
+    const float debugRollPitchWarnDeg = 45.0f;
 
     int laserCloudCornerFromMapDSNum = 0;
     int laserCloudSurfFromMapDSNum = 0;
@@ -239,6 +240,12 @@ public:
     bool rawCloudICPFallback(const Eigen::Affine3f& initialGuess,
                              Eigen::Affine3f& resultAffine,
                              double& fitnessScore);
+    bool poseCloseToPrior(const Eigen::Affine3f& priorAffine,
+                          const Eigen::Affine3f& candidateAffine,
+                          double maxTrans,
+                          double maxYawDeg,
+                          double maxZ,
+                          const char* tag);
     double yawFromAffine(const Eigen::Affine3f& affine);
     double xyDistance(const Eigen::Affine3f& lhs, const Eigen::Affine3f& rhs);
     MotionContinuityInfo evaluateMotionContinuity(const Eigen::Affine3f& candidateAffine,
@@ -250,10 +257,10 @@ public:
     bool detectLoopClosureDistance(int *latestID, int *closestID);
     void loopFindNearKeyframes(pcl::PointCloud<PointType>::Ptr& nearKeyframes, const int& key, const int& searchNum);
     void updateInitialGuess();
+    void extractForLoopClosure();
     void extractNearby();
     void extractCloud(pcl::PointCloud<PointType>::Ptr cloudToExtract);
     void extractSurroundingKeyFrames();
-    void limitPointCloudUniform(pcl::PointCloud<PointType>::Ptr cloud, int maxNum);
     void downsampleCurrentScan();
     void updatePointAssociateToMap();
     void cornerOptimization();

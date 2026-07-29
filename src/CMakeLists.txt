@@ -15,12 +15,10 @@ add_library(${PROJECT_NAME}.libs SHARED
         common/nav_state.cc
         common/options.cc
 
-        core/lio/eskf.cc
-        core/lio/laser_mapping.cc
-        core/lio/lio_sam/lio_sam_mapping.cc
-        core/lio/lio_sam/deskew_feature_extractor.cpp
-        core/lio/lio_sam/map_optimization.cpp
-        core/lio/pointcloud_preprocess.cc
+        core/lio_sam/lio_sam_mapping.cc
+        core/lio_sam/featureExtraction.cpp
+        core/lio_sam/map_optimization.cpp
+        core/lio_sam/loop.cpp
 
         core/localization/localization_result.cc
         core/localization/localization.cpp

@@ -18,7 +18,6 @@
 #include <rclcpp/time.hpp>
 
 #include "common/eigen_types.h"
-#include "common/options.h"
 #include "common/point_def.h"
 
 namespace lightning::math {
@@ -354,21 +353,23 @@ inline size_t hash_vec<3>::operator()(const Eigen::Matrix<int, 3, 1>& v) const {
  */
 template <typename T>
 inline bool esti_plane(Eigen::Matrix<T, 4, 1>& pca_result, const PointVector& point, const T& threshold = 0.1f) {
-    if (point.size() < fasterlio::MIN_NUM_MATCH_POINTS) {
+    constexpr int kMinPlaneFitPoints = 3;
+    constexpr int kPlaneFitPoints = 5;
+    if (point.size() < kMinPlaneFitPoints) {
         return false;
     }
 
     Eigen::Matrix<T, 3, 1> normvec;
 
-    if (point.size() == fasterlio::NUM_MATCH_POINTS) {
-        Eigen::Matrix<T, fasterlio::NUM_MATCH_POINTS, 3> A;
-        Eigen::Matrix<T, fasterlio::NUM_MATCH_POINTS, 1> b;
+    if (point.size() == kPlaneFitPoints) {
+        Eigen::Matrix<T, kPlaneFitPoints, 3> A;
+        Eigen::Matrix<T, kPlaneFitPoints, 1> b;
 
         A.setZero();
         b.setOnes();
         b *= -1.0f;
 
-        for (int j = 0; j < fasterlio::NUM_MATCH_POINTS; j++) {
+        for (int j = 0; j < kPlaneFitPoints; j++) {
             A(j, 0) = point[j].x;
             A(j, 1) = point[j].y;
             A(j, 2) = point[j].z;
