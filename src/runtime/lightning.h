@@ -3,6 +3,8 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -10,21 +12,45 @@
 
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
+#include "livox_ros_driver2/msg/custom_msg.hpp"
+
 #include "common/eigen_types.h"
+#include "common/localization_sensor_measurements.h"
 #include "core/localization/localization_diagnostic.h"
 #include "core/localization/localization_result.h"
 #include "modules/localizationSystem/localization_system.h"
 #include "modules/mappingSystem/mapping_system.h"
 #include "modules/mappingSystem/save_map.h"
 #include "runtime/bag_input.h"
-#include "runtime/message_queue.h"
 #include "runtime/mode.h"
 #include "runtime/task.h"
 #include "runtime/topic_input.h"
 
 namespace lightning::runtime {
+
+enum class InputType {
+    IMU,
+    POINT_CLOUD2,
+    LIVOX,
+    RTK_INS,
+    WHEEL_ODOMETRY
+};
+
+struct InputMessage {
+    std::uint64_t lidar_sequence = 0;
+    std::uint64_t topic_lidar_sequence = 0;
+    double receive_steady_sec = 0.0;
+    double header_stamp = 0.0;
+    InputType type = InputType::POINT_CLOUD2;
+    sensor_msgs::msg::Imu::SharedPtr imu;
+    sensor_msgs::msg::PointCloud2::SharedPtr cloud;
+    livox_ros_driver2::msg::CustomMsg::SharedPtr livox;
+    RtkInsMeasurement rtk_ins;
+    WheelOdometryMeasurement wheel_odometry;
+};
 
 struct ServiceResult {
     bool success = false;
@@ -58,52 +84,27 @@ class Lightning {
     ServiceResult CancelTask();
 
    private:
-    enum class OnlineRoute {
-        NONE,
-        MAPPING,
-        LOCALIZATION
-    };
-
-    enum class InputType {
-        IMU,
-        POINT_CLOUD2,
-        LIVOX
-    };
-
-    struct InputMessage {
-        std::uint64_t sequence = 0;
-        std::uint64_t lidar_sequence = 0;
-        std::uint64_t topic_lidar_sequence = 0;
-        double receive_steady_sec = 0.0;
-        double header_stamp = 0.0;
-        InputType type = InputType::POINT_CLOUD2;
-        sensor_msgs::msg::Imu::SharedPtr imu;
-        sensor_msgs::msg::PointCloud2::SharedPtr cloud;
-        livox_ros_driver2::msg::CustomMsg::SharedPtr livox;
-    };
-
     bool CanChangeModeLocked() const;
+    bool EnsureLocalizationSystemLocked();
 
-    void RouteImu(const sensor_msgs::msg::Imu::SharedPtr& imu);
-    void RouteCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud,
-                    const TopicInput::LidarReceiveInfo& receive_info);
-    void RouteLivox(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud,
-                    const TopicInput::LidarReceiveInfo& receive_info);
-    void PushMappingMessage(InputMessage message);
-    void PushLocalizationMessage(InputMessage message);
-    static bool IsLidarMessage(const InputMessage& input);
+    // Topic callbacks only place data into these lightweight online buffers.
+    void AcceptImu(const sensor_msgs::msg::Imu::SharedPtr& imu);
+    void AcceptRtkIns(const RtkInsMeasurement& measurement);
+    void AcceptWheelOdometry(const WheelOdometryMeasurement& measurement);
+    void AcceptCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud,
+                     const TopicInput::LidarReceiveInfo& receive_info);
+    void AcceptLivox(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud,
+                     const TopicInput::LidarReceiveInfo& receive_info);
+    void OverwriteLatestLidar(InputMessage frame);
 
-    void StartOnlineMappingWorkerLocked();
-    void StopOnlineMappingWorkerLocked(bool drain);
-    void OnlineMappingWorkerLoop();
-
-    void StartOnlineLocalizationWorkerLocked();
-    void StopOnlineLocalizationWorkerLocked(bool drain);
-    void OnlineLocalizationWorkerLoop();
+    void StartOnlineWorkerLocked();
+    void StopOnlineWorkerLocked(bool drain);
+    void OnlineWorkerLoop(bool mapping);
+    std::size_t PendingOnlineInputCountLocked() const;
+    void ClearPendingOnlineInputLocked();
 
     void ProcessMappingInput(const InputMessage& input);
     loc::LocalizationFrameOutcome ProcessLocalizationInput(const InputMessage& input);
-    void HandleLocalizationTimeout();
 
     void ClearMappingSystemLocked();
     void ClearLocalizationSystemLocked();
@@ -120,7 +121,7 @@ class Lightning {
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr mapping_map_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr mapping_path_pub_;
     std::string yaml_path_;
-    double localization_cloud_timeout_sec_ = 5.0;
+    modules::LocalizationSystem::Mode localization_fusion_mode_ = modules::LocalizationSystem::Mode::NDT_ONLY;
 
     mutable std::mutex control_mutex_;
     std::atomic_bool shutdown_{false};
@@ -128,22 +129,29 @@ class Lightning {
     Task task_;
 
     std::unique_ptr<TopicInput> topic_input_;
-    std::atomic<OnlineRoute> online_route_{OnlineRoute::NONE};
-    std::atomic<std::uint64_t> online_sequence_{0};
-    std::atomic<std::uint64_t> mapping_lidar_received_{0};
-    std::atomic<std::uint64_t> mapping_lidar_enqueued_{0};
-    std::atomic<std::uint64_t> mapping_lidar_dropped_{0};
-    std::atomic<std::uint64_t> localization_lidar_received_{0};
-    std::atomic<std::uint64_t> localization_lidar_enqueued_{0};
-    std::atomic<std::uint64_t> localization_lidar_dropped_{0};
     std::uint64_t mapping_task_generation_ = 0;
     std::uint64_t localization_task_generation_ = 0;
     std::atomic<std::uint64_t> offline_localization_sequence_{0};
 
-    MessageQueue<InputMessage> mapping_queue_;
-    MessageQueue<InputMessage> localization_queue_;
-    std::thread mapping_worker_;
-    std::thread localization_worker_;
+    // The online LiDAR slot contains at most one unprocessed frame. New LiDAR
+    // messages overwrite the previous pending frame while the algorithm works.
+    std::mutex online_input_mutex_;
+    std::condition_variable online_input_ready_;
+    InputMessage latest_lidar_;
+    bool has_latest_lidar_ = false;
+
+    // Auxiliary measurements are never removed because of queue capacity.
+    // Mapping preserves callback order; localization time-orders each snapshot.
+    std::deque<InputMessage> pending_imu_and_rtk_;
+
+    bool online_worker_running_ = false;
+    std::thread online_worker_;
+
+    std::uint64_t online_lidar_received_ = 0;
+    std::uint64_t online_lidar_overwritten_ = 0;
+    std::uint64_t online_imu_received_ = 0;
+    std::uint64_t online_rtk_ins_received_ = 0;
+    std::uint64_t online_wheel_odometry_received_ = 0;
 
     std::unique_ptr<modules::MappingSystem> mapping_system_;
     std::unique_ptr<modules::LocalizationSystem> localization_system_;

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <iomanip>
 #include <utility>
+#include <vector>
 
 #include <glog/logging.h>
 #include <pcl_conversions/pcl_conversions.h>
@@ -42,9 +43,8 @@ bool Lightning::Init(rclcpp::Node::SharedPtr node, const std::string& yaml_path)
         rclcpp::QoS(1).reliable().transient_local());
 
     YAML::Node yaml = YAML::LoadFile(yaml_path_);
-    if (yaml["localization"] && yaml["localization"]["cloud_timeout_sec"]) {
-        localization_cloud_timeout_sec_ = yaml["localization"]["cloud_timeout_sec"].as<double>();
-    }
+    const std::string localization_mode = yaml["localization"] && yaml["localization"]["mode"] ? yaml["localization"]["mode"].as<std::string>() : "ndt_only";
+    localization_fusion_mode_ = modules::LocalizationSystem::ModeFromString(localization_mode);
     if (yaml["mapping"]) {
         if (yaml["mapping"]["block_map_resolution"]) {
             save_map_options_.block_resolution = yaml["mapping"]["block_map_resolution"].as<int>();
@@ -57,21 +57,22 @@ bool Lightning::Init(rclcpp::Node::SharedPtr node, const std::string& yaml_path)
     topic_input_ = std::make_unique<TopicInput>();
     if (!topic_input_->Start(
             yaml_path_,
-            [this](const sensor_msgs::msg::Imu::SharedPtr& imu) { RouteImu(imu); },
+            [this](const sensor_msgs::msg::Imu::SharedPtr& imu) { AcceptImu(imu); },
             [this](const sensor_msgs::msg::PointCloud2::SharedPtr& cloud,
                    const TopicInput::LidarReceiveInfo& receive_info) {
-                RouteCloud(cloud, receive_info);
+                AcceptCloud(cloud, receive_info);
             },
             [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud,
                    const TopicInput::LidarReceiveInfo& receive_info) {
-                RouteLivox(cloud, receive_info);
-            })) {
+                AcceptLivox(cloud, receive_info);
+            },
+            [this](const RtkInsMeasurement& measurement) { AcceptRtkIns(measurement); },
+            [this](const WheelOdometryMeasurement& measurement) { AcceptWheelOdometry(measurement); })) {
         topic_input_.reset();
         return false;
     }
 
-    LOG(INFO) << "[Lightning] 初始化完成，Topic接收节点已经常驻"
-              << ", localization_timeout_sec=" << localization_cloud_timeout_sec_;
+    LOG(INFO) << "[Lightning] 初始化完成，Topic接收节点已经常驻";
     return true;
 }
 
@@ -85,7 +86,6 @@ void Lightning::Shutdown() {
     if (topic_input_) {
         topic_input_->SetEnabled(false);
     }
-    online_route_ = OnlineRoute::NONE;
     task_.RequestCancel();
 
     LOG(INFO) << "[程序退出] [02] 停止在线工作线程";
@@ -120,6 +120,17 @@ bool Lightning::CanChangeModeLocked() const {
     return state != TaskState::RUNNING && state != TaskState::SAVING;
 }
 
+bool Lightning::EnsureLocalizationSystemLocked() {
+    if (localization_system_) return true;
+    localization_system_ = std::make_unique<modules::LocalizationSystem>();
+    ++localization_task_generation_;
+    if (!localization_system_->Init(yaml_path_, node_)) {
+        ClearLocalizationSystemLocked();
+        return false;
+    }
+    return true;
+}
+
 ServiceResult Lightning::SetMode(const std::string& mode_text) {
     std::lock_guard<std::mutex> lock(control_mutex_);
     if (!CanChangeModeLocked()) {
@@ -131,7 +142,6 @@ ServiceResult Lightning::SetMode(const std::string& mode_text) {
         return {false, "unknown mode: " + mode_text};
     }
 
-    online_route_ = OnlineRoute::NONE;
     StopAllOnlineWorkersLocked(false);
     JoinOfflineThreadLocked();
     if (mapping_system_) {
@@ -145,6 +155,11 @@ ServiceResult Lightning::SetMode(const std::string& mode_text) {
     mode_ = new_mode;
 
     task_.Reset(TaskState::IDLE, ModeToString(mode_) + " mode selected");
+    if (mode_ == Mode::ONLINE_LOCALIZATION && localization_fusion_mode_ == modules::LocalizationSystem::Mode::RTK_ONLY) {
+        if (!EnsureLocalizationSystemLocked()) return {false, "failed to initialize RTK/INS localization"};
+        StartOnlineWorkerLocked();
+        task_.SetState(TaskState::RUNNING, "online RTK/INS localization running");
+    }
     return {true, "mode set to " + ModeToString(mode_)};
 }
 
@@ -169,421 +184,223 @@ TaskSnapshot Lightning::GetOfflineMappingProgress() const {
     return task_.Snapshot();
 }
 
-void Lightning::RouteImu(const sensor_msgs::msg::Imu::SharedPtr& imu) {
-    if (online_route_.load(std::memory_order_acquire) != OnlineRoute::MAPPING) {
-        return;
-    }
-    const double now = RuntimeSteadySeconds();
+void Lightning::AcceptImu(const sensor_msgs::msg::Imu::SharedPtr& imu) {
+    if (!imu) return;
+
     InputMessage input;
-    input.sequence = ++online_sequence_;
-    input.receive_steady_sec = now;
+    input.receive_steady_sec = RuntimeSteadySeconds();
     input.header_stamp = rclcpp::Time(imu->header.stamp).seconds();
     input.type = InputType::IMU;
     input.imu = imu;
-    PushMappingMessage(std::move(input));
+
+    {
+        std::lock_guard<std::mutex> lock(online_input_mutex_);
+        if (!online_worker_running_) return;
+        pending_imu_and_rtk_.push_back(std::move(input));
+        ++online_imu_received_;
+    }
 }
 
-void Lightning::RouteCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud,
-                           const TopicInput::LidarReceiveInfo& receive_info) {
-    const OnlineRoute route = online_route_.load(std::memory_order_acquire);
-    if (route == OnlineRoute::NONE) {
-        return;
+
+void Lightning::AcceptRtkIns(const RtkInsMeasurement& measurement) {
+    InputMessage input;
+    input.receive_steady_sec = RuntimeSteadySeconds();
+    input.header_stamp = measurement.stamp;
+    input.type = InputType::RTK_INS;
+    input.rtk_ins = measurement;
+    {
+        std::lock_guard<std::mutex> lock(online_input_mutex_);
+        if (!online_worker_running_) return;
+        pending_imu_and_rtk_.push_back(std::move(input));
+        ++online_rtk_ins_received_;
     }
+    online_input_ready_.notify_one();
+}
+
+void Lightning::AcceptWheelOdometry(const WheelOdometryMeasurement& measurement) {
+    InputMessage input;
+    input.receive_steady_sec = RuntimeSteadySeconds();
+    input.header_stamp = measurement.stamp;
+    input.type = InputType::WHEEL_ODOMETRY;
+    input.wheel_odometry = measurement;
+    {
+        std::lock_guard<std::mutex> lock(online_input_mutex_);
+        if (!online_worker_running_) return;
+        pending_imu_and_rtk_.push_back(std::move(input));
+        ++online_wheel_odometry_received_;
+    }
+    online_input_ready_.notify_one();
+}
+
+void Lightning::AcceptCloud(
+    const sensor_msgs::msg::PointCloud2::SharedPtr& cloud,
+    const TopicInput::LidarReceiveInfo& receive_info) {
+    if (!cloud) return;
 
     InputMessage input;
-    input.sequence = ++online_sequence_;
     input.topic_lidar_sequence = receive_info.topic_sequence;
     input.receive_steady_sec = receive_info.receive_steady_sec;
     input.header_stamp = receive_info.header_stamp;
     input.type = InputType::POINT_CLOUD2;
     input.cloud = cloud;
-    if (route == OnlineRoute::MAPPING) {
-        input.lidar_sequence = ++mapping_lidar_received_;
-        PushMappingMessage(std::move(input));
-    } else {
-        input.lidar_sequence = ++localization_lidar_received_;
-        PushLocalizationMessage(std::move(input));
-    }
+    OverwriteLatestLidar(std::move(input));
 }
 
-void Lightning::RouteLivox(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud,
-                           const TopicInput::LidarReceiveInfo& receive_info) {
-    const OnlineRoute route = online_route_.load(std::memory_order_acquire);
-    if (route == OnlineRoute::NONE) {
-        return;
-    }
+void Lightning::AcceptLivox(
+    const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud,
+    const TopicInput::LidarReceiveInfo& receive_info) {
+    if (!cloud) return;
 
     InputMessage input;
-    input.sequence = ++online_sequence_;
     input.topic_lidar_sequence = receive_info.topic_sequence;
     input.receive_steady_sec = receive_info.receive_steady_sec;
     input.header_stamp = receive_info.header_stamp;
     input.type = InputType::LIVOX;
     input.livox = cloud;
-    if (route == OnlineRoute::MAPPING) {
-        input.lidar_sequence = ++mapping_lidar_received_;
-        PushMappingMessage(std::move(input));
-    } else {
-        input.lidar_sequence = ++localization_lidar_received_;
-        PushLocalizationMessage(std::move(input));
+    OverwriteLatestLidar(std::move(input));
+}
+
+void Lightning::OverwriteLatestLidar(InputMessage frame) {
+    {
+        std::lock_guard<std::mutex> lock(online_input_mutex_);
+        if (!online_worker_running_) return;
+
+        frame.lidar_sequence = ++online_lidar_received_;
+        if (has_latest_lidar_) ++online_lidar_overwritten_;
+        latest_lidar_ = std::move(frame);
+        has_latest_lidar_ = true;
+    }
+    online_input_ready_.notify_one();
+}
+
+std::size_t Lightning::PendingOnlineInputCountLocked() const {
+    return pending_imu_and_rtk_.size() + (has_latest_lidar_ ? 1U : 0U);
+}
+
+void Lightning::ClearPendingOnlineInputLocked() {
+    latest_lidar_ = InputMessage();
+    has_latest_lidar_ = false;
+    pending_imu_and_rtk_.clear();
+}
+
+void Lightning::StartOnlineWorkerLocked() {
+    const bool mapping = mode_ == Mode::ONLINE_MAPPING;
+    {
+        std::lock_guard<std::mutex> lock(online_input_mutex_);
+        ClearPendingOnlineInputLocked();
+        online_lidar_received_ = 0;
+        online_lidar_overwritten_ = 0;
+        online_imu_received_ = 0;
+        online_rtk_ins_received_ = 0;
+        online_wheel_odometry_received_ = 0;
+        online_worker_running_ = true;
+    }
+
+    online_worker_ = std::thread([this, mapping]() { OnlineWorkerLoop(mapping); });
+    if (topic_input_) topic_input_->SetEnabled(true);
+    LOG(INFO) << "[在线输入] 已启动，mode="
+              << (mapping ? "mapping" : "localization")
+              << ", LiDAR=latest-only"
+              << ", IMU/RTK=non-dropping arrival-order queue";
+}
+
+void Lightning::StopOnlineWorkerLocked(bool drain) {
+    if (topic_input_) topic_input_->SetEnabled(false);
+
+    std::size_t pending = 0;
+    bool was_running = false;
+    {
+        std::lock_guard<std::mutex> lock(online_input_mutex_);
+        was_running = online_worker_running_;
+        online_worker_running_ = false;
+        pending = PendingOnlineInputCountLocked();
+        if (!drain) ClearPendingOnlineInputLocked();
+    }
+
+    online_input_ready_.notify_all();
+    if (online_worker_.joinable()) online_worker_.join();
+
+    if (was_running) {
+        LOG(INFO) << "[在线输入] 已停止"
+                  << ", drain=" << drain
+                  << ", pending_at_stop=" << pending;
     }
 }
 
-bool Lightning::IsLidarMessage(const InputMessage& input) {
-    return input.type == InputType::POINT_CLOUD2 || input.type == InputType::LIVOX;
-}
-
-void Lightning::PushMappingMessage(InputMessage message) {
-    const bool is_lidar = IsLidarMessage(message);
-    const std::uint64_t lidar_sequence = message.lidar_sequence;
-    std::size_t depth = 0;
-    std::size_t replaced = 0;
-    const bool pushed = is_lidar
-        ? mapping_queue_.PushLatest(
-              std::move(message),
-              [](const InputMessage& input) { return Lightning::IsLidarMessage(input); },
-              &depth, &replaced)
-        : mapping_queue_.Push(std::move(message), &depth);
-    if (!pushed) {
-        if (is_lidar) {
-            ++mapping_lidar_dropped_;
-            LOG(ERROR) << "[数据链路诊断][在线建图] FIFO已经关闭，消息未入队"
-                       << ", lidar_sequence=" << lidar_sequence;
-        }
-        return;
-    }
-    if (is_lidar) {
-        ++mapping_lidar_enqueued_;
-        if (replaced > 0) {
-            const std::uint64_t dropped =
-                mapping_lidar_dropped_.fetch_add(replaced) + replaced;
-            if (dropped <= 20 || dropped % 100 == 0) {
-                LOG(INFO) << "[在线建图队列] 实时模式丢弃旧点云"
-                          << ", replaced=" << replaced
-                          << ", dropped_total=" << dropped
-                          << ", latest_lidar_sequence=" << lidar_sequence
-                          << ", depth=" << depth;
+void Lightning::OnlineWorkerLoop(bool mapping) {
+    if (mapping) {
+        // Mapping remains LiDAR-keyframe-driven. RTK samples are buffered and
+        // consumed before the next LiDAR frame so mapOptimization can
+        // interpolate them to keyframe timestamps.
+        std::uint64_t lidar_processed = 0;
+        std::uint64_t imu_processed = 0;
+        std::uint64_t rtk_processed = 0;
+        while (true) {
+            std::deque<InputMessage> imu_and_rtk_to_process;
+            InputMessage lidar_to_process;
+            {
+                std::unique_lock<std::mutex> lock(online_input_mutex_);
+                online_input_ready_.wait(lock, [this]() { return !online_worker_running_ || has_latest_lidar_; });
+                if (!has_latest_lidar_) break;
+                imu_and_rtk_to_process.swap(pending_imu_and_rtk_);
+                lidar_to_process = std::move(latest_lidar_);
+                latest_lidar_ = InputMessage();
+                has_latest_lidar_ = false;
             }
-        }
-    }
-}
-
-void Lightning::PushLocalizationMessage(InputMessage message) {
-    const std::uint64_t lidar_sequence = message.lidar_sequence;
-    std::size_t depth = 0;
-    std::size_t replaced = 0;
-    if (!localization_queue_.PushLatest(std::move(message), &depth, &replaced)) {
-        ++localization_lidar_dropped_;
-        LOG(ERROR) << "[数据链路诊断][在线定位] FIFO已经关闭，消息未入队"
-                   << ", lidar_sequence=" << lidar_sequence;
-        return;
-    }
-    ++localization_lidar_enqueued_;
-    if (replaced > 0) {
-        const std::uint64_t dropped =
-            localization_lidar_dropped_.fetch_add(replaced) + replaced;
-        if (dropped <= 20 || dropped % 100 == 0) {
-            LOG(INFO) << "[在线定位队列] 实时模式丢弃旧帧"
-                      << ", replaced=" << replaced
-                      << ", dropped_total=" << dropped
-                      << ", latest_lidar_sequence=" << lidar_sequence
-                      << ", depth=" << depth;
-        }
-    }
-}
-
-void Lightning::StartOnlineMappingWorkerLocked() {
-    mapping_lidar_received_ = 0;
-    mapping_lidar_enqueued_ = 0;
-    mapping_lidar_dropped_ = 0;
-    mapping_queue_.Open();
-    mapping_worker_ = std::thread([this]() { OnlineMappingWorkerLoop(); });
-    online_route_.store(OnlineRoute::MAPPING, std::memory_order_release);
-    if (topic_input_) {
-        topic_input_->SetEnabled(true);
-    }
-    LOG(INFO) << "[在线建图] Topic路由已经打开，FIFO工作线程已经启动";
-}
-
-void Lightning::StopOnlineMappingWorkerLocked(bool drain) {
-    if (online_route_.load() == OnlineRoute::MAPPING && topic_input_) {
-        topic_input_->SetEnabled(false);
-    }
-    if (online_route_.load() == OnlineRoute::MAPPING) {
-        online_route_ = OnlineRoute::NONE;
-    } 
-    const std::size_t pending = mapping_queue_.Close(drain);
-    LOG(INFO) << "[在线建图] 关闭FIFO，drain=" << drain
-              << ", pending=" << pending;
-    if (mapping_worker_.joinable()) {
-        mapping_worker_.join();
-    }
-}
-
-void Lightning::OnlineMappingWorkerLoop() {
-    LOG(INFO) << "[在线建图线程] 开始 thread_id=" << std::this_thread::get_id();
-    std::uint64_t processed = 0;
-    std::uint64_t imu_processed = 0;
-    std::uint64_t lidar_processed = 0;
-    std::uint64_t last_lidar_sequence = 0;
-    std::uint64_t sequence_gap_count = 0;
-    double max_queue_wait_ms = 0.0;
-    double max_process_ms = 0.0;
-    InputMessage input;
-    while (mapping_queue_.WaitPop(&input) == QueuePopResult::MESSAGE) {
-        const double process_begin = RuntimeSteadySeconds();
-        const double queue_wait_ms = input.receive_steady_sec > 0.0
-            ? (process_begin - input.receive_steady_sec) * 1000.0
-            : 0.0;
-        if (queue_wait_ms > max_queue_wait_ms) {
-            max_queue_wait_ms = queue_wait_ms;
-        }
-        if (input.lidar_sequence != 0) {
-            if (last_lidar_sequence != 0 && input.lidar_sequence != last_lidar_sequence + 1) {
-                ++sequence_gap_count;
-                LOG(WARNING) << "[数据链路诊断][在线建图] 雷达序号不连续"
-                             << ", previous=" << last_lidar_sequence
-                             << ", current=" << input.lidar_sequence
-                             << ", header_stamp=" << input.header_stamp;
+            for (const InputMessage& input : imu_and_rtk_to_process) {
+                ProcessMappingInput(input);
+                if (input.type == InputType::IMU) ++imu_processed;
+                else if (input.type == InputType::RTK_INS) ++rtk_processed;
             }
-            last_lidar_sequence = input.lidar_sequence;
-        }
-
-        ProcessMappingInput(input);
-        const double process_ms = (RuntimeSteadySeconds() - process_begin) * 1000.0;
-        if (process_ms > max_process_ms) {
-            max_process_ms = process_ms;
-        }
-        ++processed;
-        if (input.type == InputType::IMU) {
-            ++imu_processed;
-        }
-        if (input.lidar_sequence != 0) {
+            ProcessMappingInput(lidar_to_process);
             ++lidar_processed;
-            if (lidar_processed % 100 == 0) {
-                LOG(INFO) << "[在线建图线程] 雷达点云累计处理=" << lidar_processed
-                          << ", 当前FIFO总处理=" << processed
-                          << ", queue_depth=" << mapping_queue_.Size();
-            }
-            if (queue_wait_ms > 200.0 || process_ms > 200.0) {
-                LOG(WARNING) << "[数据链路诊断][在线建图] 延迟异常"
-                             << ", lidar_sequence=" << input.lidar_sequence
-                             << ", header_stamp=" << input.header_stamp
-                             << ", queue_wait_ms=" << queue_wait_ms
-                             << ", process_ms=" << process_ms
-                             << ", queue_depth=" << mapping_queue_.Size();
-            }
         }
-        if (processed % 1000 == 0) {
-            LOG(INFO) << "[在线建图线程] FIFO累计处理(含IMU和雷达)=" << processed
-                      << ", 其中IMU=" << imu_processed
-                      << ", 雷达=" << lidar_processed
-                      << ", queue_depth=" << mapping_queue_.Size();
-        }
+        LOG(INFO) << "[online input] mapping worker stopped"
+                  << ", lidar_received=" << online_lidar_received_
+                  << ", lidar_processed=" << lidar_processed
+                  << ", lidar_overwritten=" << online_lidar_overwritten_
+                  << ", imu_received=" << online_imu_received_
+                  << ", imu_processed=" << imu_processed
+                  << ", rtk_received=" << online_rtk_ins_received_
+                  << ", rtk_processed=" << rtk_processed;
+        return;
     }
-    LOG(INFO) << "[数据链路诊断][在线建图] 工作线程退出汇总"
-              << ", lidar_received=" << mapping_lidar_received_.load()
-              << ", lidar_enqueued=" << mapping_lidar_enqueued_.load()
-              << ", lidar_processed=" << lidar_processed
-              << ", imu_processed=" << imu_processed
-              << ", total_processed=" << processed
-              << ", lidar_dropped=" << mapping_lidar_dropped_.load()
-              << ", sequence_gap_count=" << sequence_gap_count
-              << ", max_queue_wait_ms=" << max_queue_wait_ms
-              << ", max_process_ms=" << max_process_ms;
-    LOG(INFO) << "[在线建图线程] 退出，累计处理=" << processed;
-}
 
-void Lightning::StartOnlineLocalizationWorkerLocked() {
-    localization_lidar_received_ = 0;
-    localization_lidar_enqueued_ = 0;
-    localization_lidar_dropped_ = 0;
-    localization_queue_.Open();
-    localization_worker_ = std::thread([this]() { OnlineLocalizationWorkerLoop(); });
-    online_route_.store(OnlineRoute::LOCALIZATION, std::memory_order_release);
-    if (topic_input_) {
-        topic_input_->SetEnabled(true);
-    }
-    LOG(INFO) << "[在线定位] Topic路由已经打开，FIFO工作线程已经启动";
-}
-
-void Lightning::StopOnlineLocalizationWorkerLocked(bool drain) {
-    if (online_route_.load() == OnlineRoute::LOCALIZATION && topic_input_) {
-        topic_input_->SetEnabled(false);
-    }
-    if (online_route_.load() == OnlineRoute::LOCALIZATION) {
-        online_route_ = OnlineRoute::NONE;
-    }
-    const std::size_t pending = localization_queue_.Close(drain);
-    LOG(INFO) << "[在线定位] 关闭FIFO，drain=" << drain << ", pending=" << pending;
-    if (localization_worker_.joinable()) {
-        localization_worker_.join();
-    }
-}
-
-void Lightning::OnlineLocalizationWorkerLoop() {
-    LOG(INFO) << "[在线定位线程] 开始 thread_id=" << std::this_thread::get_id();
-    std::uint64_t processed = 0;
-    std::uint64_t pointcloud2_processed = 0;
-    std::uint64_t livox_processed = 0;
-    std::uint64_t ndt_executed = 0;
-    std::uint64_t initialized_frames = 0;
-    std::uint64_t frames_not_sent_to_ndt = 0;
-    std::uint64_t last_lidar_sequence = 0;
-    std::uint64_t sequence_gap_count = 0;
-    std::uint64_t non_monotonic_header_count = 0;
-    std::uint64_t source_large_header_gap_count = 0;
-    double last_header_stamp = 0.0;
-    double last_pointcloud2_stamp = 0.0;
-    double last_livox_stamp = 0.0;
-    double max_queue_wait_ms = 0.0;
-    double max_process_ms = 0.0;
-    bool timeout_reported = false;
-    bool mixed_source_reported = false;
-    InputMessage input;
-    const auto timeout = std::chrono::duration<double>(localization_cloud_timeout_sec_);
-
+    // Localization is measurement-driven. RTK-only and wheel updates must be
+    // processed even when no LiDAR frame arrives.
+    std::uint64_t lidar_processed = 0;
+    std::uint64_t auxiliary_processed = 0;
     while (true) {
-        const QueuePopResult result = localization_queue_.WaitPopFor(&input, timeout);
-        if (result == QueuePopResult::CLOSED) {
-            break;
-        }
-        if (result == QueuePopResult::TIMEOUT) {
-            if (!timeout_reported) {
-                HandleLocalizationTimeout();
-                timeout_reported = true;
+        std::deque<InputMessage> auxiliary_to_process;
+        InputMessage lidar_to_process;
+        bool process_lidar = false;
+        {
+            std::unique_lock<std::mutex> lock(online_input_mutex_);
+            online_input_ready_.wait(lock, [this]() { return !online_worker_running_ || has_latest_lidar_ || !pending_imu_and_rtk_.empty(); });
+            if (!online_worker_running_ && !has_latest_lidar_ && pending_imu_and_rtk_.empty()) break;
+            auxiliary_to_process.swap(pending_imu_and_rtk_);
+            if (has_latest_lidar_) {
+                lidar_to_process = std::move(latest_lidar_);
+                latest_lidar_ = InputMessage();
+                has_latest_lidar_ = false;
+                process_lidar = true;
             }
-            continue;
         }
-
-        timeout_reported = false;
-        const double process_begin = RuntimeSteadySeconds();
-        const double queue_wait_ms = input.receive_steady_sec > 0.0
-            ? (process_begin - input.receive_steady_sec) * 1000.0
-            : 0.0;
-        max_queue_wait_ms = std::max(max_queue_wait_ms, queue_wait_ms);
-
-        if (last_lidar_sequence != 0 && input.lidar_sequence != last_lidar_sequence + 1) {
-            ++sequence_gap_count;
-            LOG(INFO) << "[在线定位输入诊断][Worker] 实时模式跳过旧帧"
-                      << ", previous=" << last_lidar_sequence
-                      << ", current=" << input.lidar_sequence
-                      << ", topic_sequence=" << input.topic_lidar_sequence
-                      << ", header_stamp=" << std::setprecision(15) << input.header_stamp;
+        std::vector<InputMessage> ordered_inputs;
+        ordered_inputs.reserve(auxiliary_to_process.size() + (process_lidar ? 1 : 0));
+        while (!auxiliary_to_process.empty()) {
+            ordered_inputs.push_back(std::move(auxiliary_to_process.front()));
+            auxiliary_to_process.pop_front();
         }
-        last_lidar_sequence = input.lidar_sequence;
-
-        const double merged_header_dt = last_header_stamp == 0.0
-            ? 0.0 : input.header_stamp - last_header_stamp;
-        if (last_header_stamp != 0.0 && merged_header_dt <= 0.0) {
-            ++non_monotonic_header_count;
-            LOG(ERROR) << std::setprecision(15)
-                       << "[在线定位输入诊断][Worker] 合并后的雷达时间戳不递增"
-                       << ", task_sequence=" << input.lidar_sequence
-                       << ", topic_sequence=" << input.topic_lidar_sequence
-                       << ", previous_stamp=" << last_header_stamp
-                       << ", current_stamp=" << input.header_stamp
-                       << ", header_dt=" << merged_header_dt
-                       << ", source="
-                       << (input.type == InputType::POINT_CLOUD2 ? "PointCloud2" : "Livox");
-        }
-        last_header_stamp = input.header_stamp;
-
-        double source_header_dt = 0.0;
-        if (input.type == InputType::POINT_CLOUD2) {
-            ++pointcloud2_processed;
-            source_header_dt = last_pointcloud2_stamp == 0.0
-                ? 0.0 : input.header_stamp - last_pointcloud2_stamp;
-            last_pointcloud2_stamp = input.header_stamp;
-        } else {
-            ++livox_processed;
-            source_header_dt = last_livox_stamp == 0.0
-                ? 0.0 : input.header_stamp - last_livox_stamp;
-            last_livox_stamp = input.header_stamp;
-        }
-        if (source_header_dt > 0.15) {
-            ++source_large_header_gap_count;
-            LOG(WARNING) << std::setprecision(15)
-                         << "[在线定位输入诊断][Worker] FIFO中相邻同源点云时间间隔过大"
-                         << ", task_sequence=" << input.lidar_sequence
-                         << ", topic_sequence=" << input.topic_lidar_sequence
-                         << ", source="
-                         << (input.type == InputType::POINT_CLOUD2 ? "PointCloud2" : "Livox")
-                         << ", source_header_dt=" << source_header_dt;
-        }
-        if (!mixed_source_reported && pointcloud2_processed > 0 && livox_processed > 0) {
-            mixed_source_reported = true;
-            LOG(ERROR) << "[在线定位输入诊断][Worker] 同一定位任务同时收到PointCloud2和Livox"
-                       << ", PointCloud2=" << pointcloud2_processed
-                       << ", Livox=" << livox_processed
-                       << "; 两路雷达消息会被合并进同一个NDT序列，请检查是否重复发布同一雷达";
-        }
-
-        if (processed < 20 || (processed + 1) % 100 == 0) {
-            LOG(INFO) << std::setprecision(15)
-                      << "[在线定位输入诊断][Worker] 准备送入LocalizationSystem"
-                      << ", task_sequence=" << input.lidar_sequence
-                      << ", topic_sequence=" << input.topic_lidar_sequence
-                      << ", source="
-                      << (input.type == InputType::POINT_CLOUD2 ? "PointCloud2" : "Livox")
-                      << ", header_stamp=" << input.header_stamp
-                      << ", merged_header_dt=" << merged_header_dt
-                      << ", source_header_dt=" << source_header_dt
-                      << ", queue_wait_ms=" << queue_wait_ms;
-        }
-
-        const loc::LocalizationFrameOutcome outcome = ProcessLocalizationInput(input);
-        const double process_end = RuntimeSteadySeconds();
-        if (outcome == loc::LocalizationFrameOutcome::NDT_EXECUTED) {
-            ++ndt_executed;
-        } else if (outcome == loc::LocalizationFrameOutcome::INITIALIZED_WITH_FRAME) {
-            ++initialized_frames;
-            const std::size_t removed = localization_queue_.RemoveIf(
-                [process_end](const InputMessage& pending) {
-                    return pending.receive_steady_sec <= process_end;
-                });
-            if (removed > 0) {
-                const std::uint64_t dropped =
-                    localization_lidar_dropped_.fetch_add(removed) + removed;
-                LOG(INFO) << "[在线定位队列] 初始化完成，丢弃初始化期间缓存的旧帧"
-                          << ", removed=" << removed
-                          << ", dropped_total=" << dropped;
-            }
-        } else {
-            ++frames_not_sent_to_ndt;
-        }
-
-        const double process_ms = (process_end - process_begin) * 1000.0;
-        max_process_ms = std::max(max_process_ms, process_ms);
-        ++processed;
-        if (processed <= 20 || processed % 100 == 0 ||
-            outcome != loc::LocalizationFrameOutcome::NDT_EXECUTED) {
-            LOG(INFO) << std::setprecision(15)
-                      << "[在线定位输入诊断][Worker] LocalizationSystem返回"
-                      << ", task_sequence=" << input.lidar_sequence
-                      << ", topic_sequence=" << input.topic_lidar_sequence
-                      << ", header_stamp=" << input.header_stamp
-                      << ", outcome=" << loc::LocalizationFrameOutcomeName(outcome)
-                      << ", queue_wait_ms=" << queue_wait_ms
-                      << ", process_ms=" << process_ms;
+        if (process_lidar) ordered_inputs.push_back(std::move(lidar_to_process));
+        std::stable_sort(ordered_inputs.begin(), ordered_inputs.end(), [](const InputMessage& lhs, const InputMessage& rhs) { return lhs.header_stamp < rhs.header_stamp; });
+        for (const InputMessage& input : ordered_inputs) {
+            ProcessLocalizationInput(input);
+            if (input.type == InputType::POINT_CLOUD2 || input.type == InputType::LIVOX) ++lidar_processed;
+            else ++auxiliary_processed;
         }
     }
-    LOG(INFO) << "[在线定位输入诊断][Worker] 退出汇总"
-              << ", lidar_received=" << localization_lidar_received_.load()
-              << ", lidar_enqueued=" << localization_lidar_enqueued_.load()
-              << ", lidar_processed=" << processed
-              << ", pointcloud2_processed=" << pointcloud2_processed
-              << ", livox_processed=" << livox_processed
-              << ", ndt_executed=" << ndt_executed
-              << ", initialized_frames=" << initialized_frames
-              << ", frames_not_sent_to_ndt=" << frames_not_sent_to_ndt
-              << ", lidar_dropped=" << localization_lidar_dropped_.load()
-              << ", sequence_gap_count=" << sequence_gap_count
-              << ", non_monotonic_header_count=" << non_monotonic_header_count
-              << ", source_large_header_gap_count=" << source_large_header_gap_count
-              << ", max_queue_wait_ms=" << max_queue_wait_ms
-              << ", max_process_ms=" << max_process_ms;
-    LOG(INFO) << "[在线定位线程] 退出，累计处理=" << processed;
+    LOG(INFO) << "[online input] localization worker stopped, lidar_processed=" << lidar_processed << ", auxiliary_processed=" << auxiliary_processed;
 }
 
 void Lightning::ProcessMappingInput(const InputMessage& input) {
@@ -595,11 +412,13 @@ void Lightning::ProcessMappingInput(const InputMessage& input) {
         mapping_system_->ProcessIMU(input.imu);
         return;
     }
-    if (input.type == InputType::POINT_CLOUD2) {
-        mapping_system_->ProcessCloud(input.cloud);
-    } else {
-        mapping_system_->ProcessCloud(input.livox);
+    if (input.type == InputType::RTK_INS) {
+        mapping_system_->ProcessRtkIns(input.rtk_ins);
+        return;
     }
+    if (input.type == InputType::POINT_CLOUD2) mapping_system_->ProcessCloud(input.cloud);
+    else if (input.type == InputType::LIVOX) mapping_system_->ProcessCloud(input.livox);
+    else return;
 
     if (mapping_system_->ConsumeMappingUpdate()) {
         PublishMappingOutputsLocked(false);
@@ -619,32 +438,26 @@ loc::LocalizationFrameOutcome Lightning::ProcessLocalizationInput(const InputMes
     diagnostic.worker_begin_steady_sec = RuntimeSteadySeconds();
     diagnostic.header_stamp = input.header_stamp;
 
-    if (input.type == InputType::POINT_CLOUD2) {
-        return localization_system_->ProcessCloud(input.cloud, diagnostic);
+    if (input.type == InputType::IMU) {
+        localization_system_->ProcessImu(input.imu);
+        return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
     }
-    if (input.type == InputType::LIVOX) {
-        return localization_system_->ProcessCloud(input.livox, diagnostic);
+    if (input.type == InputType::RTK_INS) {
+        localization_system_->ProcessRtkIns(input.rtk_ins);
+        return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
     }
+    if (input.type == InputType::WHEEL_ODOMETRY) {
+        localization_system_->ProcessWheelOdometry(input.wheel_odometry);
+        return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
+    }
+    if (input.type == InputType::POINT_CLOUD2) return localization_system_->ProcessCloud(input.cloud, diagnostic);
+    if (input.type == InputType::LIVOX) return localization_system_->ProcessCloud(input.livox, diagnostic);
     return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
 }
 
-void Lightning::HandleLocalizationTimeout() {
-    if (!localization_system_) {
-        return;
-    }
-    const std::string message = "雷达消息超时：连续 " +
-        std::to_string(localization_cloud_timeout_sec_) + " 秒没有收到点云";
-    LOG(WARNING) << "[在线定位] " << message;
-    localization_system_->MarkPoor(message + "; localization quality: poor");
-}
 
 void Lightning::StopAllOnlineWorkersLocked(bool drain) {
-    if (topic_input_) {
-        topic_input_->SetEnabled(false);
-    }
-    online_route_ = OnlineRoute::NONE;
-    StopOnlineMappingWorkerLocked(drain);
-    StopOnlineLocalizationWorkerLocked(drain);
+    StopOnlineWorkerLocked(drain);
 }
 
 void Lightning::ClearMappingSystemLocked() {
@@ -709,7 +522,7 @@ ServiceResult Lightning::StartMapping(const std::string& save_path) {
         return {false, "failed to initialize MappingSystem"};
     }
 
-    StartOnlineMappingWorkerLocked();
+    StartOnlineWorkerLocked();
     task_.Reset(TaskState::RUNNING, "online mapping running");
     return {true, "online mapping started, save_path: " + save_path};
 }
@@ -727,6 +540,12 @@ ServiceResult Lightning::LoadBag(const std::string& bag_path) {
     offline_bag_path_ = bag_path;
 
     if (mode_ == Mode::OFFLINE_LOCALIZATION) {
+        if (localization_fusion_mode_ == modules::LocalizationSystem::Mode::RTK_ONLY) {
+            if (!EnsureLocalizationSystemLocked()) return {false, "failed to initialize RTK/INS localization"};
+            task_.Reset(TaskState::RUNNING, "offline RTK/INS localization running");
+            StartBagLocalizationTaskLocked(bag_path);
+            return {true, "offline RTK/INS localization started: " + bag_path};
+        }
         task_.Reset(TaskState::READY, "offline bag loaded, waiting for set_map_path and set_location");
         return {true, "offline localization bag loaded: " + bag_path};
     }
@@ -778,6 +597,14 @@ void Lightning::StartBagMappingTaskLocked(const std::string& bag_path) {
                 input.livox = cloud;
                 ProcessMappingInput(input);
             },
+            [this](const RtkInsMeasurement& measurement) {
+                InputMessage input;
+                input.header_stamp = measurement.stamp;
+                input.type = InputType::RTK_INS;
+                input.rtk_ins = measurement;
+                ProcessMappingInput(input);
+            },
+            nullptr,
             [this](const BagInputProgress& progress) {
                 task_.SetProgress(progress.processed_frames, progress.total_frames, "offline mapping running");
             },
@@ -858,7 +685,7 @@ ServiceResult Lightning::FinishMapping(bool save_map) {
 
     LOG(INFO) << "[结束建图] [01] 停止数据源";
     if (mode_ == Mode::ONLINE_MAPPING) {
-        StopOnlineMappingWorkerLocked(true);
+        StopOnlineWorkerLocked(true);
     } else {
         task_.RequestCancel();
         JoinOfflineThreadLocked();
@@ -883,88 +710,58 @@ ServiceResult Lightning::FinishMapping(bool save_map) {
 
 ServiceResult Lightning::SetMapPath(const std::string& map_path) {
     std::lock_guard<std::mutex> lock(control_mutex_);
-    if (!IsLocalizationMode(mode_)) {
-        return {false, "set_map_path is only allowed in localization modes"};
-    }
-    if (task_.State() == TaskState::RUNNING || task_.State() == TaskState::SAVING) {
-        return {false, "localization is already running"};
-    }
-
-    StopOnlineLocalizationWorkerLocked(false);
+    if (!IsLocalizationMode(mode_)) return {false, "set_map_path is only allowed in localization modes"};
+    if (task_.State() == TaskState::RUNNING || task_.State() == TaskState::SAVING) return {false, "localization is already running"};
+    StopOnlineWorkerLocked(false);
     JoinOfflineThreadLocked();
     ClearLocalizationSystemLocked();
-
-    localization_system_ = std::make_unique<modules::LocalizationSystem>();
-    ++localization_task_generation_;
-    LOG(INFO) << "[在线定位输入诊断][定位任务] 创建LocalizationSystem"
-              << ", generation=" << localization_task_generation_
-              << ", mode=" << ModeToString(mode_)
-              << ", ptr=" << localization_system_.get();
-    if (!localization_system_->Init(yaml_path_, node_)) {
-        ClearLocalizationSystemLocked();
-        task_.SetFinished(false, "failed to initialize LocalizationSystem");
-        return {false, "failed to initialize LocalizationSystem"};
-    }
+    if (!EnsureLocalizationSystemLocked()) return {false, "failed to initialize LocalizationSystem"};
     if (!localization_system_->SetMapPath(map_path)) {
         ClearLocalizationSystemLocked();
-        task_.SetFinished(false, "failed to load localization map: " + map_path);
         return {false, "failed to load localization map: " + map_path};
     }
-
     localization_map_path_ = map_path;
-    task_.Reset(TaskState::READY, "localization map loaded, waiting for set_location");
+    task_.Reset(TaskState::READY, localization_system_->RequiresInitialGuess() ? "localization map loaded, waiting for set_location" : "localization ready");
     return {true, "localization map loaded: " + map_path};
 }
 
 ServiceResult Lightning::SetLocation(const SE3& init_pose, bool* initialized_now) {
     std::lock_guard<std::mutex> lock(control_mutex_);
-    if (!IsLocalizationMode(mode_)) {
-        return {false, "set_location is only allowed in localization modes"};
-    }
-    if (!localization_system_) {
-        return {false, "set_map_path has not been called"};
-    }
-    if (mode_ == Mode::OFFLINE_LOCALIZATION && offline_bag_path_.empty()) {
-        return {false, "load_bag has not been called"};
-    }
-    if (mode_ == Mode::OFFLINE_LOCALIZATION &&
-        (task_.State() == TaskState::RUNNING || task_.State() == TaskState::SAVING)) {
-        return {false, "offline localization is already running"};
-    }
-
+    if (!IsLocalizationMode(mode_)) return {false, "set_location is only allowed in localization modes"};
+    if (!EnsureLocalizationSystemLocked()) return {false, "failed to initialize LocalizationSystem"};
+    if (localization_system_->RequiresMap() && localization_map_path_.empty()) return {false, "set_map_path has not been called"};
+    if (mode_ == Mode::OFFLINE_LOCALIZATION && offline_bag_path_.empty()) return {false, "load_bag has not been called"};
+    if (mode_ == Mode::OFFLINE_LOCALIZATION && (task_.State() == TaskState::RUNNING || task_.State() == TaskState::SAVING)) return {false, "offline localization is already running"};
     if (mode_ == Mode::ONLINE_LOCALIZATION) {
-        StopOnlineLocalizationWorkerLocked(false);
+        StopOnlineWorkerLocked(false);
     }
-
     bool initialized = false;
-    if (!localization_system_->SetInitialGuess(init_pose, &initialized)) {
-        return {false, "failed to set initial pose"};
-    }
-    if (initialized_now) {
-        *initialized_now = initialized;
-    }
-
+    if (!localization_system_->SetInitialGuess(init_pose, &initialized)) return {false, "failed to set initial pose"};
+    if (initialized_now) *initialized_now = initialized;
     if (mode_ == Mode::OFFLINE_LOCALIZATION) {
         JoinOfflineThreadLocked();
         task_.Reset(TaskState::RUNNING, "offline localization running");
         StartBagLocalizationTaskLocked(offline_bag_path_);
         return {true, "offline localization started"};
     }
-
-    StartOnlineLocalizationWorkerLocked();
-    task_.SetState(initialized ? TaskState::RUNNING : TaskState::WAIT_CLOUD,
-                   initialized ? "localization initialized" : "initial pose accepted, waiting for current cloud");
-    return {true, initialized ? "localization initialized" : "initial pose accepted, waiting for current cloud"};
+    StartOnlineWorkerLocked();
+    task_.SetState(TaskState::RUNNING, "online localization running");
+    return {true, "online localization started"};
 }
 
 void Lightning::StartBagLocalizationTaskLocked(const std::string& bag_path) {
     offline_thread_ = std::thread([this, bag_path]() {
-        LOG(INFO) << "[离线定位线程] 开始读取Bag";
+        LOG(INFO) << "[offline localization] bag processing started";
         offline_localization_sequence_ = 0;
         BagInput bag_input;
         const bool bag_ok = bag_input.Run(
-            bag_path, yaml_path_,
-            nullptr,
+            bag_path, yaml_path_, [this](const sensor_msgs::msg::Imu::SharedPtr& imu) {
+                InputMessage input;
+                input.header_stamp = rclcpp::Time(imu->header.stamp).seconds();
+                input.type = InputType::IMU;
+                input.imu = imu;
+                ProcessLocalizationInput(input);
+            },
             [this](const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
                 InputMessage input;
                 input.lidar_sequence = ++offline_localization_sequence_;
@@ -983,17 +780,25 @@ void Lightning::StartBagLocalizationTaskLocked(const std::string& bag_path) {
                 input.livox = cloud;
                 ProcessLocalizationInput(input);
             },
-            [this](const BagInputProgress& progress) {
-                task_.SetProgress(progress.processed_frames, progress.total_frames, "offline localization running");
+            [this](const RtkInsMeasurement& measurement) {
+                InputMessage input;
+                input.header_stamp = measurement.stamp;
+                input.type = InputType::RTK_INS;
+                input.rtk_ins = measurement;
+                ProcessLocalizationInput(input);
             },
+            [this](const WheelOdometryMeasurement& measurement) {
+                InputMessage input;
+                input.header_stamp = measurement.stamp;
+                input.type = InputType::WHEEL_ODOMETRY;
+                input.wheel_odometry = measurement;
+                ProcessLocalizationInput(input);
+            },
+            [this](const BagInputProgress& progress) { task_.SetProgress(progress.processed_frames, progress.total_frames, "offline localization running"); },
             [this]() { return task_.CancelRequested(); });
-
-        if (task_.CancelRequested()) {
-            task_.SetState(TaskState::CANCELLED, "offline localization cancelled");
-        } else {
-            task_.SetFinished(bag_ok, bag_ok ? "offline localization finished" : "offline bag localization failed");
-        }
-        LOG(INFO) << "[离线定位线程] 读取Bag结束";
+        if (task_.CancelRequested()) task_.SetState(TaskState::CANCELLED, "offline localization cancelled");
+        else task_.SetFinished(bag_ok, bag_ok ? "offline localization finished" : "offline bag localization failed");
+        LOG(INFO) << "[offline localization] bag processing finished";
     });
 }
 
@@ -1007,7 +812,7 @@ ServiceResult Lightning::FinishLocalization() {
     }
 
     LOG(INFO) << "[结束定位] [01] 关闭Topic到定位队列的路由";
-    StopOnlineLocalizationWorkerLocked(true);
+    StopOnlineWorkerLocked(true);
     LOG(INFO) << "[结束定位] [02] 定位工作线程已经退出";
     ClearLocalizationSystemLocked();
     task_.SetFinished(true, "online localization finished");
@@ -1039,7 +844,6 @@ ServiceResult Lightning::CancelTask() {
     std::lock_guard<std::mutex> lock(control_mutex_);
     LOG(INFO) << "[取消任务] [01] 请求停止数据源和任务线程";
     task_.RequestCancel();
-    online_route_ = OnlineRoute::NONE;
     StopAllOnlineWorkersLocked(false);
     JoinOfflineThreadLocked();
 

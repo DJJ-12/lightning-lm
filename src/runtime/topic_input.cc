@@ -2,15 +2,22 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <exception>
-#include <iomanip>
 #include <utility>
 
 #include <glog/logging.h>
 #include <yaml-cpp/yaml.h>
 
+#include "common/localization_message_adapter.h"
+
 namespace lightning::runtime {
 namespace {
+
+std::string NormalizeMode(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
 
 double TopicSteadySeconds() {
     return std::chrono::duration<double>(
@@ -29,7 +36,9 @@ TopicInput::~TopicInput() {
 bool TopicInput::Start(const std::string& yaml_path,
                        ImuCallback imu_cb,
                        CloudCallback cloud_cb,
-                       LivoxCallback livox_cb) {
+                       LivoxCallback livox_cb,
+                       RtkInsCallback rtk_ins_cb,
+                       WheelOdometryCallback wheel_odometry_cb) {
     if (running_.load()) {
         return true;
     }
@@ -37,7 +46,13 @@ bool TopicInput::Start(const std::string& yaml_path,
         LOG(ERROR) << "[Topic接收] 配置文件路径为空";
         return false;
     }
-    input_enabled_.store(false);
+    input_enabled_.store(false, std::memory_order_release);
+    imu_received_ = 0;
+    cloud_received_ = 0;
+    livox_received_ = 0;
+    rtk_ins_received_ = 0;
+    wheel_odometry_received_ = 0;
+    lidar_topic_sequence_ = 0;
 
     YAML::Node yaml = YAML::LoadFile(yaml_path);
     if (!yaml["common"]) {
@@ -45,31 +60,63 @@ bool TopicInput::Start(const std::string& yaml_path,
         return false;
     }
 
-    const std::string imu_topic = yaml["common"]["imu_topic"].as<std::string>();
-    const std::string cloud_topic = yaml["common"]["lidar_topic"].as<std::string>();
-    const std::string livox_topic = yaml["common"]["livox_lidar_topic"].as<std::string>();
+    const std::string imu_topic = yaml["common"]["imu_topic"] ? yaml["common"]["imu_topic"].as<std::string>() : std::string();
+    const std::string cloud_topic = yaml["common"]["lidar_topic"] ? yaml["common"]["lidar_topic"].as<std::string>() : std::string();
+    const std::string livox_topic = yaml["common"]["livox_lidar_topic"] ? yaml["common"]["livox_lidar_topic"].as<std::string>() : std::string();
+    const YAML::Node mapping_rtk = yaml["mapping_rtk"] ? yaml["mapping_rtk"] : YAML::Node();
+    const bool mapping_rtk_enabled = mapping_rtk && mapping_rtk["enabled"] ? mapping_rtk["enabled"].as<bool>() : false;
+    const YAML::Node localization = yaml["localization"];
+    const YAML::Node localization_rtk = localization && localization["rtk_ins"] ? localization["rtk_ins"] : YAML::Node();
+    const YAML::Node localization_eskf = localization && localization["eskf"] ? localization["eskf"] : YAML::Node();
+    const std::string localization_mode = NormalizeMode(localization && localization["mode"] ? localization["mode"].as<std::string>() : "ndt_only");
+    const bool localization_filter_enabled = localization_mode != "ndt_only";
+    const bool localization_rtk_enabled = localization_filter_enabled && localization_rtk && localization_rtk["enabled"] ? localization_rtk["enabled"].as<bool>() : false;
+    const bool rtk_ins_enabled = mapping_rtk_enabled || localization_rtk_enabled;
+    const bool wheel_enabled = localization_filter_enabled && localization_eskf && localization_eskf["use_wheel_odometry"] ? localization_eskf["use_wheel_odometry"].as<bool>() : false;
+    const std::string rtk_ins_topic = yaml["common"]["rtk_local_odometry_topic"] ? yaml["common"]["rtk_local_odometry_topic"].as<std::string>() : (yaml["common"]["localization_rtk_ned_odometry_topic"] ? yaml["common"]["localization_rtk_ned_odometry_topic"].as<std::string>() : std::string());
+    const std::string rtk_frame_name = NormalizeMode(yaml["common"]["rtk_local_odometry_frame"] ? yaml["common"]["rtk_local_odometry_frame"].as<std::string>() : "ned");
+    if (rtk_frame_name != "ned" && rtk_frame_name != "enu") {
+        LOG(ERROR) << "[Topic接收][RTK] rtk_local_odometry_frame must be 'ned' or 'enu'";
+        return false;
+    }
+    const auto rtk_input_frame = rtk_frame_name == "enu" ? localization_adapter::LocalNavigationFrame::ENU : localization_adapter::LocalNavigationFrame::NED;
+    const std::string wheel_odometry_topic = yaml["common"]["wheel_odometry_topic"] ? yaml["common"]["wheel_odometry_topic"].as<std::string>() : std::string();
+    if (rtk_ins_enabled && rtk_ins_topic.empty()) {
+        LOG(ERROR) << "[Topic接收][RTK] mapping/localization RTK is enabled but the local odometry topic is empty";
+        return false;
+    }
+    if (wheel_enabled && wheel_odometry_topic.empty()) {
+        LOG(ERROR) << "[Topic接收][Wheel] enabled but wheel odometry topic is empty";
+        return false;
+    }
 
     imu_cb_ = std::move(imu_cb);
     cloud_cb_ = std::move(cloud_cb);
     livox_cb_ = std::move(livox_cb);
+    rtk_ins_cb_ = std::move(rtk_ins_cb);
+    wheel_odometry_cb_ = std::move(wheel_odometry_cb);
 
     node_ = std::make_shared<rclcpp::Node>("lightning_topic_input");
 
-    // 回调只负责入队。点云继续使用 Reliable；IMU 兼容常见传感器 BestEffort 发布。
-    rclcpp::QoS cloud_qos{rclcpp::KeepAll()};
-    //cloud_qos.reliable();
-    cloud_qos.best_effort();
-    cloud_qos.durability_volatile();
+    // 点云在 DDS 层只保留最新帧；回调只负责交给应用层输入队列。
+    rclcpp::QoS lidar_qos{rclcpp::KeepLast(1)};
+    lidar_qos.best_effort();
+    lidar_qos.durability_volatile();
 
-    rclcpp::QoS imu_qos{rclcpp::KeepAll()};
-    imu_qos.best_effort();
-    imu_qos.durability_volatile();
+    // IMU and RTK are not intentionally truncated at the DDS history layer.
+    // BEST_EFFORT remains compatible with common sensor publishers; it cannot
+    // guarantee lossless network transport, but the application never drops a
+    // callback-delivered IMU/RTK message because of queue capacity.
+    rclcpp::QoS auxiliary_qos{rclcpp::KeepAll()};
+    auxiliary_qos.best_effort();
+    auxiliary_qos.durability_volatile();
 
-    if (imu_cb_) {
+    if (imu_cb_ && !imu_topic.empty()) {
         imu_sub_ = node_->create_subscription<sensor_msgs::msg::Imu>(
-            imu_topic, imu_qos,
+            imu_topic, auxiliary_qos,
             [this](sensor_msgs::msg::Imu::SharedPtr msg) {
-                if (!input_enabled_.load()) {
+                std::lock_guard<std::mutex> callback_gate(callback_gate_mutex_);
+                if (!input_enabled_.load(std::memory_order_acquire)) {
                     return;
                 }
                 ++imu_received_;
@@ -83,49 +130,19 @@ bool TopicInput::Start(const std::string& yaml_path,
             });
     }
 
-    if (cloud_cb_) {
+    if (cloud_cb_ && !cloud_topic.empty()) {
         cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
-            cloud_topic, cloud_qos,
+            cloud_topic, lidar_qos,
             [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
-                if (!input_enabled_.load()) {
+                std::lock_guard<std::mutex> callback_gate(callback_gate_mutex_);
+                if (!input_enabled_.load(std::memory_order_acquire)) {
                     return;
                 }
-                const double callback_begin = TopicSteadySeconds();
-                const std::uint64_t count = ++cloud_received_;
+                ++cloud_received_;
                 LidarReceiveInfo info;
                 info.topic_sequence = ++lidar_topic_sequence_;
-                info.source_sequence = count;
-                info.receive_steady_sec = callback_begin;
+                info.receive_steady_sec = TopicSteadySeconds();
                 info.header_stamp = rclcpp::Time(msg->header.stamp).seconds();
-                if (last_cloud_header_stamp_ != 0.0) {
-                    info.header_dt = info.header_stamp - last_cloud_header_stamp_;
-                }
-                if (last_cloud_receive_steady_sec_ != 0.0) {
-                    info.arrival_dt = callback_begin - last_cloud_receive_steady_sec_;
-                }
-                if (last_cloud_header_stamp_ != 0.0 && info.header_dt <= 0.0) {
-                    ++cloud_non_monotonic_stamp_count_;
-                    LOG(ERROR) << std::setprecision(15)
-                               << "[Topic接收诊断][PointCloud2] 时间戳不递增"
-                               << ", topic_sequence=" << info.topic_sequence
-                               << ", source_sequence=" << info.source_sequence
-                               << ", previous_stamp=" << last_cloud_header_stamp_
-                               << ", current_stamp=" << info.header_stamp
-                               << ", header_dt=" << info.header_dt;
-                } else if (info.header_dt > 0.15) {
-                    ++cloud_large_header_gap_count_;
-                    LOG(WARNING) << std::setprecision(15)
-                                 << "[Topic接收诊断][PointCloud2] 回调入口已出现大时间间隔"
-                                 << ", topic_sequence=" << info.topic_sequence
-                                 << ", source_sequence=" << info.source_sequence
-                                 << ", previous_stamp=" << last_cloud_header_stamp_
-                                 << ", current_stamp=" << info.header_stamp
-                                 << ", header_dt=" << info.header_dt
-                                 << "; 若雷达应为10Hz，缺帧或时间戳跳变发生在本程序回调之前";
-                }
-                last_cloud_header_stamp_ = info.header_stamp;
-                last_cloud_receive_steady_sec_ = callback_begin;
-
                 try {
                     cloud_cb_(msg, info);
                 } catch (const std::exception& e) {
@@ -133,59 +150,22 @@ bool TopicInput::Start(const std::string& yaml_path,
                 } catch (...) {
                     LOG(ERROR) << "[Topic接收] PointCloud2入队回调发生未知异常";
                 }
-                const double callback_ms = (TopicSteadySeconds() - callback_begin) * 1000.0;
-                max_cloud_callback_ms_ = std::max(max_cloud_callback_ms_, callback_ms);
-                if (callback_ms > 5.0) {
-                    LOG(WARNING) << "[Topic接收诊断][PointCloud2] 接收回调耗时异常"
-                                 << ", topic_sequence=" << info.topic_sequence
-                                 << ", callback_ms=" << callback_ms;
-                }
             });
     }
 
-    if (livox_cb_) {
+    if (livox_cb_ && !livox_topic.empty()) {
         livox_sub_ = node_->create_subscription<livox_ros_driver2::msg::CustomMsg>(
-            livox_topic, cloud_qos,
+            livox_topic, lidar_qos,
             [this](livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
-                if (!input_enabled_.load()) {
+                std::lock_guard<std::mutex> callback_gate(callback_gate_mutex_);
+                if (!input_enabled_.load(std::memory_order_acquire)) {
                     return;
                 }
-                const double callback_begin = TopicSteadySeconds();
-                const std::uint64_t count = ++livox_received_;
+                ++livox_received_;
                 LidarReceiveInfo info;
                 info.topic_sequence = ++lidar_topic_sequence_;
-                info.source_sequence = count;
-                info.receive_steady_sec = callback_begin;
+                info.receive_steady_sec = TopicSteadySeconds();
                 info.header_stamp = rclcpp::Time(msg->header.stamp).seconds();
-                if (last_livox_header_stamp_ != 0.0) {
-                    info.header_dt = info.header_stamp - last_livox_header_stamp_;
-                }
-                if (last_livox_receive_steady_sec_ != 0.0) {
-                    info.arrival_dt = callback_begin - last_livox_receive_steady_sec_;
-                }
-                if (last_livox_header_stamp_ != 0.0 && info.header_dt <= 0.0) {
-                    ++livox_non_monotonic_stamp_count_;
-                    LOG(ERROR) << std::setprecision(15)
-                               << "[Topic接收诊断][Livox] 时间戳不递增"
-                               << ", topic_sequence=" << info.topic_sequence
-                               << ", source_sequence=" << info.source_sequence
-                               << ", previous_stamp=" << last_livox_header_stamp_
-                               << ", current_stamp=" << info.header_stamp
-                               << ", header_dt=" << info.header_dt;
-                } else if (info.header_dt > 0.15) {
-                    ++livox_large_header_gap_count_;
-                    LOG(WARNING) << std::setprecision(15)
-                                 << "[Topic接收诊断][Livox] 回调入口已出现大时间间隔"
-                                 << ", topic_sequence=" << info.topic_sequence
-                                 << ", source_sequence=" << info.source_sequence
-                                 << ", previous_stamp=" << last_livox_header_stamp_
-                                 << ", current_stamp=" << info.header_stamp
-                                 << ", header_dt=" << info.header_dt
-                                 << "; 若雷达应为10Hz，缺帧或时间戳跳变发生在本程序回调之前";
-                }
-                last_livox_header_stamp_ = info.header_stamp;
-                last_livox_receive_steady_sec_ = callback_begin;
-
                 try {
                     livox_cb_(msg, info);
                 } catch (const std::exception& e) {
@@ -193,14 +173,39 @@ bool TopicInput::Start(const std::string& yaml_path,
                 } catch (...) {
                     LOG(ERROR) << "[Topic接收] Livox入队回调发生未知异常";
                 }
-                const double callback_ms = (TopicSteadySeconds() - callback_begin) * 1000.0;
-                max_livox_callback_ms_ = std::max(max_livox_callback_ms_, callback_ms);
-                if (callback_ms > 5.0) {
-                    LOG(WARNING) << "[Topic接收诊断][Livox] 接收回调耗时异常"
-                                 << ", topic_sequence=" << info.topic_sequence
-                                 << ", callback_ms=" << callback_ms;
-                }
             });
+    }
+
+
+    if (rtk_ins_enabled && rtk_ins_cb_ && !rtk_ins_topic.empty()) {
+        rtk_ins_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(rtk_ins_topic, auxiliary_qos, [this, rtk_input_frame](nav_msgs::msg::Odometry::SharedPtr msg) {
+            std::lock_guard<std::mutex> callback_gate(callback_gate_mutex_);
+            if (!input_enabled_.load(std::memory_order_acquire)) return;
+            ++rtk_ins_received_;
+            try {
+                RtkInsMeasurement measurement;
+                if (localization_adapter::LocalOdometryToRtkInsMeasurement(*msg, rtk_input_frame, &measurement)) rtk_ins_cb_(measurement);
+            } catch (const std::exception& e) {
+                LOG(ERROR) << "[Topic input][RTK/INS] callback exception: " << e.what();
+            } catch (...) {
+                LOG(ERROR) << "[Topic input][RTK/INS] unknown callback exception";
+            }
+        });
+    }
+    if (wheel_enabled && wheel_odometry_cb_ && !wheel_odometry_topic.empty()) {
+        wheel_odometry_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(wheel_odometry_topic, auxiliary_qos, [this](nav_msgs::msg::Odometry::SharedPtr msg) {
+            std::lock_guard<std::mutex> callback_gate(callback_gate_mutex_);
+            if (!input_enabled_.load(std::memory_order_acquire)) return;
+            ++wheel_odometry_received_;
+            try {
+                WheelOdometryMeasurement measurement;
+                if (localization_adapter::OdometryToWheelMeasurement(*msg, &measurement)) wheel_odometry_cb_(measurement);
+            } catch (const std::exception& e) {
+                LOG(ERROR) << "[Topic input][Wheel] callback exception: " << e.what();
+            } catch (...) {
+                LOG(ERROR) << "[Topic input][Wheel] unknown callback exception";
+            }
+        });
     }
 
     executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
@@ -212,9 +217,19 @@ bool TopicInput::Start(const std::string& yaml_path,
               << ", cloud=" << cloud_topic
               << ", livox=" << livox_topic
               << ", imu=" << imu_topic
-              << ", cloud_qos=KEEP_ALL+RELIABLE+VOLATILE"
-              << ", imu_qos=KEEP_ALL+BEST_EFFORT+VOLATILE";
+              << ", rtk_local_odometry=" << (rtk_ins_enabled ? rtk_ins_topic : "disabled")
+              << ", rtk_local_frame=" << (rtk_ins_enabled ? rtk_frame_name : "disabled")
+              << ", wheel_odometry=" << (wheel_enabled ? wheel_odometry_topic : "disabled")
+              << ", cloud_qos=KEEP_LAST(1)+BEST_EFFORT+VOLATILE"
+              << ", imu_rtk_qos=KEEP_ALL+BEST_EFFORT+VOLATILE"
+              << ", note=application buffers do not capacity-drop IMU/RTK; "
+                 "BEST_EFFORT transport itself is not lossless";
     return true;
+}
+
+void TopicInput::SetEnabled(bool enabled) {
+    std::lock_guard<std::mutex> callback_gate(callback_gate_mutex_);
+    input_enabled_.store(enabled, std::memory_order_release);
 }
 
 void TopicInput::Spin() {
@@ -224,7 +239,7 @@ void TopicInput::Spin() {
 }
 
 void TopicInput::Shutdown() {
-    input_enabled_.store(false);
+    SetEnabled(false);
     const bool was_running = running_.exchange(false);
     if (!was_running && !thread_.joinable() && !node_) {
         return;
@@ -253,25 +268,24 @@ void TopicInput::Shutdown() {
     imu_sub_.reset();
     cloud_sub_.reset();
     livox_sub_.reset();
-
+    rtk_ins_sub_.reset();
+    wheel_odometry_sub_.reset();
     LOG(INFO) << "[Topic接收析构] [05] 销毁输入节点和executor";
     node_.reset();
     executor_.reset();
     imu_cb_ = nullptr;
     cloud_cb_ = nullptr;
     livox_cb_ = nullptr;
+    rtk_ins_cb_ = nullptr;
+    wheel_odometry_cb_ = nullptr;
 
-    LOG(INFO) << "[Topic接收析构] [06] 完成"
-              << ", imu_received=" << imu_received_.load()
-              << ", cloud_received=" << cloud_received_.load()
-              << ", livox_received=" << livox_received_.load()
-              << ", lidar_topic_sequence=" << lidar_topic_sequence_
-              << ", cloud_non_monotonic_stamp_count=" << cloud_non_monotonic_stamp_count_
-              << ", livox_non_monotonic_stamp_count=" << livox_non_monotonic_stamp_count_
-              << ", cloud_large_header_gap_count=" << cloud_large_header_gap_count_
-              << ", livox_large_header_gap_count=" << livox_large_header_gap_count_
-              << ", max_cloud_callback_ms=" << max_cloud_callback_ms_
-              << ", max_livox_callback_ms=" << max_livox_callback_ms_;
+    LOG(INFO) << "[Topic接收] 接收线程已停止"
+              << ", imu_received=" << imu_received_
+              << ", cloud_received=" << cloud_received_
+              << ", livox_received=" << livox_received_
+              << ", rtk_ins_received=" << rtk_ins_received_
+              << ", wheel_odometry_received=" << wheel_odometry_received_
+              << ", lidar_topic_sequence=" << lidar_topic_sequence_;
 }
 
 }  // namespace lightning::runtime

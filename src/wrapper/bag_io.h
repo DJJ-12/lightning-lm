@@ -13,7 +13,9 @@
 #include <rclcpp/serialized_message.hpp>
 #include <rosbag2_cpp/reader.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 
 #include "livox_ros_driver2/msg/custom_msg.hpp"
 
@@ -32,6 +34,8 @@ class RosbagIO {
     using LivoxCloud2Handle = std::function<bool(livox_ros_driver2::msg::CustomMsg::SharedPtr)>;
     using ImuHandle = std::function<bool(IMUPtr)>;
     using RawImuHandle = std::function<bool(sensor_msgs::msg::Imu::SharedPtr)>;
+    using NavSatFixHandle = std::function<bool(sensor_msgs::msg::NavSatFix::SharedPtr)>;
+    using OdometryHandle = std::function<bool(nav_msgs::msg::Odometry::SharedPtr)>;
 
     void Go(int sleep_usec = 0);
     uint64_t CountMessagesFromMetadata(const std::set<std::string>& topics) const;
@@ -77,6 +81,25 @@ class RosbagIO {
         });
     }
 
+    RosbagIO& AddNavSatFixHandle(const std::string& topic_name, NavSatFixHandle f) {
+        return AddHandle(topic_name, [f = std::move(f), this](const MsgType& m) -> bool {
+            auto msg = std::make_shared<sensor_msgs::msg::NavSatFix>();
+            rclcpp::SerializedMessage data(*m->serialized_data);
+            seri_navsat_fix_.deserialize_message(&data, msg.get());
+            return f(msg);
+        });
+    }
+
+
+    RosbagIO& AddOdometryHandle(const std::string& topic_name, OdometryHandle f) {
+        return AddHandle(topic_name, [f = std::move(f), this](const MsgType& m) -> bool {
+            auto msg = std::make_shared<nav_msgs::msg::Odometry>();
+            rclcpp::SerializedMessage data(*m->serialized_data);
+            seri_odometry_.deserialize_message(&data, msg.get());
+            return f(msg);
+        });
+    }
+
     RosbagIO& AddImuHandle(const std::string& topic_name, RawImuHandle f) {
         return AddHandle(topic_name, [f = std::move(f), this](const MsgType& m) -> bool {
             auto msg = std::make_shared<sensor_msgs::msg::Imu>();
@@ -91,6 +114,8 @@ class RosbagIO {
 
     rclcpp::Serialization<sensor_msgs::msg::Imu> seri_imu_;
     rclcpp::Serialization<sensor_msgs::msg::PointCloud2> seri_cloud2_;
+    rclcpp::Serialization<sensor_msgs::msg::NavSatFix> seri_navsat_fix_;
+    rclcpp::Serialization<nav_msgs::msg::Odometry> seri_odometry_;
     rclcpp::Serialization<livox_ros_driver2::msg::CustomMsg> seri_livox_;
 
     std::string bag_file_;
