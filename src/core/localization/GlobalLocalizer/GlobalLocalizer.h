@@ -20,12 +20,24 @@ struct QualityThresholds {
 };
 
 // 定位结果质量结构体
+struct NdtCovarianceOptions {
+    double information_scale = 1.0;
+    double min_information_eigenvalue = 1e-6;
+    double max_information_eigenvalue = 1e8;
+    double min_translation_std = 0.05;
+    double max_translation_std = 10.0;
+    double min_rotation_std_rad = 0.5 * 3.14159265358979323846 / 180.0;
+    double max_rotation_std_rad = 30.0 * 3.14159265358979323846 / 180.0;
+};
+
 struct LocalizationQuality {
     double transform_probability = 0.0;           // 变换概率
     double nearest_voxel_likelihood = 0.0;        // 最近体素似然度
     int iteration_num = 0;                        // 迭代次数
     bool is_reliable = false;                     // 是否可靠
     std::string quality_level = "unknown";       // 质量等级：excellent/good/fair/poor
+    Eigen::Matrix<double, 6, 6> pose_covariance = Eigen::Matrix<double, 6, 6>::Identity();
+    bool covariance_valid = false;
 
     // 评估定位质量（使用自定义阈值）
     void evaluate(const QualityThresholds& thresholds) {
@@ -60,9 +72,11 @@ private:
     std::string pcd_directory_;
     MapManager::MapLoader map_loader_;
     QualityThresholds quality_thresholds_;  // 定位质量评估阈值
+    NdtCovarianceOptions covariance_options_;
 
     void ResetNdt();
     pclomp::NdtResult AlignPose(const Eigen::Matrix4d &initial_pose_with_cov);
+    bool EstimatePoseCovariance(const Eigen::Matrix<double, 6, 6>& hessian, Eigen::Matrix<double, 6, 6>* covariance) const;
 
     Eigen::Matrix4d last_last_pose_ = Eigen::Matrix4d::Identity();
     Eigen::Matrix4d last_pose_ = Eigen::Matrix4d::Identity();
@@ -73,9 +87,8 @@ public:
     ~Localizer(){};
 
     // 设置定位质量评估阈值
-    void SetQualityThresholds(const QualityThresholds& thresholds) {
-        quality_thresholds_ = thresholds;
-    }
+    void SetQualityThresholds(const QualityThresholds& thresholds) { quality_thresholds_ = thresholds; }
+    void SetCovarianceOptions(const NdtCovarianceOptions& options) { covariance_options_ = options; }
 
     bool GetInitPose(const Eigen::Matrix4d& init_guess, Eigen::Matrix4d& align_pose, const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, pcl::PointCloud<pcl::PointXYZ>::Ptr& output_cloud, LocalizationQuality& quality);
 
@@ -87,7 +100,8 @@ public:
         Eigen::Matrix4d& align_pose,
         LocalizationQuality& quality,
         std::uint64_t diagnostic_sequence = 0,
-        double diagnostic_timestamp = 0.0);
+        double diagnostic_timestamp = 0.0,
+        const Eigen::Matrix4d* external_initial_guess = nullptr);
 
     void SetStaticMap(std::string pcd_metadata_path, std::string pcd_directory)
     {

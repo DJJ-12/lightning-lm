@@ -111,6 +111,18 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
         }
     }
 
+    robot_localizer::NdtCovarianceOptions covariance_options;
+    if (yaml_node["localization"] && yaml_node["localization"]["ndt_covariance"]) {
+        const YAML::Node covariance = yaml_node["localization"]["ndt_covariance"];
+        if (covariance["information_scale"]) covariance_options.information_scale = covariance["information_scale"].as<double>();
+        if (covariance["min_information_eigenvalue"]) covariance_options.min_information_eigenvalue = covariance["min_information_eigenvalue"].as<double>();
+        if (covariance["max_information_eigenvalue"]) covariance_options.max_information_eigenvalue = covariance["max_information_eigenvalue"].as<double>();
+        if (covariance["min_translation_std"]) covariance_options.min_translation_std = covariance["min_translation_std"].as<double>();
+        if (covariance["max_translation_std"]) covariance_options.max_translation_std = covariance["max_translation_std"].as<double>();
+        if (covariance["min_rotation_std_deg"]) covariance_options.min_rotation_std_rad = covariance["min_rotation_std_deg"].as<double>() * M_PI / 180.0;
+        if (covariance["max_rotation_std_deg"]) covariance_options.max_rotation_std_rad = covariance["max_rotation_std_deg"].as<double>() * M_PI / 180.0;
+    }
+
     const std::string metadata_path =
         global_map_path + "/BlockMap/pointcloud_map_metadata.yaml";
     const std::string pcd_directory = global_map_path + "/BlockMap/pointcloud_map";
@@ -118,6 +130,7 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     localizer_.MapReset();
     localizer_.SetStaticMap(metadata_path, pcd_directory);
     localizer_.SetQualityThresholds(quality_thresholds_);
+    localizer_.SetCovarianceOptions(covariance_options);
     localizer_.ResetLocalizationState();
 
     map_loaded_ = true;
@@ -126,6 +139,8 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     init_in_progress_ = false;
     pending_initial_pose_ = Eigen::Matrix4d::Identity();
     latest_pose_ = Eigen::Matrix4d::Identity();
+    prediction_pose_ = Eigen::Matrix4d::Identity();
+    has_prediction_pose_ = false;
     latest_cloud_timestamp_ = 0.0;
     has_last_processed_cloud_timestamp_ = false;
     last_processed_cloud_timestamp_ = 0.0;
@@ -479,9 +494,17 @@ LocalizationFrameOutcome Localization::ProcessLocalizationCloud(const LocCloudFr
     XYZCloud::Ptr cloud_reg(new XYZCloud);
     robot_localizer::LocalizationQuality quality;
 
-    const bool reliable = localizer_.RegisterFrame(
-        current_cloud, cloud_reg, pose, quality,
-        frame.diagnostic.pipeline_sequence, frame.timestamp);
+    Eigen::Matrix4d external_initial_guess = Eigen::Matrix4d::Identity();
+    const Eigen::Matrix4d* external_initial_guess_ptr = nullptr;
+    {
+        UL lock(global_mutex_);
+        if (has_prediction_pose_) {
+            external_initial_guess = prediction_pose_;
+            external_initial_guess_ptr = &external_initial_guess;
+            has_prediction_pose_ = false;
+        }
+    }
+    const bool reliable = localizer_.RegisterFrame(current_cloud, cloud_reg, pose, quality, frame.diagnostic.pipeline_sequence, frame.timestamp, external_initial_guess_ptr);
     const double ndt_ms = (SteadySeconds() - ndt_begin_steady_sec) * 1000.0;
     diagnostic_max_ndt_ms_ = std::max(diagnostic_max_ndt_ms_, ndt_ms);
     ++diagnostic_ndt_frames_;
@@ -497,6 +520,8 @@ LocalizationFrameOutcome Localization::ProcessLocalizationCloud(const LocCloudFr
     res.tp_ = quality.transform_probability;
     res.nvtl_ = quality.nearest_voxel_likelihood;
     res.iterations_ = quality.iteration_num;
+    res.pose_covariance_ = quality.pose_covariance;
+    res.covariance_valid_ = quality.covariance_valid;
     res.message_ = reliable ? "localization reliable" : "localization not reliable";
 
     const double header_dt = has_previous_pose ? frame.timestamp - previous_timestamp : 0.0;
@@ -624,12 +649,11 @@ bool Localization::TryInitializeWithCurrentCloud() {
     res.tp_ = quality.transform_probability;
     res.nvtl_ = quality.nearest_voxel_likelihood;
     res.iterations_ = quality.iteration_num;
+    res.pose_covariance_ = quality.pose_covariance;
+    res.covariance_valid_ = quality.covariance_valid;
     res.message_ = "localization initialized: " + quality.quality_level;
 
-    {
-        UL lock_result(loc_result_mutex_);
-        loc_result_ = res;
-    }
+    PublishResult(res);
     return true;
 }
 
@@ -707,6 +731,8 @@ bool Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
             localization_inited_ = false;
             init_in_progress_ = false;
             latest_pose_ = Eigen::Matrix4d::Identity();
+            prediction_pose_ = Eigen::Matrix4d::Identity();
+            has_prediction_pose_ = false;
             has_last_processed_cloud_timestamp_ = false;
             last_processed_cloud_timestamp_ = 0.0;
         }
@@ -727,6 +753,13 @@ bool Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
               << ", z=" << init_guess(2, 3);
     return true;
 }
+
+void Localization::SetPredictionPose(const SE3& pose) {
+    UL lock(global_mutex_);
+    prediction_pose_ = pose.matrix();
+    has_prediction_pose_ = true;
+}
+
 
 void Localization::PublishResult(const LocalizationResult& result) {
     {

@@ -9,7 +9,7 @@ namespace lightning::loc {
 
 geometry_msgs::msg::TransformStamped LocalizationResult::ToGeoMsg() const {
     geometry_msgs::msg::TransformStamped msg;
-    msg.header.frame_id = "map";
+    msg.header.frame_id = frame_id_.empty() ? "map" : frame_id_;
     msg.header.stamp = math::FromSec(timestamp_);
     msg.child_frame_id = "base_link";
 
@@ -32,7 +32,7 @@ NavState LocalizationResult::ToNavState() const {
     ret.pos_ = pose_.translation();
     ret.rot_ = pose_.so3();
     ret.pose_is_ok_ = status_ == LocalizationStatus::GOOD;
-    ret.vel_ = Vec3d::Zero();
+    ret.vel_ = velocity_map_;
 
     return ret;
 }

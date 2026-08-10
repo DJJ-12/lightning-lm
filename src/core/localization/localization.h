@@ -47,6 +47,7 @@ class Localization {
         const LocalizationInputDiagnostic& diagnostic = {});
 
     bool SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vector3d& t);
+    void SetPredictionPose(const SE3& pose);
     void Finish();
 
     using TFCallback = std::function<void(const geometry_msgs::msg::TransformStamped& odom)>;
@@ -99,6 +100,8 @@ class Localization {
 
     Eigen::Matrix4d pending_initial_pose_ = Eigen::Matrix4d::Identity();
     Eigen::Matrix4d latest_pose_ = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d prediction_pose_ = Eigen::Matrix4d::Identity();
+    bool has_prediction_pose_ = false;
     Mat4f T_base_lidar_matrix_f_ = Mat4f::Identity();
     pcl::PointCloud<pcl::PointXYZ>::Ptr latest_cloud_ = nullptr;
     double latest_cloud_timestamp_ = 0.0;

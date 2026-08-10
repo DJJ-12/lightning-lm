@@ -7,6 +7,8 @@
 #include <iomanip>
 #include "GlobalLocalizer.h"
 
+#include <Eigen/Eigenvalues>
+
 namespace robot_localizer
 {
 Eigen::Vector3d getRPYFromEigenMatrix(const Eigen::Matrix3d& R) {
@@ -254,6 +256,7 @@ bool Localizer::GetInitPose(
     quality.nearest_voxel_likelihood =
         ndt_res.nearest_voxel_transformation_likelihood;
     quality.iteration_num = ndt_res.iteration_num;
+    quality.covariance_valid = EstimatePoseCovariance(ndt_res.hessian, &quality.pose_covariance);
     quality.evaluate(quality_thresholds_);
 
     LOG(INFO) << "precise NDT alignment completed - score: "
@@ -289,6 +292,38 @@ bool Localizer::GetInitPose(
     return true;
 }
 
+bool Localizer::EstimatePoseCovariance(const Eigen::Matrix<double, 6, 6>& hessian, Eigen::Matrix<double, 6, 6>* covariance) const
+{
+    if (!covariance || !hessian.allFinite()) return false;
+    Eigen::Matrix<double, 6, 6> information = -0.5 * (hessian + hessian.transpose());
+    information *= std::max(1e-12, covariance_options_.information_scale);
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> solver(information);
+    if (solver.info() != Eigen::Success || !solver.eigenvalues().allFinite()) return false;
+    Eigen::Matrix<double, 6, 1> information_eigenvalues = solver.eigenvalues();
+    for (int i = 0; i < 6; ++i) information_eigenvalues(i) = std::clamp(information_eigenvalues(i), covariance_options_.min_information_eigenvalue, covariance_options_.max_information_eigenvalue);
+    Eigen::Matrix<double, 6, 1> covariance_eigenvalues = information_eigenvalues.cwiseInverse();
+    *covariance = solver.eigenvectors() * covariance_eigenvalues.asDiagonal() * solver.eigenvectors().transpose();
+    *covariance = 0.5 * (*covariance + covariance->transpose());
+
+    Eigen::Matrix<double, 6, 1> standard_deviation = covariance->diagonal().cwiseMax(1e-12).cwiseSqrt();
+    for (int i = 0; i < 3; ++i) standard_deviation(i) = std::clamp(standard_deviation(i), covariance_options_.min_translation_std, covariance_options_.max_translation_std);
+    for (int i = 3; i < 6; ++i) standard_deviation(i) = std::clamp(standard_deviation(i), covariance_options_.min_rotation_std_rad, covariance_options_.max_rotation_std_rad);
+    Eigen::Matrix<double, 6, 6> correlation = Eigen::Matrix<double, 6, 6>::Zero();
+    for (int row = 0; row < 6; ++row) {
+        for (int col = 0; col < 6; ++col) {
+            const double denominator = std::sqrt(std::max(1e-12, (*covariance)(row, row) * (*covariance)(col, col)));
+            correlation(row, col) = std::clamp((*covariance)(row, col) / denominator, -0.99, 0.99);
+        }
+        correlation(row, row) = 1.0;
+    }
+    *covariance = standard_deviation.asDiagonal() * correlation * standard_deviation.asDiagonal();
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> covariance_solver(0.5 * (*covariance + covariance->transpose()));
+    if (covariance_solver.info() != Eigen::Success) return false;
+    Eigen::Matrix<double, 6, 1> eigenvalues = covariance_solver.eigenvalues().cwiseMax(1e-12);
+    *covariance = covariance_solver.eigenvectors() * eigenvalues.asDiagonal() * covariance_solver.eigenvectors().transpose();
+    return covariance->allFinite();
+}
+
 void Localizer::ResetLocalizationState()
 {
     last_last_pose_ = Eigen::Matrix4d::Identity();
@@ -302,10 +337,11 @@ bool Localizer::RegisterFrame(
     Eigen::Matrix4d &align_pose,
     LocalizationQuality& quality,
     std::uint64_t diagnostic_sequence,
-    double diagnostic_timestamp)
+    double diagnostic_timestamp,
+    const Eigen::Matrix4d* external_initial_guess)
 {
     ++register_frame_count_;
-    Eigen::Matrix4d init_guess = last_pose_ * last_last_pose_.inverse() * last_pose_;
+    Eigen::Matrix4d init_guess = external_initial_guess ? *external_initial_guess : last_pose_ * last_last_pose_.inverse() * last_pose_;
 
     ndt_ptr_->setInputSource(pc);
     ndt_ptr_->align(*output_cloud, init_guess.cast<float>());
@@ -316,7 +352,8 @@ bool Localizer::RegisterFrame(
     quality.transform_probability = ndt_res.transform_probability;
     quality.nearest_voxel_likelihood = ndt_res.nearest_voxel_transformation_likelihood;
     quality.iteration_num = ndt_res.iteration_num;
-    
+    quality.covariance_valid = EstimatePoseCovariance(ndt_res.hessian, &quality.pose_covariance);
+
     // 评估定位质量（使用配置的阈值）
     quality.evaluate(quality_thresholds_);
 

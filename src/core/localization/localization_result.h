@@ -29,9 +29,16 @@ struct LocalizationResult {
     double nvtl_ = 0.0;
     int iterations_ = 0;
     std::string message_;
+    std::string frame_id_ = "map";
 
-    // map -> base_link
+    // frame_id -> base_link
     SE3 pose_;
+    Eigen::Matrix<double, 6, 6> pose_covariance_ = Eigen::Matrix<double, 6, 6>::Identity();
+    bool covariance_valid_ = false;
+    Eigen::Vector3d velocity_map_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d angular_velocity_body_ = Eigen::Vector3d::Zero();
+    Eigen::Matrix<double, 6, 6> twist_covariance_ = Eigen::Matrix<double, 6, 6>::Identity();
+    bool twist_covariance_valid_ = false;
 
     geometry_msgs::msg::TransformStamped ToGeoMsg() const;
     NavState ToNavState() const;
