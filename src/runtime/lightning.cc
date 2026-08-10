@@ -196,9 +196,10 @@ void Lightning::AcceptImu(const sensor_msgs::msg::Imu::SharedPtr& imu) {
     {
         std::lock_guard<std::mutex> lock(online_input_mutex_);
         if (!online_worker_running_) return;
-        pending_imu_and_rtk_.push_back(std::move(input));
+        pending_imu_.push_back(std::move(input));
         ++online_imu_received_;
     }
+    online_input_ready_.notify_one();
 }
 
 
@@ -210,9 +211,9 @@ void Lightning::AcceptRtkIns(const RtkInsMeasurement& measurement) {
     input.rtk_ins = measurement;
     {
         std::lock_guard<std::mutex> lock(online_input_mutex_);
-        if (!online_worker_running_) return;
-        pending_imu_and_rtk_.push_back(std::move(input));
-        ++online_rtk_ins_received_;
+        if (!online_worker_running_ || !online_worker_is_localization_) return;
+        pending_rtk_.push_back(std::move(input));
+        ++online_rtk_received_;
     }
     online_input_ready_.notify_one();
 }
@@ -225,8 +226,8 @@ void Lightning::AcceptWheelOdometry(const WheelOdometryMeasurement& measurement)
     input.wheel_odometry = measurement;
     {
         std::lock_guard<std::mutex> lock(online_input_mutex_);
-        if (!online_worker_running_) return;
-        pending_imu_and_rtk_.push_back(std::move(input));
+        if (!online_worker_running_ || !online_worker_is_localization_) return;
+        pending_wheel_odometry_.push_back(std::move(input));
         ++online_wheel_odometry_received_;
     }
     online_input_ready_.notify_one();
@@ -274,13 +275,18 @@ void Lightning::OverwriteLatestLidar(InputMessage frame) {
 }
 
 std::size_t Lightning::PendingOnlineInputCountLocked() const {
-    return pending_imu_and_rtk_.size() + (has_latest_lidar_ ? 1U : 0U);
+    return pending_imu_.size() +
+           pending_rtk_.size() +
+           pending_wheel_odometry_.size() +
+           (has_latest_lidar_ ? 1U : 0U);
 }
 
 void Lightning::ClearPendingOnlineInputLocked() {
     latest_lidar_ = InputMessage();
     has_latest_lidar_ = false;
-    pending_imu_and_rtk_.clear();
+    pending_imu_.clear();
+    pending_rtk_.clear();
+    pending_wheel_odometry_.clear();
 }
 
 void Lightning::StartOnlineWorkerLocked() {
@@ -291,9 +297,10 @@ void Lightning::StartOnlineWorkerLocked() {
         online_lidar_received_ = 0;
         online_lidar_overwritten_ = 0;
         online_imu_received_ = 0;
-        online_rtk_ins_received_ = 0;
+        online_rtk_received_ = 0;
         online_wheel_odometry_received_ = 0;
         online_worker_running_ = true;
+        online_worker_is_localization_ = !mapping;
     }
 
     online_worker_ = std::thread([this, mapping]() { OnlineWorkerLoop(mapping); });
@@ -301,7 +308,7 @@ void Lightning::StartOnlineWorkerLocked() {
     LOG(INFO) << "[在线输入] 已启动，mode="
               << (mapping ? "mapping" : "localization")
               << ", LiDAR=latest-only"
-              << ", IMU/RTK=non-dropping arrival-order queue";
+              << ", IMU/RTK/wheel=separate non-dropping queues";
 }
 
 void Lightning::StopOnlineWorkerLocked(bool drain) {
@@ -313,6 +320,7 @@ void Lightning::StopOnlineWorkerLocked(bool drain) {
         std::lock_guard<std::mutex> lock(online_input_mutex_);
         was_running = online_worker_running_;
         online_worker_running_ = false;
+        online_worker_is_localization_ = false;
         pending = PendingOnlineInputCountLocked();
         if (!drain) ClearPendingOnlineInputLocked();
     }
@@ -329,28 +337,26 @@ void Lightning::StopOnlineWorkerLocked(bool drain) {
 
 void Lightning::OnlineWorkerLoop(bool mapping) {
     if (mapping) {
-        // Mapping remains LiDAR-keyframe-driven. RTK samples are buffered and
-        // consumed before the next LiDAR frame so mapOptimization can
-        // interpolate them to keyframe timestamps.
+        // Mapping is LiDAR-keyframe-driven. Only IMU is fed before each LiDAR
+        // frame; RTK and wheel observations belong to localization only.
         std::uint64_t lidar_processed = 0;
         std::uint64_t imu_processed = 0;
-        std::uint64_t rtk_processed = 0;
         while (true) {
-            std::deque<InputMessage> imu_and_rtk_to_process;
+            std::deque<InputMessage> imu_to_process;
             InputMessage lidar_to_process;
             {
                 std::unique_lock<std::mutex> lock(online_input_mutex_);
                 online_input_ready_.wait(lock, [this]() { return !online_worker_running_ || has_latest_lidar_; });
                 if (!has_latest_lidar_) break;
-                imu_and_rtk_to_process.swap(pending_imu_and_rtk_);
+                imu_to_process.swap(pending_imu_);
                 lidar_to_process = std::move(latest_lidar_);
                 latest_lidar_ = InputMessage();
                 has_latest_lidar_ = false;
             }
-            for (const InputMessage& input : imu_and_rtk_to_process) {
+            for (const InputMessage& input : imu_to_process) {
+                if (input.type != InputType::IMU) continue;
                 ProcessMappingInput(input);
-                if (input.type == InputType::IMU) ++imu_processed;
-                else if (input.type == InputType::RTK_INS) ++rtk_processed;
+                ++imu_processed;
             }
             ProcessMappingInput(lidar_to_process);
             ++lidar_processed;
@@ -360,9 +366,7 @@ void Lightning::OnlineWorkerLoop(bool mapping) {
                   << ", lidar_processed=" << lidar_processed
                   << ", lidar_overwritten=" << online_lidar_overwritten_
                   << ", imu_received=" << online_imu_received_
-                  << ", imu_processed=" << imu_processed
-                  << ", rtk_received=" << online_rtk_ins_received_
-                  << ", rtk_processed=" << rtk_processed;
+                  << ", imu_processed=" << imu_processed;
         return;
     }
 
@@ -371,14 +375,30 @@ void Lightning::OnlineWorkerLoop(bool mapping) {
     std::uint64_t lidar_processed = 0;
     std::uint64_t auxiliary_processed = 0;
     while (true) {
-        std::deque<InputMessage> auxiliary_to_process;
+        std::deque<InputMessage> imu_to_process;
+        std::deque<InputMessage> rtk_to_process;
+        std::deque<InputMessage> wheel_to_process;
         InputMessage lidar_to_process;
         bool process_lidar = false;
         {
             std::unique_lock<std::mutex> lock(online_input_mutex_);
-            online_input_ready_.wait(lock, [this]() { return !online_worker_running_ || has_latest_lidar_ || !pending_imu_and_rtk_.empty(); });
-            if (!online_worker_running_ && !has_latest_lidar_ && pending_imu_and_rtk_.empty()) break;
-            auxiliary_to_process.swap(pending_imu_and_rtk_);
+            online_input_ready_.wait(lock, [this]() {
+                return !online_worker_running_ ||
+                       has_latest_lidar_ ||
+                       !pending_imu_.empty() ||
+                       !pending_rtk_.empty() ||
+                       !pending_wheel_odometry_.empty();
+            });
+            if (!online_worker_running_ &&
+                !has_latest_lidar_ &&
+                pending_imu_.empty() &&
+                pending_rtk_.empty() &&
+                pending_wheel_odometry_.empty()) {
+                break;
+            }
+            imu_to_process.swap(pending_imu_);
+            rtk_to_process.swap(pending_rtk_);
+            wheel_to_process.swap(pending_wheel_odometry_);
             if (has_latest_lidar_) {
                 lidar_to_process = std::move(latest_lidar_);
                 latest_lidar_ = InputMessage();
@@ -387,10 +407,22 @@ void Lightning::OnlineWorkerLoop(bool mapping) {
             }
         }
         std::vector<InputMessage> ordered_inputs;
-        ordered_inputs.reserve(auxiliary_to_process.size() + (process_lidar ? 1 : 0));
-        while (!auxiliary_to_process.empty()) {
-            ordered_inputs.push_back(std::move(auxiliary_to_process.front()));
-            auxiliary_to_process.pop_front();
+        ordered_inputs.reserve(
+            imu_to_process.size() +
+            rtk_to_process.size() +
+            wheel_to_process.size() +
+            (process_lidar ? 1 : 0));
+        while (!imu_to_process.empty()) {
+            ordered_inputs.push_back(std::move(imu_to_process.front()));
+            imu_to_process.pop_front();
+        }
+        while (!rtk_to_process.empty()) {
+            ordered_inputs.push_back(std::move(rtk_to_process.front()));
+            rtk_to_process.pop_front();
+        }
+        while (!wheel_to_process.empty()) {
+            ordered_inputs.push_back(std::move(wheel_to_process.front()));
+            wheel_to_process.pop_front();
         }
         if (process_lidar) ordered_inputs.push_back(std::move(lidar_to_process));
         std::stable_sort(ordered_inputs.begin(), ordered_inputs.end(), [](const InputMessage& lhs, const InputMessage& rhs) { return lhs.header_stamp < rhs.header_stamp; });
@@ -410,10 +442,6 @@ void Lightning::ProcessMappingInput(const InputMessage& input) {
 
     if (input.type == InputType::IMU) {
         mapping_system_->ProcessIMU(input.imu);
-        return;
-    }
-    if (input.type == InputType::RTK_INS) {
-        mapping_system_->ProcessRtkIns(input.rtk_ins);
         return;
     }
     if (input.type == InputType::POINT_CLOUD2) mapping_system_->ProcessCloud(input.cloud);
@@ -597,13 +625,7 @@ void Lightning::StartBagMappingTaskLocked(const std::string& bag_path) {
                 input.livox = cloud;
                 ProcessMappingInput(input);
             },
-            [this](const RtkInsMeasurement& measurement) {
-                InputMessage input;
-                input.header_stamp = measurement.stamp;
-                input.type = InputType::RTK_INS;
-                input.rtk_ins = measurement;
-                ProcessMappingInput(input);
-            },
+            nullptr,
             nullptr,
             [this](const BagInputProgress& progress) {
                 task_.SetProgress(progress.processed_frames, progress.total_frames, "offline mapping running");

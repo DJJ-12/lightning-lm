@@ -10,8 +10,10 @@
 
 #include <rclcpp/executors/single_threaded_executor.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <geometry_msgs/msg/pose2_d.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include "common/localization_sensor_measurements.h"
@@ -64,9 +66,13 @@ class TopicInput {
     std::uint64_t imu_received_ = 0;
     std::uint64_t cloud_received_ = 0;
     std::uint64_t livox_received_ = 0;
-    std::uint64_t rtk_ins_received_ = 0;
+    std::uint64_t rtk_fix_received_ = 0;
+    std::uint64_t rtk_heading_received_ = 0;
+    std::uint64_t rtk_synced_received_ = 0;
     std::uint64_t wheel_odometry_received_ = 0;
     std::uint64_t lidar_topic_sequence_ = 0;
+
+    localization_adapter::RtkMeasurementSynchronizer rtk_sync_;
 
     ImuCallback imu_cb_;
     CloudCallback cloud_cb_;
@@ -81,7 +87,8 @@ class TopicInput {
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_sub_;
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr rtk_ins_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr rtk_fix_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::Pose2D>::SharedPtr rtk_heading_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_odometry_sub_;
 };
 

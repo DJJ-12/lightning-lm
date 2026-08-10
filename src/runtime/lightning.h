@@ -140,17 +140,21 @@ class Lightning {
     InputMessage latest_lidar_;
     bool has_latest_lidar_ = false;
 
-    // Auxiliary measurements are never removed because of queue capacity.
-    // Mapping preserves callback order; localization time-orders each snapshot.
-    std::deque<InputMessage> pending_imu_and_rtk_;
+    // Different sensors stay in different queues. LiDAR is latest-only for
+    // online realtime behavior; IMU/RTK/wheel keep every callback-delivered
+    // message until the worker consumes it.
+    std::deque<InputMessage> pending_imu_;
+    std::deque<InputMessage> pending_rtk_;
+    std::deque<InputMessage> pending_wheel_odometry_;
 
     bool online_worker_running_ = false;
+    bool online_worker_is_localization_ = false;
     std::thread online_worker_;
 
     std::uint64_t online_lidar_received_ = 0;
     std::uint64_t online_lidar_overwritten_ = 0;
     std::uint64_t online_imu_received_ = 0;
-    std::uint64_t online_rtk_ins_received_ = 0;
+    std::uint64_t online_rtk_received_ = 0;
     std::uint64_t online_wheel_odometry_received_ = 0;
 
     std::unique_ptr<modules::MappingSystem> mapping_system_;

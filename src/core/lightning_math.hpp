@@ -13,6 +13,7 @@
 #include <boost/math/tools/precision.hpp>
 #include <cmath>
 #include <numeric>
+#include <limits>
 
 #include <builtin_interfaces/msg/time.hpp>
 #include <rclcpp/time.hpp>
@@ -719,6 +720,135 @@ inline bool PoseInterp(double query_time, C&& data, FT&& take_time_func, FP&& ta
     best_match = s < time_th ? *match_iter : *match_iter_n;
     return true;
 }
+
+
+// WGS84 geodetic/ECEF/local-ENU conversion used by dual-antenna RTK.
+// The geodetic-to-ECEF equations and ECEF-to-local-frame construction follow
+// JSBSim FGLocation::SetPositionGeodetic() and FGLocation::ComputeDerivedUnconditional().
+// JSBSim's local frame is NED; the rows below are reordered/sign-flipped to ENU.
+class JsbsimWgs84Enu {
+   public:
+    static constexpr double kSemiMajorAxis = 6378137.0;
+    static constexpr double kInverseFlattening = 298.257223563;
+    static constexpr double kFlattening = 1.0 / kInverseFlattening;
+    static constexpr double kSemiMinorAxis = kSemiMajorAxis * (1.0 - kFlattening);
+    static constexpr double kEccentricitySquared = 1.0 - (kSemiMinorAxis * kSemiMinorAxis) / (kSemiMajorAxis * kSemiMajorAxis);
+    static constexpr double kUtmScale = 0.9996;
+
+    bool SetOriginDegrees(double latitude_deg, double longitude_deg, double altitude_m) {
+        if (!std::isfinite(latitude_deg) || !std::isfinite(longitude_deg) || !std::isfinite(altitude_m) || latitude_deg < -90.0 || latitude_deg > 90.0) return false;
+        const double latitude_rad = latitude_deg * M_PI / 180.0;
+        const double longitude_rad = longitude_deg * M_PI / 180.0;
+        origin_ecef_ = GeodeticToEcefRadians(latitude_rad, longitude_rad, altitude_m);
+        const double sin_lat = std::sin(latitude_rad);
+        const double cos_lat = std::cos(latitude_rad);
+        const double sin_lon = std::sin(longitude_rad);
+        const double cos_lon = std::cos(longitude_rad);
+        ecef_to_enu_ << -sin_lon, cos_lon, 0.0, -cos_lon * sin_lat, -sin_lon * sin_lat, cos_lat, cos_lon * cos_lat, sin_lon * cos_lat, sin_lat;
+        initialized_ = origin_ecef_.allFinite() && ecef_to_enu_.allFinite();
+        return initialized_;
+    }
+
+    bool Initialized() const { return initialized_; }
+
+    Eigen::Vector3d ForwardDegrees(double latitude_deg, double longitude_deg, double altitude_m) const {
+        if (!initialized_ || !std::isfinite(latitude_deg) || !std::isfinite(longitude_deg) || !std::isfinite(altitude_m)) return Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
+        const Eigen::Vector3d ecef = GeodeticToEcefRadians(latitude_deg * M_PI / 180.0, longitude_deg * M_PI / 180.0, altitude_m);
+        return ecef_to_enu_ * (ecef - origin_ecef_);
+    }
+
+    static Eigen::Vector3d GeodeticToEcefDegrees(double latitude_deg, double longitude_deg, double altitude_m) {
+        return GeodeticToEcefRadians(latitude_deg * M_PI / 180.0, longitude_deg * M_PI / 180.0, altitude_m);
+    }
+
+    static int UtmZoneFromLongitude(double longitude_deg) {
+        if (!std::isfinite(longitude_deg)) return 0;
+        int zone = static_cast<int>(std::floor((longitude_deg + 180.0) / 6.0)) + 1;
+        if (zone < 1) zone = 1;
+        if (zone > 60) zone = 60;
+        return zone;
+    }
+
+    static bool ForwardUtmDegrees(double latitude_deg, double longitude_deg, double altitude_m,
+                                  int utm_zone, Eigen::Vector3d* enu) {
+        if (!enu || !std::isfinite(latitude_deg) || !std::isfinite(longitude_deg) ||
+            !std::isfinite(altitude_m) || latitude_deg < -90.0 || latitude_deg > 90.0) {
+            return false;
+        }
+        if (utm_zone <= 0) utm_zone = UtmZoneFromLongitude(longitude_deg);
+        if (utm_zone < 1 || utm_zone > 60) return false;
+
+        const double latitude = latitude_deg * M_PI / 180.0;
+        const double longitude = longitude_deg * M_PI / 180.0;
+        const double central_meridian_deg = -183.0 + 6.0 * static_cast<double>(utm_zone);
+        const double central_meridian = central_meridian_deg * M_PI / 180.0;
+
+        const double eccentricity_prime_squared =
+            kEccentricitySquared / (1.0 - kEccentricitySquared);
+        const double sin_lat = std::sin(latitude);
+        const double cos_lat = std::cos(latitude);
+        const double tan_lat = std::tan(latitude);
+        const double n = kSemiMajorAxis /
+            std::sqrt(1.0 - kEccentricitySquared * sin_lat * sin_lat);
+        const double t = tan_lat * tan_lat;
+        const double c = eccentricity_prime_squared * cos_lat * cos_lat;
+        const double a = cos_lat * (longitude - central_meridian);
+
+        const double e2 = kEccentricitySquared;
+        const double e4 = e2 * e2;
+        const double e6 = e4 * e2;
+        const double m = kSemiMajorAxis *
+            ((1.0 - e2 / 4.0 - 3.0 * e4 / 64.0 - 5.0 * e6 / 256.0) * latitude
+             - (3.0 * e2 / 8.0 + 3.0 * e4 / 32.0 + 45.0 * e6 / 1024.0) * std::sin(2.0 * latitude)
+             + (15.0 * e4 / 256.0 + 45.0 * e6 / 1024.0) * std::sin(4.0 * latitude)
+             - (35.0 * e6 / 3072.0) * std::sin(6.0 * latitude));
+
+        const double easting = kUtmScale * n *
+            (a + (1.0 - t + c) * std::pow(a, 3) / 6.0
+             + (5.0 - 18.0 * t + t * t + 72.0 * c - 58.0 * eccentricity_prime_squared) *
+                   std::pow(a, 5) / 120.0) + 500000.0;
+        double northing = kUtmScale *
+            (m + n * tan_lat *
+                 (a * a / 2.0
+                  + (5.0 - t + 9.0 * c + 4.0 * c * c) * std::pow(a, 4) / 24.0
+                  + (61.0 - 58.0 * t + t * t + 600.0 * c - 330.0 * eccentricity_prime_squared) *
+                        std::pow(a, 6) / 720.0));
+        if (latitude_deg < 0.0) northing += 10000000.0;
+
+        *enu = Eigen::Vector3d(easting, northing, altitude_m);
+        return enu->allFinite();
+    }
+
+    static Eigen::Vector3d EcefToGeodeticDegrees(const Eigen::Vector3d& ecef) {
+        if (!ecef.allFinite()) return Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
+        const double x = ecef.x();
+        const double y = ecef.y();
+        const double z = ecef.z();
+        const double horizontal = std::hypot(x, y);
+        const double longitude = std::atan2(y, x);
+        const double second_eccentricity_squared = (kSemiMajorAxis * kSemiMajorAxis - kSemiMinorAxis * kSemiMinorAxis) / (kSemiMinorAxis * kSemiMinorAxis);
+        const double theta = std::atan2(z * kSemiMajorAxis, horizontal * kSemiMinorAxis);
+        const double sin_theta = std::sin(theta);
+        const double cos_theta = std::cos(theta);
+        const double latitude = std::atan2(z + second_eccentricity_squared * kSemiMinorAxis * sin_theta * sin_theta * sin_theta, horizontal - kEccentricitySquared * kSemiMajorAxis * cos_theta * cos_theta * cos_theta);
+        const double sin_latitude = std::sin(latitude);
+        const double radius_prime_vertical = kSemiMajorAxis / std::sqrt(1.0 - kEccentricitySquared * sin_latitude * sin_latitude);
+        const double altitude = std::fabs(std::cos(latitude)) > 1e-12 ? horizontal / std::cos(latitude) - radius_prime_vertical : std::fabs(z) - kSemiMinorAxis;
+        return Eigen::Vector3d(latitude * 180.0 / M_PI, longitude * 180.0 / M_PI, altitude);
+    }
+
+   private:
+    static Eigen::Vector3d GeodeticToEcefRadians(double latitude_rad, double longitude_rad, double altitude_m) {
+        const double sin_lat = std::sin(latitude_rad);
+        const double cos_lat = std::cos(latitude_rad);
+        const double radius_prime_vertical = kSemiMajorAxis / std::sqrt(1.0 - kEccentricitySquared * sin_lat * sin_lat);
+        return Eigen::Vector3d((radius_prime_vertical + altitude_m) * cos_lat * std::cos(longitude_rad), (radius_prime_vertical + altitude_m) * cos_lat * std::sin(longitude_rad), ((1.0 - kEccentricitySquared) * radius_prime_vertical + altitude_m) * sin_lat);
+    }
+
+    bool initialized_ = false;
+    Eigen::Vector3d origin_ecef_ = Eigen::Vector3d::Zero();
+    Eigen::Matrix3d ecef_to_enu_ = Eigen::Matrix3d::Identity();
+};
 
 }  // namespace lightning::math
 

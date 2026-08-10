@@ -12,6 +12,7 @@
 #include <rclcpp/serialization.hpp>
 #include <rclcpp/serialized_message.hpp>
 #include <rosbag2_cpp/reader.hpp>
+#include <geometry_msgs/msg/pose2_d.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -34,7 +35,8 @@ class RosbagIO {
     using LivoxCloud2Handle = std::function<bool(livox_ros_driver2::msg::CustomMsg::SharedPtr)>;
     using ImuHandle = std::function<bool(IMUPtr)>;
     using RawImuHandle = std::function<bool(sensor_msgs::msg::Imu::SharedPtr)>;
-    using NavSatFixHandle = std::function<bool(sensor_msgs::msg::NavSatFix::SharedPtr)>;
+    using NavSatFixHandle = std::function<bool(sensor_msgs::msg::NavSatFix::SharedPtr, double)>;
+    using Pose2DHandle = std::function<bool(geometry_msgs::msg::Pose2D::SharedPtr, double)>;
     using OdometryHandle = std::function<bool(nav_msgs::msg::Odometry::SharedPtr)>;
 
     void Go(int sleep_usec = 0);
@@ -86,10 +88,18 @@ class RosbagIO {
             auto msg = std::make_shared<sensor_msgs::msg::NavSatFix>();
             rclcpp::SerializedMessage data(*m->serialized_data);
             seri_navsat_fix_.deserialize_message(&data, msg.get());
-            return f(msg);
+            return f(msg, static_cast<double>(m->time_stamp) * 1e-9);
         });
     }
 
+    RosbagIO& AddPose2DHandle(const std::string& topic_name, Pose2DHandle f) {
+        return AddHandle(topic_name, [f = std::move(f), this](const MsgType& m) -> bool {
+            auto msg = std::make_shared<geometry_msgs::msg::Pose2D>();
+            rclcpp::SerializedMessage data(*m->serialized_data);
+            seri_pose2d_.deserialize_message(&data, msg.get());
+            return f(msg, static_cast<double>(m->time_stamp) * 1e-9);
+        });
+    }
 
     RosbagIO& AddOdometryHandle(const std::string& topic_name, OdometryHandle f) {
         return AddHandle(topic_name, [f = std::move(f), this](const MsgType& m) -> bool {
@@ -115,6 +125,7 @@ class RosbagIO {
     rclcpp::Serialization<sensor_msgs::msg::Imu> seri_imu_;
     rclcpp::Serialization<sensor_msgs::msg::PointCloud2> seri_cloud2_;
     rclcpp::Serialization<sensor_msgs::msg::NavSatFix> seri_navsat_fix_;
+    rclcpp::Serialization<geometry_msgs::msg::Pose2D> seri_pose2d_;
     rclcpp::Serialization<nav_msgs::msg::Odometry> seri_odometry_;
     rclcpp::Serialization<livox_ros_driver2::msg::CustomMsg> seri_livox_;
 

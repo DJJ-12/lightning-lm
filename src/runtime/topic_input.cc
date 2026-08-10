@@ -3,13 +3,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <exception>
 #include <utility>
+#include <vector>
 
 #include <glog/logging.h>
 #include <yaml-cpp/yaml.h>
 
-#include "common/localization_message_adapter.h"
+#include "common/localization_sensor_measurements.h"
 
 namespace lightning::runtime {
 namespace {
@@ -24,6 +26,8 @@ double TopicSteadySeconds() {
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
+
+constexpr double kPi = 3.14159265358979323846;
 
 }  // namespace
 
@@ -50,7 +54,9 @@ bool TopicInput::Start(const std::string& yaml_path,
     imu_received_ = 0;
     cloud_received_ = 0;
     livox_received_ = 0;
-    rtk_ins_received_ = 0;
+    rtk_fix_received_ = 0;
+    rtk_heading_received_ = 0;
+    rtk_synced_received_ = 0;
     wheel_odometry_received_ = 0;
     lidar_topic_sequence_ = 0;
 
@@ -63,26 +69,27 @@ bool TopicInput::Start(const std::string& yaml_path,
     const std::string imu_topic = yaml["common"]["imu_topic"] ? yaml["common"]["imu_topic"].as<std::string>() : std::string();
     const std::string cloud_topic = yaml["common"]["lidar_topic"] ? yaml["common"]["lidar_topic"].as<std::string>() : std::string();
     const std::string livox_topic = yaml["common"]["livox_lidar_topic"] ? yaml["common"]["livox_lidar_topic"].as<std::string>() : std::string();
-    const YAML::Node mapping_rtk = yaml["mapping_rtk"] ? yaml["mapping_rtk"] : YAML::Node();
-    const bool mapping_rtk_enabled = mapping_rtk && mapping_rtk["enabled"] ? mapping_rtk["enabled"].as<bool>() : false;
     const YAML::Node localization = yaml["localization"];
     const YAML::Node localization_rtk = localization && localization["rtk_ins"] ? localization["rtk_ins"] : YAML::Node();
-    const YAML::Node localization_eskf = localization && localization["eskf"] ? localization["eskf"] : YAML::Node();
+    const YAML::Node eskf = localization && localization["eskf"] ? localization["eskf"] : YAML::Node();
     const std::string localization_mode = NormalizeMode(localization && localization["mode"] ? localization["mode"].as<std::string>() : "ndt_only");
     const bool localization_filter_enabled = localization_mode != "ndt_only";
     const bool localization_rtk_enabled = localization_filter_enabled && localization_rtk && localization_rtk["enabled"] ? localization_rtk["enabled"].as<bool>() : false;
-    const bool rtk_ins_enabled = mapping_rtk_enabled || localization_rtk_enabled;
-    const bool wheel_enabled = localization_filter_enabled && localization_eskf && localization_eskf["use_wheel_odometry"] ? localization_eskf["use_wheel_odometry"].as<bool>() : false;
-    const std::string rtk_ins_topic = yaml["common"]["rtk_local_odometry_topic"] ? yaml["common"]["rtk_local_odometry_topic"].as<std::string>() : (yaml["common"]["localization_rtk_ned_odometry_topic"] ? yaml["common"]["localization_rtk_ned_odometry_topic"].as<std::string>() : std::string());
-    const std::string rtk_frame_name = NormalizeMode(yaml["common"]["rtk_local_odometry_frame"] ? yaml["common"]["rtk_local_odometry_frame"].as<std::string>() : "ned");
-    if (rtk_frame_name != "ned" && rtk_frame_name != "enu") {
-        LOG(ERROR) << "[Topic接收][RTK] rtk_local_odometry_frame must be 'ned' or 'enu'";
+    const bool rtk_enabled = localization_rtk_enabled;
+    const bool wheel_enabled = localization_filter_enabled && eskf && eskf["use_wheel_odometry"] ? eskf["use_wheel_odometry"].as<bool>() : false;
+    const std::string rtk_fix_topic = yaml["common"]["rtk_fix_topic"] ? yaml["common"]["rtk_fix_topic"].as<std::string>() : "/fdilink/gnss_fix";
+    const std::string rtk_heading_topic = yaml["common"]["rtk_heading_topic"] ? yaml["common"]["rtk_heading_topic"].as<std::string>() : "/fdilink/mag_pose_2d";
+    const int rtk_utm_zone = yaml["common"]["rtk_utm_zone"] ? yaml["common"]["rtk_utm_zone"].as<int>() : 0;
+    const double rtk_sync_max_dt_sec = yaml["common"]["rtk_sync_max_dt_sec"] ? yaml["common"]["rtk_sync_max_dt_sec"].as<double>() : 0.20;
+    const double rtk_heading_sigma_rad = localization_rtk && localization_rtk["heading_sigma_deg"] ? localization_rtk["heading_sigma_deg"].as<double>() * kPi / 180.0 : 10.0 * kPi / 180.0;
+    const double rtk_heading_variance = rtk_heading_sigma_rad * rtk_heading_sigma_rad;
+    const std::string wheel_odometry_topic = yaml["common"]["wheel_odometry_topic"] ? yaml["common"]["wheel_odometry_topic"].as<std::string>() : std::string();
+    if (rtk_enabled && rtk_fix_topic.empty()) {
+        LOG(ERROR) << "[Topic接收][RTK] localization RTK is enabled but rtk_fix_topic is empty";
         return false;
     }
-    const auto rtk_input_frame = rtk_frame_name == "enu" ? localization_adapter::LocalNavigationFrame::ENU : localization_adapter::LocalNavigationFrame::NED;
-    const std::string wheel_odometry_topic = yaml["common"]["wheel_odometry_topic"] ? yaml["common"]["wheel_odometry_topic"].as<std::string>() : std::string();
-    if (rtk_ins_enabled && rtk_ins_topic.empty()) {
-        LOG(ERROR) << "[Topic接收][RTK] mapping/localization RTK is enabled but the local odometry topic is empty";
+    if (rtk_enabled && rtk_heading_topic.empty()) {
+        LOG(ERROR) << "[Topic接收][RTK] localization RTK is enabled but rtk_heading_topic is empty";
         return false;
     }
     if (wheel_enabled && wheel_odometry_topic.empty()) {
@@ -95,6 +102,8 @@ bool TopicInput::Start(const std::string& yaml_path,
     livox_cb_ = std::move(livox_cb);
     rtk_ins_cb_ = std::move(rtk_ins_cb);
     wheel_odometry_cb_ = std::move(wheel_odometry_cb);
+    rtk_sync_.SetMaxTimeDifference(rtk_sync_max_dt_sec);
+    rtk_sync_.Clear();
 
     node_ = std::make_shared<rclcpp::Node>("lightning_topic_input");
 
@@ -177,18 +186,51 @@ bool TopicInput::Start(const std::string& yaml_path,
     }
 
 
-    if (rtk_ins_enabled && rtk_ins_cb_ && !rtk_ins_topic.empty()) {
-        rtk_ins_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(rtk_ins_topic, auxiliary_qos, [this, rtk_input_frame](nav_msgs::msg::Odometry::SharedPtr msg) {
+    if (rtk_enabled && rtk_ins_cb_ && !rtk_fix_topic.empty()) {
+        rtk_fix_sub_ = node_->create_subscription<sensor_msgs::msg::NavSatFix>(rtk_fix_topic, auxiliary_qos, [this, rtk_utm_zone](sensor_msgs::msg::NavSatFix::SharedPtr msg) {
             std::lock_guard<std::mutex> callback_gate(callback_gate_mutex_);
             if (!input_enabled_.load(std::memory_order_acquire)) return;
-            ++rtk_ins_received_;
+            ++rtk_fix_received_;
             try {
-                RtkInsMeasurement measurement;
-                if (localization_adapter::LocalOdometryToRtkInsMeasurement(*msg, rtk_input_frame, &measurement)) rtk_ins_cb_(measurement);
+                const double receive_stamp = node_->now().seconds();
+                RtkPositionMeasurement position;
+                std::vector<RtkInsMeasurement> synced_measurements;
+                if (localization_adapter::NavSatFixToRtkPositionMeasurement(*msg, rtk_utm_zone, &position)) {
+                    position.sync_stamp = receive_stamp;
+                    rtk_sync_.AddPosition(position, &synced_measurements);
+                }
+                for (const RtkInsMeasurement& measurement : synced_measurements) {
+                    ++rtk_synced_received_;
+                    rtk_ins_cb_(measurement);
+                }
             } catch (const std::exception& e) {
-                LOG(ERROR) << "[Topic input][RTK/INS] callback exception: " << e.what();
+                LOG(ERROR) << "[Topic input][RTK fix] callback exception: " << e.what();
             } catch (...) {
-                LOG(ERROR) << "[Topic input][RTK/INS] unknown callback exception";
+                LOG(ERROR) << "[Topic input][RTK fix] unknown callback exception";
+            }
+        });
+    }
+
+    if (rtk_enabled && rtk_ins_cb_ && !rtk_heading_topic.empty()) {
+        rtk_heading_sub_ = node_->create_subscription<geometry_msgs::msg::Pose2D>(rtk_heading_topic, auxiliary_qos, [this, rtk_heading_variance](geometry_msgs::msg::Pose2D::SharedPtr msg) {
+            std::lock_guard<std::mutex> callback_gate(callback_gate_mutex_);
+            if (!input_enabled_.load(std::memory_order_acquire)) return;
+            ++rtk_heading_received_;
+            try {
+                const double receive_stamp = node_->now().seconds();
+                RtkHeadingMeasurement heading;
+                std::vector<RtkInsMeasurement> synced_measurements;
+                if (localization_adapter::Pose2DToRtkHeadingMeasurement(*msg, receive_stamp, rtk_heading_variance, &heading)) {
+                    rtk_sync_.AddHeading(heading, &synced_measurements);
+                }
+                for (const RtkInsMeasurement& measurement : synced_measurements) {
+                    ++rtk_synced_received_;
+                    rtk_ins_cb_(measurement);
+                }
+            } catch (const std::exception& e) {
+                LOG(ERROR) << "[Topic input][RTK heading] callback exception: " << e.what();
+            } catch (...) {
+                LOG(ERROR) << "[Topic input][RTK heading] unknown callback exception";
             }
         });
     }
@@ -217,8 +259,10 @@ bool TopicInput::Start(const std::string& yaml_path,
               << ", cloud=" << cloud_topic
               << ", livox=" << livox_topic
               << ", imu=" << imu_topic
-              << ", rtk_local_odometry=" << (rtk_ins_enabled ? rtk_ins_topic : "disabled")
-              << ", rtk_local_frame=" << (rtk_ins_enabled ? rtk_frame_name : "disabled")
+              << ", rtk_fix=" << (rtk_enabled ? rtk_fix_topic : "disabled")
+              << ", rtk_heading=" << (rtk_enabled ? rtk_heading_topic : "disabled")
+              << ", rtk_utm_zone=" << (rtk_enabled ? rtk_utm_zone : 0)
+              << ", rtk_sync_max_dt_sec=" << (rtk_enabled ? rtk_sync_max_dt_sec : 0.0)
               << ", wheel_odometry=" << (wheel_enabled ? wheel_odometry_topic : "disabled")
               << ", cloud_qos=KEEP_LAST(1)+BEST_EFFORT+VOLATILE"
               << ", imu_rtk_qos=KEEP_ALL+BEST_EFFORT+VOLATILE"
@@ -229,6 +273,7 @@ bool TopicInput::Start(const std::string& yaml_path,
 
 void TopicInput::SetEnabled(bool enabled) {
     std::lock_guard<std::mutex> callback_gate(callback_gate_mutex_);
+    if (!enabled) rtk_sync_.Clear();
     input_enabled_.store(enabled, std::memory_order_release);
 }
 
@@ -268,7 +313,8 @@ void TopicInput::Shutdown() {
     imu_sub_.reset();
     cloud_sub_.reset();
     livox_sub_.reset();
-    rtk_ins_sub_.reset();
+    rtk_fix_sub_.reset();
+    rtk_heading_sub_.reset();
     wheel_odometry_sub_.reset();
     LOG(INFO) << "[Topic接收析构] [05] 销毁输入节点和executor";
     node_.reset();
@@ -283,7 +329,9 @@ void TopicInput::Shutdown() {
               << ", imu_received=" << imu_received_
               << ", cloud_received=" << cloud_received_
               << ", livox_received=" << livox_received_
-              << ", rtk_ins_received=" << rtk_ins_received_
+              << ", rtk_fix_received=" << rtk_fix_received_
+              << ", rtk_heading_received=" << rtk_heading_received_
+              << ", rtk_synced_received=" << rtk_synced_received_
               << ", wheel_odometry_received=" << wheel_odometry_received_
               << ", lidar_topic_sequence=" << lidar_topic_sequence_;
 }
