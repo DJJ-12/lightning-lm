@@ -1,99 +1,78 @@
-﻿# Leishen CX16 mapping/localization config.
-# Expected PointCloud2 fields: x y z intensity ring time.
-# The point time field is per-frame relative time in seconds.
+# Leishen CX16 + RTK config for Lightning 1.2.
+# PointCloud2 fields expected by the current adapter: x y z intensity ring time.
 
 common:
   lidar_topic: "/cx/cloud"
-  livox_lidar_topic: "/livox/lidar_192_168_1_3"
+  livox_lidar_topic: ""
   imu_topic: "/imu_data"
+
+  # RTK position: sensor_msgs/msg/NavSatFix, fields latitude/longitude/altitude.
+  # RTK heading: geometry_msgs/msg/Pose2D, only theta is used.
+  rtk_fix_topic: "/fdilink/gnss_fix"
+  rtk_heading_topic: "/fdilink/mag_pose_2d"
+  rtk_utm_zone: 0
+  rtk_sync_max_dt_sec: 0.20
+
+  wheel_odometry_topic: ""
   base_link_frame: "laser_link"
 
-  # Shared lidar adapter / range-image geometry.
   sensor: "velodyne"
   N_SCAN: 16
   Horizon_SCAN: 512
   lidarMinRange: 1.0
   lidarMaxRange: 1000.0
   point_filter_num: 1
-  time_scale: 1
+  time_scale: 1.0
 
-  # Shared IMU prediction noise, using LIO-SAM names.
   imuAccNoise: 0.1
   imuGyrNoise: 0.1
   imuAccBiasN: 0.0001
   imuGyrBiasN: 0.0001
 
-  # Shared keyframe insertion thresholds. Angle unit: rad.
   surroundingkeyframeAddingDistThreshold: 1.0
   surroundingkeyframeAddingAngleThreshold: 0.2
   surroundingKeyframeDensity: 2.0
   surroundingKeyframeSearchRadius: 50.0
 
-  # Keep the CX16 diagnostic config aligned with the native LIO-SAM input frame.
+  # T_base_lidar: p_base = R_base_lidar * p_lidar + t_base_lidar.
+  # Recalibrate these two values when the CX16 is not coincident with tracking frame.
   extrinsicBaseLidarTrans: [0.0, 0.0, 0.2]
   extrinsicBaseLidarRot: [1.0, 0.0, 0.0,
                           0.0, 1.0, 0.0,
                           0.0, 0.0, 1.0]
 
-fasterlio:
-  skip_lidar_num: 0
-  max_iteration: 6
-  filter_size_scan: 0.8
-  filter_size_map: 0.8
-  ivox_grid_resolution: 0.1
-  ivox_nearby_type: 18
-  esti_plane_threshold: 0.15
-  use_aa: false
-
-  keep_first_imu_estimation: false
-
-  enable_icp_part: false
-  plane_icp_weight: 500.0
-  min_pts: 300
-  imu_filter: true
-  proj_kfs: false
-
 system:
-  frontend: "lio_sam"
   with_ui: true
   pub_tf: false
-
-roi:
-  height_max: 100.0
-  height_min: -100.0
 
 lio_sam:
   debugTiming: false
 
-  # GPS / IMU initialization
   useImuHeadingInitialization: false
   useImuAccelRollPitchInitialization: true
-
-  # Sensor settings
   downsampleRate: 1
 
-  # IMU settings
   imuGravity: 9.80511
   imuRPYWeight: 0.0
-  extrinsicRot: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-  extrinsicRPY: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+  extrinsicRot: [1.0, 0.0, 0.0,
+                 0.0, 1.0, 0.0,
+                 0.0, 0.0, 1.0]
+  extrinsicRPY: [1.0, 0.0, 0.0,
+                 0.0, 1.0, 0.0,
+                 0.0, 0.0, 1.0]
 
-  # LOAM feature threshold
   edgeThreshold: 1.0
   surfThreshold: 0.1
   edgeFeatureMinValidNum: 10
   surfFeatureMinValidNum: 100
 
-  # Voxel filters
   odometrySurfLeafSize: 0.4
   mappingCornerLeafSize: 0.2
   mappingSurfLeafSize: 0.4
 
-  # Robot motion constraint
   z_tollerance: 1000.0
   rotation_tollerance: 1000.0
 
-  # CPU params
   numberOfCores: 4
   mappingProcessInterval: 0.15
   maxOptimizationIterations: 30
@@ -102,7 +81,6 @@ lio_sam:
   onlineMaxSurfOptimizationPoints: 4000
   onlineMaxCornerOptimizationPoints: 900
 
-  # Loop closure
   loopClosureEnableFlag: true
   surroundingKeyframeSize: 50
   historyKeyframeSearchRadius: 15.0
@@ -111,12 +89,80 @@ lio_sam:
   historyKeyframeFitnessScore: 0.3
 
 localization:
-  cloud_timeout_sec: 5.0
+  mode: "ndt_rtk_ins_eskf"
+  output_frame: "map"
+
   quality:
     excellent_threshold: 4.0
     good_threshold: 2.5
     fair_threshold: 1.5
     excellent_iteration_threshold: 20
+
+  ndt_covariance:
+    information_scale: 1.0
+    min_information_eigenvalue: 1.0e-6
+    max_information_eigenvalue: 1.0e8
+    min_translation_std: 0.05
+    max_translation_std: 10.0
+    min_rotation_std_deg: 0.5
+    max_rotation_std_deg: 30.0
+
+  rtk_ins:
+    enabled: true
+    lever_arm_tracking: [0.0, 0.0, 0.0]
+    fallback_position_sigma_xy: 0.30
+    fallback_position_sigma_z: 1.00
+    fallback_velocity_sigma_xy: 0.20
+    fallback_velocity_sigma_z: 0.50
+    heading_sigma_deg: 10.0
+    velocity_covariance_scale: 2.0
+    history_limit: 300
+
+  eskf:
+    use_rtk_velocity: false
+    use_rtk_elevation: false
+    rtk_position_axes: [1, 1, 0]
+    rtk_velocity_axes: [1, 1, 1]
+
+    use_course_yaw: false
+    course_yaw_min_speed: 2.0
+    course_yaw_sigma_deg: 10.0
+
+    use_wheel_odometry: false
+    wheel_linear_axes: [1, 0, 0]
+    wheel_angular_axes: [0, 0, 1]
+    wheel_linear_sigma: 0.20
+    wheel_angular_sigma: 0.10
+
+    use_imu_angular_velocity: false
+    imu_angular_axes: [1, 1, 1]
+    imu_angular_sigma: 0.10
+
+    use_ndt_derived_twist: true
+    ndt_twist_covariance_scale: 10.0
+
+    body_acceleration_noise_std: 1.5
+    angular_acceleration_noise_std: 0.8
+    max_prediction_step: 0.05
+    initial_velocity_sigma: 3.0
+    initial_angular_velocity_sigma: 1.0
+
+    ndt_pose_gate_chi2: 20.0
+    rtk_position_gate_chi2: 16.0
+    rtk_velocity_gate_chi2: 16.0
+    course_yaw_gate_chi2: 9.0
+    wheel_gate_chi2: 20.0
+    imu_angular_gate_chi2: 16.0
+    ndt_twist_gate_chi2: 20.0
+
+  map_from_enu:
+    mode: "trajectory_alignment"
+    alignment_max_age: 0.30
+    alignment_min_pairs: 8
+    alignment_min_baseline: 5.0
+    alignment_max_rmse: 1.5
+    translation: [0.0, 0.0, 0.0]
+    yaw_deg: 0.0
 
 mapping:
   block_map_resolution: 20

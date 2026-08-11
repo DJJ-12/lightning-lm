@@ -1,0 +1,22 @@
+# QoS override for replaying CX16 + RTK bags.
+# Usage example:
+# ros2 bag play <bag> --qos-profile-overrides-path config/rosbag_play_cx16_reliable_qos.yaml
+/cx/cloud:
+  history: keep_all
+  reliability: reliable
+  durability: volatile
+
+/imu_data:
+  history: keep_all
+  reliability: reliable
+  durability: volatile
+
+/fdilink/gnss_fix:
+  history: keep_all
+  reliability: reliable
+  durability: volatile
+
+/fdilink/mag_pose_2d:
+  history: keep_all
+  reliability: reliable
+  durability: volatile
