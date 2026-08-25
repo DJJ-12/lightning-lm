@@ -24,7 +24,7 @@ struct TaskSnapshot {
     TaskState state = TaskState::IDLE;
     bool running = false;
     bool finished = false;
-    bool success = false;
+    bool task_success = false;
     std::uint64_t keyframe_count = 0;
     double keyframe_memory_mb = 0.0;
     std::uint64_t total_frames = 0;
@@ -38,7 +38,7 @@ class Task {
     void Reset(TaskState state = TaskState::IDLE, const std::string& message = "");
     void SetState(TaskState state, const std::string& message = "");
     void SetProgress(std::uint64_t processed, std::uint64_t total, const std::string& message = "");
-    void SetFinished(bool success, const std::string& message);
+    void SetFinished(bool task_success, const std::string& message);
     void RequestCancel();
     bool CancelRequested() const;
     TaskSnapshot Snapshot() const;

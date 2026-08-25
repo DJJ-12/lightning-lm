@@ -42,6 +42,9 @@ void Task::SetState(TaskState state, const std::string& message) {
     snapshot_.state = state;
     snapshot_.running = state == TaskState::RUNNING || state == TaskState::SAVING;
     snapshot_.finished = state == TaskState::FINISHED || state == TaskState::FAILED || state == TaskState::CANCELLED;
+    if (state == TaskState::FAILED || state == TaskState::CANCELLED) {
+        snapshot_.task_success = false;
+    }
     if (!message.empty()) {
         snapshot_.message = message;
     }
@@ -61,13 +64,13 @@ void Task::SetProgress(std::uint64_t processed, std::uint64_t total, const std::
     }
 }
 
-void Task::SetFinished(bool success, const std::string& message) {
+void Task::SetFinished(bool task_success, const std::string& message) {
     std::lock_guard<std::mutex> lock(mutex_);
-    snapshot_.success = success;
+    snapshot_.task_success = task_success;
     snapshot_.running = false;
     snapshot_.finished = true;
-    snapshot_.state = success ? TaskState::FINISHED : TaskState::FAILED;
-    snapshot_.progress = success ? 100.0f : snapshot_.progress;
+    snapshot_.state = task_success ? TaskState::FINISHED : TaskState::FAILED;
+    snapshot_.progress = task_success ? 100.0f : snapshot_.progress;
     snapshot_.message = message;
 }
 

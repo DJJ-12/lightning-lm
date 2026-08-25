@@ -47,7 +47,7 @@ bool Service::Init(rclcpp::Node::SharedPtr node, std::shared_ptr<Lightning> ligh
             response->task_state = TaskStateToString(status.state);
             response->running = status.running;
             response->finished = status.finished;
-            response->task_success = status.success;
+            response->task_success = status.task_success;
             response->keyframe_count = status.keyframe_count;
             response->keyframe_memory_mb = status.keyframe_memory_mb;
             response->total_frames = status.total_frames;
@@ -73,9 +73,10 @@ bool Service::Init(rclcpp::Node::SharedPtr node, std::shared_ptr<Lightning> ligh
         [this](const lightning_interfaces::srv::GetOfflineMappingProgress::Request::SharedPtr,
                lightning_interfaces::srv::GetOfflineMappingProgress::Response::SharedPtr response) {
             const auto progress = lightning_->GetOfflineMappingProgress();
+            response->success = true;
             response->running = progress.running;
             response->finished = progress.finished;
-            response->success = progress.success;
+            response->task_success = progress.task_success;
             response->total_frames = progress.total_frames;
             response->processed_frames = progress.processed_frames;
             response->progress = progress.progress;
