@@ -157,7 +157,7 @@ void PangolinWindow::UpdateNavState(const NavState& state) {
     std::unique_lock<std::mutex> lock_lio_res(impl->mtx_nav_state_);
     // Do not overwrite an unrendered estimator state. Offline bags can feed
     // observations much faster than the screen refresh rate, so retain every
-    // final ESKF state until the render thread appends it to the trajectory.
+    // final EKF state until the render thread appends it to the trajectory.
     impl->pending_nav_states_.push_back(state);
     impl->kf_result_need_update_.store(true);
 }

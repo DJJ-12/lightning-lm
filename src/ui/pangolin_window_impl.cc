@@ -34,7 +34,7 @@ bool PangolinWindowImpl::Init() {
     pangolin::GetBoundWindow()->RemoveCurrent();
 
     // 定位轨迹 OpenGL 设置。红色轨迹显示最终定位状态；在融合模式下
-    // 该状态来自 ESKF，而不是未经融合的 NDT 位姿。
+    // 该状态来自 EKF，而不是未经融合的 NDT 位姿。
     traj_newest_state_.reset(new ui::UiTrajectory(Vec3f(1.0, 0.0, 0.0)));  // 红色
     traj_scans_.reset(new ui::UiTrajectory(Vec3f(0.0, 1.0, 0.0)));         // 绿色
 

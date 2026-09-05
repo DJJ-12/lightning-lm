@@ -107,6 +107,19 @@ localization:
     min_rotation_std_deg: 0.5
     max_rotation_std_deg: 30.0
 
+  ekf:
+    process_acceleration_std: 1.0
+    process_yaw_acceleration_std: 0.5
+    max_prediction_step: 0.05
+    initial_position_std: 0.5
+    initial_yaw_std_deg: 3.0
+    initial_velocity_std: 2.0
+    initial_yaw_rate_std: 0.5
+    ndt_position_std_x: 0.10
+    ndt_position_std_y: 0.10
+    ndt_yaw_std_deg: 1.0
+    ndt_pose_gate_chi2: 16.0
+
 mapping:
   block_map_resolution: 20
   block_map_voxel_size: 0.1

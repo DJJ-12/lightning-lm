@@ -6,6 +6,7 @@
 #include <cmath>
 #include <vector>
 
+#include <Eigen/Cholesky>
 #include <glog/logging.h>
 #include <rclcpp/node.hpp>
 #include <sensor_msgs/msg/nav_sat_status.hpp>
@@ -42,14 +43,6 @@ Eigen::Matrix3d RotationFromRollPitchYaw(
         .toRotationMatrix();
 }
 
-bool Covariance3Valid(const Eigen::Matrix3d& covariance) {
-    if (!covariance.allFinite()) return false;
-    const Eigen::Matrix3d symmetric =
-        0.5 * (covariance + covariance.transpose());
-    return symmetric.diagonal().minCoeff() >= 0.0 &&
-           symmetric.diagonal().maxCoeff() > 0.0;
-}
-
 // UTM uses grid east/north while the INS reports true local ENU. Determine the
 // fixed grid convergence at the map reference by projecting a small true-north
 // displacement. The returned matrix only rotates axes; UTM scale distortion is
@@ -81,47 +74,50 @@ bool ComputeUtmFromTrueEnuRotation(
     return rotation->allFinite();
 }
 
-Eigen::Matrix<double, 6, 6> NdtCovarianceToRightError(const SE3& pose, const Eigen::Matrix<double, 6, 6>& ndt_covariance) {
-    const Eigen::Vector3d rpy = math::RotMtoEuler(pose.so3().matrix());
-    const double roll = rpy.x();
-    const double pitch = rpy.y();
-    Eigen::Matrix3d euler_to_right_error;
-    euler_to_right_error << 1.0, 0.0, -std::sin(pitch),
-                            0.0, std::cos(roll), std::sin(roll) * std::cos(pitch),
-                            0.0, -std::sin(roll), std::cos(roll) * std::cos(pitch);
-    Eigen::Matrix<double, 6, 6> transform = Eigen::Matrix<double, 6, 6>::Identity();
-    transform.block<3, 3>(3, 3) = euler_to_right_error;
-    const Eigen::Matrix<double, 6, 6> covariance = transform * ndt_covariance * transform.transpose();
-    return 0.5 * (covariance + covariance.transpose());
-}
-
-loc::ESKF::Covariance InitialEskfCovariance(const loc::LocalizationResult* pose_result, double velocity_sigma, double angular_velocity_sigma) {
-    loc::ESKF::Covariance covariance = loc::ESKF::Covariance::Zero();
-    if (pose_result && pose_result->covariance_valid_) covariance.block<6, 6>(0, 0) = NdtCovarianceToRightError(pose_result->pose_, pose_result->pose_covariance_);
-    else {
-        covariance.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity();
-        covariance.block<3, 3>(3, 3) = std::pow(20.0 * kDegToRad, 2) * Eigen::Matrix3d::Identity();
-    }
-    covariance.block<3, 3>(6, 6) = std::pow(velocity_sigma, 2) * Eigen::Matrix3d::Identity();
-    covariance.block<3, 3>(9, 9) = std::pow(angular_velocity_sigma, 2) * Eigen::Matrix3d::Identity();
+loc::EKF::Covariance InitialEkfCovariance(
+    double position_std, double yaw_std, double velocity_std,
+    double yaw_rate_std) {
+    loc::EKF::Covariance covariance = loc::EKF::Covariance::Zero();
+    covariance(loc::EKF::kX, loc::EKF::kX) =
+        position_std * position_std;
+    covariance(loc::EKF::kY, loc::EKF::kY) =
+        position_std * position_std;
+    covariance(loc::EKF::kYaw, loc::EKF::kYaw) = yaw_std * yaw_std;
+    covariance(loc::EKF::kVelocity, loc::EKF::kVelocity) =
+        velocity_std * velocity_std;
+    covariance(loc::EKF::kYawRate, loc::EKF::kYawRate) =
+        yaw_rate_std * yaw_rate_std;
     return covariance;
 }
 
-Eigen::Matrix3d DiagonalCovariance(double sigma_xy, double sigma_z) {
+Eigen::Matrix3d FixedPoseNoise(double position_std_x,
+                               double position_std_y,
+                               double yaw_std) {
     Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
-    covariance(0, 0) = sigma_xy * sigma_xy;
-    covariance(1, 1) = sigma_xy * sigma_xy;
-    covariance(2, 2) = sigma_z * sigma_z;
+    covariance(0, 0) = position_std_x * position_std_x;
+    covariance(1, 1) = position_std_y * position_std_y;
+    covariance(2, 2) = yaw_std * yaw_std;
     return covariance;
 }
 
-bool ImuCovarianceValid(const std::array<double, 9>& values) {
-    bool nonzero = false;
-    for (double value : values) {
-        if (!std::isfinite(value)) return false;
-        nonzero = nonzero || std::fabs(value) > 0.0;
+bool IsUsableCovariance(const Eigen::Matrix2d& covariance) {
+    if (!covariance.allFinite() || covariance(0, 0) <= 0.0 ||
+        covariance(1, 1) <= 0.0) {
+        return false;
     }
-    return nonzero && values[0] >= 0.0 && values[4] >= 0.0 && values[8] >= 0.0;
+    const Eigen::Matrix2d symmetric =
+        0.5 * (covariance + covariance.transpose());
+    Eigen::LDLT<Eigen::Matrix2d> decomposition(symmetric);
+    return decomposition.info() == Eigen::Success &&
+           decomposition.isPositive();
+}
+
+Eigen::Vector2d Rotate2D(double yaw, const Eigen::Vector2d& vector) {
+    const double cosine = std::cos(yaw);
+    const double sine = std::sin(yaw);
+    return Eigen::Vector2d(
+        cosine * vector.x() - sine * vector.y(),
+        sine * vector.x() + cosine * vector.y());
 }
 
 }  // namespace
@@ -136,14 +132,17 @@ std::string LocalizationSystem::Normalize(std::string value) {
 
 LocalizationSystem::Mode LocalizationSystem::ModeFromString(const std::string& value) {
     const std::string mode = Normalize(value);
-    if (mode == "eskf" || mode == "ndt_rtk_eskf" || mode == "ndt_rtk_ins_eskf" || mode == "ndt_rtk") return Mode::ESKF_FUSION;
+    if (mode == "ekf" || mode == "ndt_rtk_ekf" ||
+        mode == "ndt_rtk_ins_ekf" || mode == "ndt_rtk") {
+        return Mode::EKF_FUSION;
+    }
     if (mode == "rtk_only" || mode == "rtk_ins_only") return Mode::RTK_ONLY;
     if (mode == "auto") return Mode::AUTO;
     return Mode::NDT_ONLY;
 }
 
 std::string LocalizationSystem::ModeToString(Mode mode) {
-    if (mode == Mode::ESKF_FUSION) return "ndt_rtk_ins_eskf";
+    if (mode == Mode::EKF_FUSION) return "ndt_rtk_ins_ekf";
     if (mode == Mode::RTK_ONLY) return "rtk_ins_only";
     if (mode == Mode::AUTO) return "auto";
     return "ndt_only";
@@ -156,19 +155,14 @@ Eigen::Vector3d LocalizationSystem::ReadVector3(const YAML::Node& node, const Ei
     return Eigen::Vector3d(values[0], values[1], values[2]);
 }
 
-Eigen::Array3i LocalizationSystem::ReadAxisMask(const YAML::Node& node, const Eigen::Array3i& fallback) {
-    if (!node) return fallback;
-    const std::vector<int> values = node.as<std::vector<int>>();
-    if (values.size() != 3) return fallback;
-    return Eigen::Array3i(values[0] != 0, values[1] != 0, values[2] != 0);
-}
-
 bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::SharedPtr node) {
     Reset();
     yaml_path_ = yaml_path;
     const YAML::Node yaml = YAML::LoadFile(yaml_path);
     const YAML::Node localization = yaml["localization"];
-    const YAML::Node eskf = localization && localization["eskf"] ? localization["eskf"] : YAML::Node();
+    const YAML::Node ekf = localization && localization["ekf"]
+        ? localization["ekf"]
+        : YAML::Node();
     const YAML::Node rtk_ins = localization && localization["rtk_ins"] ? localization["rtk_ins"] : YAML::Node();
     const YAML::Node common = yaml["common"];
     mode_ = ModeFromString(localization && localization["mode"] ? localization["mode"].as<std::string>() : "ndt_only");
@@ -190,56 +184,98 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
     rtk_orientation_topic_ = ReadTopic(common, "rtk_orientation_topic");
     rtk_velocity_topic_ = ReadTopic(common, "rtk_velocity_topic");
     wheel_odometry_topic_ = ReadTopic(common, "wheel_odometry_topic");
-    rtk_position_axes_ = ReadAxisMask(
-        eskf["rtk_position_axes"], Eigen::Array3i(1, 1, 0));
-    rtk_velocity_axes_ = ReadAxisMask(eskf["rtk_velocity_axes"], Eigen::Array3i(1, 1, 1));
-    wheel_linear_axes_ = ReadAxisMask(eskf["wheel_linear_axes"], Eigen::Array3i(1, 0, 0));
-    wheel_angular_axes_ = ReadAxisMask(eskf["wheel_angular_axes"], Eigen::Array3i(0, 0, 1));
-    imu_angular_axes_ = ReadAxisMask(eskf["imu_angular_axes"], Eigen::Array3i(1, 1, 1));
-
     rtk_ins_lever_arm_tracking_ = ReadVector3(rtk_ins && rtk_ins["lever_arm_tracking"] ? rtk_ins["lever_arm_tracking"] : YAML::Node(), Eigen::Vector3d::Zero());
-    if (rtk_ins && rtk_ins["fallback_position_sigma_xy"]) rtk_position_sigma_xy_ = rtk_ins["fallback_position_sigma_xy"].as<double>();
-    if (rtk_ins && rtk_ins["fallback_position_sigma_z"]) rtk_position_sigma_z_ = rtk_ins["fallback_position_sigma_z"].as<double>();
-    if (rtk_ins && rtk_ins["fallback_velocity_sigma_xy"]) rtk_velocity_sigma_xy_ = rtk_ins["fallback_velocity_sigma_xy"].as<double>();
-    if (rtk_ins && rtk_ins["fallback_velocity_sigma_z"]) rtk_velocity_sigma_z_ = rtk_ins["fallback_velocity_sigma_z"].as<double>();
-    if (rtk_ins && rtk_ins["velocity_covariance_scale"]) rtk_velocity_covariance_scale_ = rtk_ins["velocity_covariance_scale"].as<double>();
-    if (rtk_ins && rtk_ins["fallback_orientation_sigma_deg"])
-        fallback_ins_yaw_sigma_rad_ =
-            rtk_ins["fallback_orientation_sigma_deg"].as<double>() *
-            kDegToRad;
     if (rtk_ins && rtk_ins["initial_observation_max_dt"])
         initial_observation_max_dt_ =
             std::max(0.0, rtk_ins["initial_observation_max_dt"].as<double>());
 
-    if (eskf && eskf["wheel_linear_sigma"]) wheel_linear_sigma_ = eskf["wheel_linear_sigma"].as<double>();
-    if (eskf && eskf["wheel_angular_sigma"]) wheel_angular_sigma_ = eskf["wheel_angular_sigma"].as<double>();
-    if (eskf && eskf["imu_angular_sigma"]) imu_angular_sigma_ = eskf["imu_angular_sigma"].as<double>();
-    if (eskf && eskf["initial_velocity_sigma"]) initial_velocity_sigma_ = eskf["initial_velocity_sigma"].as<double>();
-    if (eskf && eskf["initial_angular_velocity_sigma"]) initial_angular_velocity_sigma_ = eskf["initial_angular_velocity_sigma"].as<double>();
-    if (eskf && eskf["ndt_pose_gate_chi2"]) ndt_pose_gate_chi2_ = eskf["ndt_pose_gate_chi2"].as<double>();
-    if (eskf && eskf["rtk_position_gate_chi2"]) rtk_position_gate_chi2_ = eskf["rtk_position_gate_chi2"].as<double>();
-    if (eskf && eskf["rtk_velocity_gate_chi2"]) rtk_velocity_gate_chi2_ = eskf["rtk_velocity_gate_chi2"].as<double>();
-    if (eskf && eskf["ins_yaw_gate_chi2"]) ins_yaw_gate_chi2_ = eskf["ins_yaw_gate_chi2"].as<double>();
-    if (eskf && eskf["wheel_gate_chi2"]) wheel_gate_chi2_ = eskf["wheel_gate_chi2"].as<double>();
-    if (eskf && eskf["imu_angular_gate_chi2"]) imu_angular_gate_chi2_ = eskf["imu_angular_gate_chi2"].as<double>();
+    // The EKF section is intentionally flat: every number has one physical
+    // meaning and is consumed in exactly one place.
+    const auto read_ekf = [&ekf](const char* key, double fallback) {
+        return ekf && ekf[key] ? ekf[key].as<double>() : fallback;
+    };
+    loc::EKF::Options filter_options;
+    filter_options.process_acceleration_std = read_ekf(
+        "process_acceleration_std", filter_options.process_acceleration_std);
+    filter_options.process_yaw_acceleration_std = read_ekf(
+        "process_yaw_acceleration_std",
+        filter_options.process_yaw_acceleration_std);
+    filter_options.max_prediction_step = read_ekf(
+        "max_prediction_step", filter_options.max_prediction_step);
+    filter_options.rtk_position_gate_chi2 = read_ekf(
+        "rtk_position_gate_chi2", filter_options.rtk_position_gate_chi2);
+    filter_options.ins_yaw_gate_chi2 = read_ekf(
+        "ins_yaw_gate_chi2", filter_options.ins_yaw_gate_chi2);
+    filter_options.rtk_velocity_gate_chi2 = read_ekf(
+        "rtk_velocity_gate_chi2", filter_options.rtk_velocity_gate_chi2);
+    filter_options.ndt_pose_gate_chi2 = read_ekf(
+        "ndt_pose_gate_chi2", filter_options.ndt_pose_gate_chi2);
+    filter_options.wheel_gate_chi2 = read_ekf(
+        "wheel_gate_chi2", filter_options.wheel_gate_chi2);
 
-    if (yaml["lio_sam"] && yaml["lio_sam"]["extrinsicRot"]) {
-        const std::vector<double> values =
-            yaml["lio_sam"]["extrinsicRot"].as<std::vector<double>>();
-        if (values.size() != 9) {
-            LOG(ERROR) << "[LOCALIZATION_ESKF] lio_sam.extrinsicRot must contain 9 values";
-            return false;
-        }
-        tracking_from_imu_rotation_ <<
-            values[0], values[1], values[2],
-            values[3], values[4], values[5],
-            values[6], values[7], values[8];
+    initial_position_std_ = read_ekf(
+        "initial_position_std", initial_position_std_);
+    initial_yaw_std_ = read_ekf(
+        "initial_yaw_std_deg", initial_yaw_std_ / kDegToRad) * kDegToRad;
+    initial_velocity_std_ = read_ekf(
+        "initial_velocity_std", initial_velocity_std_);
+    initial_yaw_rate_std_ = read_ekf(
+        "initial_yaw_rate_std", initial_yaw_rate_std_);
+    rtk_position_std_x_ = read_ekf(
+        "rtk_position_std_x", rtk_position_std_x_);
+    rtk_position_std_y_ = read_ekf(
+        "rtk_position_std_y", rtk_position_std_y_);
+    ins_yaw_std_ = read_ekf(
+        "ins_yaw_std_deg", ins_yaw_std_ / kDegToRad) * kDegToRad;
+    rtk_velocity_std_x_ = read_ekf(
+        "rtk_velocity_std_x", rtk_velocity_std_x_);
+    rtk_velocity_std_y_ = read_ekf(
+        "rtk_velocity_std_y", rtk_velocity_std_y_);
+    ndt_position_std_x_ = read_ekf(
+        "ndt_position_std_x", ndt_position_std_x_);
+    ndt_position_std_y_ = read_ekf(
+        "ndt_position_std_y", ndt_position_std_y_);
+    ndt_yaw_std_ = read_ekf(
+        "ndt_yaw_std_deg", ndt_yaw_std_ / kDegToRad) * kDegToRad;
+    wheel_velocity_std_ = read_ekf(
+        "wheel_velocity_std", wheel_velocity_std_);
+    wheel_yaw_rate_std_ = read_ekf(
+        "wheel_yaw_rate_std", wheel_yaw_rate_std_);
+
+    const std::array<double, 13> standard_deviations = {
+        filter_options.process_acceleration_std,
+        filter_options.process_yaw_acceleration_std,
+        initial_position_std_, initial_yaw_std_, initial_velocity_std_,
+        initial_yaw_rate_std_, rtk_position_std_x_, rtk_position_std_y_,
+        ins_yaw_std_, rtk_velocity_std_x_, rtk_velocity_std_y_,
+        ndt_position_std_x_, ndt_position_std_y_};
+    const std::array<double, 5> gates = {
+        filter_options.rtk_position_gate_chi2,
+        filter_options.ins_yaw_gate_chi2,
+        filter_options.rtk_velocity_gate_chi2,
+        filter_options.ndt_pose_gate_chi2,
+        filter_options.wheel_gate_chi2};
+    if (!std::isfinite(filter_options.max_prediction_step) ||
+        filter_options.max_prediction_step <= 0.0 ||
+        ndt_yaw_std_ <= 0.0 || wheel_velocity_std_ <= 0.0 ||
+        wheel_yaw_rate_std_ <= 0.0 ||
+        std::any_of(standard_deviations.begin(), standard_deviations.end(),
+                    [](double value) {
+                        return !std::isfinite(value) || value <= 0.0;
+                    }) ||
+        std::any_of(gates.begin(), gates.end(), [](double value) {
+            return !std::isfinite(value) || value <= 0.0;
+        })) {
+        LOG(ERROR) << "[LOCALIZATION_EKF] EKF standard deviations, gates and "
+                      "max_prediction_step must be finite and positive";
+        return false;
     }
+
     if (yaml["lio_sam"] && yaml["lio_sam"]["extrinsicRPY"]) {
         const std::vector<double> values =
             yaml["lio_sam"]["extrinsicRPY"].as<std::vector<double>>();
         if (values.size() != 9) {
-            LOG(ERROR) << "[LOCALIZATION_ESKF] lio_sam.extrinsicRPY must contain 9 values";
+            LOG(ERROR) << "[LOCALIZATION_EKF] lio_sam.extrinsicRPY must contain 9 values";
             return false;
         }
         imu_from_tracking_rotation_ <<
@@ -248,16 +284,7 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
             values[6], values[7], values[8];
     }
 
-    loc::ESKF::Options filter_options;
-    if (eskf && eskf["body_acceleration_noise_std"]) filter_options.body_acceleration_noise_std = eskf["body_acceleration_noise_std"].as<double>();
-    else if (eskf && eskf["acceleration_noise_std"]) filter_options.body_acceleration_noise_std = eskf["acceleration_noise_std"].as<double>();
-    if (eskf && eskf["angular_acceleration_noise_std"]) filter_options.angular_acceleration_noise_std = eskf["angular_acceleration_noise_std"].as<double>();
-    if (eskf && eskf["max_prediction_step"]) filter_options.max_prediction_step = eskf["max_prediction_step"].as<double>();
-    filter_options.pose_gate_chi2 = ndt_pose_gate_chi2_;
-    filter_options.position_gate_chi2 = rtk_position_gate_chi2_;
-    filter_options.yaw_gate_chi2 = ins_yaw_gate_chi2_;
-    filter_options.twist_gate_chi2 = wheel_gate_chi2_;
-    eskf_.Configure(filter_options);
+    ekf_.Configure(filter_options);
 
     if (UsesRtk() || UsesInsOrientation() || UsesInsVelocity()) {
         const YAML::Node map_from_enu =
@@ -279,14 +306,15 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
         [this](const loc::LocalizationResult& result) {
             HandleNdtResult(result);
         });
-    if (!UsesLidar()) has_initial_guess_ = true;
+    has_initial_guess_ = !RequiresInitialGuess();
     if (node) SetupPublishers(node);
     LOG(INFO) << "[LOCALIZATION_SYSTEM] mode=" << ModeToString(mode_)
               << ", rtk_position=" << UsesRtk()
               << ", ins_orientation=" << UsesInsOrientation()
               << ", ins_velocity=" << UsesInsVelocity()
-              << ", wheel=" << UsesWheelOdometry()
-              << ", imu_omega=" << UsesImuAngularVelocity();
+              << ", wheel_odometry=" << UsesWheelOdometry()
+              << ", imu_input=" << (!imu_topic_.empty())
+              << " (not fused into localization EKF)";
     return true;
 }
 
@@ -296,6 +324,12 @@ void LocalizationSystem::SetupPublishers(rclcpp::Node::SharedPtr node) {
     loc_odom_pub_ = node->create_publisher<nav_msgs::msg::Odometry>("/lightning/localization/odom", 10);
     loc_pose_pub_ = node->create_publisher<geometry_msgs::msg::PoseStamped>("/lightning/localization/pose", 10);
     loc_path_pub_ = node->create_publisher<nav_msgs::msg::Path>("/lightning/localization/path", rclcpp::QoS(1).reliable().transient_local());
+    raw_rtk_path_pub_ = node->create_publisher<nav_msgs::msg::Path>(
+        "/lightning/localization/debug/raw_rtk_path",
+        rclcpp::QoS(1).reliable().transient_local());
+    raw_ndt_path_pub_ = node->create_publisher<nav_msgs::msg::Path>(
+        "/lightning/localization/debug/raw_ndt_path",
+        rclcpp::QoS(1).reliable().transient_local());
     loc_pose_quality_pub_ = node->create_publisher<lightning_interfaces::msg::LocalizationPose>("/lightning/localization/pose_with_quality", 10);
 }
 
@@ -303,7 +337,7 @@ bool LocalizationSystem::SetMapPath(const std::string& map_path) {
     if (!loc_ || map_path.empty()) return false;
     map_path_ = map_path;
     map_ready_ = loc_->Init(yaml_path_, map_path_);
-    has_initial_guess_ = !UsesLidar();
+    has_initial_guess_ = !RequiresInitialGuess();
     if (map_ready_) {
         LOG(INFO) << "[LOCALIZATION_SYSTEM] map and visualization initialized"
                   << ", path=" << map_path_
@@ -315,17 +349,25 @@ bool LocalizationSystem::SetMapPath(const std::string& map_path) {
 
 bool LocalizationSystem::SetInitialGuess(const SE3& init_pose, bool* initialized_now) {
     if (initialized_now) *initialized_now = false;
-    if (!UsesLidar()) { has_initial_guess_ = true; return true; }
+    if (!UsesLidar()) {
+        std::lock_guard<std::mutex> lock(filter_mutex_);
+        // No observation timestamp is available here. Store the pose and
+        // initialize at the first sensor timestamp instead of timestamp zero;
+        // otherwise an offline bag would request a multi-year prediction.
+        manual_initial_pose_ = init_pose;
+        manual_initial_guess_pending_ = true;
+        has_initial_guess_ = true;
+        return true;
+    }
     if (!loc_ || !map_ready_) return false;
     const bool accepted = loc_->SetExternalPose(init_pose.unit_quaternion(), init_pose.translation());
     has_initial_guess_ = accepted;
-    if (accepted && mode_ != Mode::NDT_ONLY) {
+    if (accepted) {
         std::lock_guard<std::mutex> lock(filter_mutex_);
-        eskf_.Reset();
+        ekf_.Reset();
         manual_initial_guess_pending_ = true;
         has_initial_position_ = false;
         has_initial_yaw_ = false;
-        has_initial_velocity_ = false;
     }
     return accepted;
 }
@@ -336,7 +378,9 @@ loc::LocalizationFrameOutcome LocalizationSystem::ProcessCloud(const sensor_msgs
         const double stamp = rclcpp::Time(cloud->header.stamp).seconds();
         last_lidar_stamp_ = stamp;
         std::lock_guard<std::mutex> lock(filter_mutex_);
-        if (eskf_.Initialized() && eskf_.PredictTo(stamp)) loc_->SetPredictionPose(eskf_.Pose());
+        if (ekf_.Initialized() && ekf_.PredictTo(stamp)) {
+            loc_->SetPredictionPose(ekf_.Pose());
+        }
     }
     return loc_->ProcessLidarMsg(cloud, diagnostic);
 }
@@ -347,7 +391,9 @@ loc::LocalizationFrameOutcome LocalizationSystem::ProcessCloud(const livox_ros_d
         const double stamp = rclcpp::Time(cloud->header.stamp).seconds();
         last_lidar_stamp_ = stamp;
         std::lock_guard<std::mutex> lock(filter_mutex_);
-        if (eskf_.Initialized() && eskf_.PredictTo(stamp)) loc_->SetPredictionPose(eskf_.Pose());
+        if (ekf_.Initialized() && ekf_.PredictTo(stamp)) {
+            loc_->SetPredictionPose(ekf_.Pose());
+        }
     }
     return loc_->ProcessLivoxLidarMsg(cloud, diagnostic);
 }
@@ -356,34 +402,37 @@ void LocalizationSystem::ProcessRtkPosition(
     const sensor_msgs::msg::NavSatFix::SharedPtr& fix) {
     if (!UsesRtk() || !fix) return;
 
-    Eigen::Vector3d position_map;
-    Eigen::Matrix3d covariance_map;
+    Eigen::Vector2d position_map;
+    Eigen::Matrix2d covariance_map;
     if (!PositionToMap(*fix, &position_map, &covariance_map)) return;
     const double stamp = rclcpp::Time(fix->header.stamp).seconds();
+    AppendDebugPath(
+        &raw_rtk_path_, raw_rtk_path_pub_, stamp, position_map, 0.0);
 
     std::lock_guard<std::mutex> lock(filter_mutex_);
-    if (!eskf_.Initialized()) {
-        if (!manual_initial_guess_pending_) {
+    if (!ekf_.Initialized()) {
+        if (manual_initial_guess_pending_) {
+            if (!InitializeManualGuess(stamp)) return;
+        } else {
             has_initial_position_ = true;
             initial_position_stamp_ = stamp;
             initial_sensor_position_map_ = position_map;
-            initial_position_covariance_map_ = covariance_map;
-            TryInitializeEskfFromGlobalObservations();
+            TryInitializeEkf();
+            return;
         }
-        return;
     }
 
     double distance = 0.0;
-    const bool accepted = eskf_.UpdatePositionWithLeverArm(
-        stamp, position_map, rtk_ins_lever_arm_tracking_, covariance_map,
-        rtk_position_axes_, rtk_position_gate_chi2_, &distance);
+    const bool accepted = ekf_.UpdateRtkPosition(
+        stamp, position_map, rtk_ins_lever_arm_tracking_.head<2>(),
+        covariance_map, -1.0, &distance);
     if (accepted) {
-        PublishResult(BuildEskfResult(stamp, "ESKF GNSS position update", true));
+        PublishResult(BuildEkfResult(stamp, "EKF RTK position update", true));
     } else {
         PublishPredictionIfAdvanced(
-            stamp, "ESKF prediction; GNSS position rejected");
+            stamp, "EKF prediction; RTK position rejected");
         LOG_EVERY_N(WARNING, 20)
-            << "[LOCALIZATION_ESKF] GNSS position rejected, stamp=" << stamp
+            << "[LOCALIZATION_EKF] RTK position rejected, stamp=" << stamp
             << ", mahalanobis=" << distance;
     }
 }
@@ -394,35 +443,32 @@ void LocalizationSystem::ProcessInsOrientation(
 
     double yaw_map = 0.0;
     double variance = 0.0;
-    Eigen::Matrix3d rotation_map_tracking;
-    if (!OrientationToMapYaw(
-            *orientation, &rotation_map_tracking, &yaw_map, &variance)) {
-        return;
-    }
+    if (!OrientationToMapYaw(*orientation, &yaw_map, &variance)) return;
     const double stamp = rclcpp::Time(orientation->header.stamp).seconds();
 
     std::lock_guard<std::mutex> lock(filter_mutex_);
-    if (!eskf_.Initialized()) {
-        if (!manual_initial_guess_pending_) {
+    if (!ekf_.Initialized()) {
+        if (manual_initial_guess_pending_) {
+            if (!InitializeManualGuess(stamp)) return;
+        } else {
             has_initial_yaw_ = true;
             initial_yaw_stamp_ = stamp;
-            initial_orientation_map_ = rotation_map_tracking;
-            initial_yaw_variance_ = variance;
-            TryInitializeEskfFromGlobalObservations();
+            initial_yaw_map_ = yaw_map;
+            TryInitializeEkf();
+            return;
         }
-        return;
     }
 
     double distance = 0.0;
-    const bool accepted = eskf_.UpdateYaw(
-        stamp, yaw_map, variance, ins_yaw_gate_chi2_, &distance);
+    const bool accepted = ekf_.UpdateYaw(
+        stamp, yaw_map, variance, -1.0, &distance);
     if (accepted) {
-        PublishResult(BuildEskfResult(stamp, "ESKF INS yaw update", true));
+        PublishResult(BuildEkfResult(stamp, "EKF INS yaw update", true));
     } else {
         PublishPredictionIfAdvanced(
-            stamp, "ESKF prediction; INS yaw rejected");
+            stamp, "EKF prediction; INS yaw rejected");
         LOG_EVERY_N(WARNING, 20)
-            << "[LOCALIZATION_ESKF] INS yaw rejected, stamp=" << stamp
+            << "[LOCALIZATION_EKF] INS yaw rejected, stamp=" << stamp
             << ", mahalanobis=" << distance;
     }
 }
@@ -431,36 +477,32 @@ void LocalizationSystem::ProcessInsVelocity(
     const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity) {
     if (!UsesInsVelocity() || !velocity) return;
 
-    Eigen::Vector3d velocity_map;
-    Eigen::Matrix3d covariance_map;
+    Eigen::Vector2d velocity_map;
+    Eigen::Matrix2d covariance_map;
     if (!VelocityToMap(*velocity, &velocity_map, &covariance_map)) return;
     const double stamp = rclcpp::Time(velocity->header.stamp).seconds();
 
     std::lock_guard<std::mutex> lock(filter_mutex_);
-    if (!eskf_.Initialized()) {
-        if (!manual_initial_guess_pending_) {
-            has_initial_velocity_ = true;
-            initial_velocity_stamp_ = stamp;
-            initial_sensor_velocity_map_ = velocity_map;
-            initial_velocity_covariance_map_ = covariance_map;
-            TryInitializeEskfFromGlobalObservations();
+    if (!ekf_.Initialized()) {
+        if (!manual_initial_guess_pending_ ||
+            !InitializeManualGuess(stamp)) {
+            return;
         }
-        return;
     }
 
-    double velocity_distance = 0.0;
-    const bool accepted = eskf_.UpdateMapVelocityWithLeverArm(
-        stamp, velocity_map, rtk_ins_lever_arm_tracking_, covariance_map,
-        rtk_velocity_axes_, rtk_velocity_gate_chi2_, &velocity_distance);
-
+    double distance = 0.0;
+    const bool accepted = ekf_.UpdateMapVelocity(
+        stamp, velocity_map, rtk_ins_lever_arm_tracking_.head<2>(),
+        covariance_map, -1.0, &distance);
     if (accepted) {
-        PublishResult(BuildEskfResult(stamp, "ESKF INS velocity update", true));
+        PublishResult(BuildEkfResult(
+            stamp, "EKF INS velocity update", true));
     } else {
         PublishPredictionIfAdvanced(
-            stamp, "ESKF prediction; INS velocity rejected");
+            stamp, "EKF prediction; INS velocity rejected");
         LOG_EVERY_N(WARNING, 20)
-            << "[LOCALIZATION_ESKF] INS velocity rejected, stamp=" << stamp
-            << ", velocity_d2=" << velocity_distance;
+            << "[LOCALIZATION_EKF] INS velocity rejected, stamp=" << stamp
+            << ", mahalanobis=" << distance;
     }
 }
 
@@ -468,117 +510,110 @@ void LocalizationSystem::ProcessWheelOdometry(
     const nav_msgs::msg::Odometry::SharedPtr& odometry) {
     if (!UsesWheelOdometry() || !odometry) return;
     const double stamp = rclcpp::Time(odometry->header.stamp).seconds();
-    const Eigen::Vector3d linear_velocity_body(
-        odometry->twist.twist.linear.x,
-        odometry->twist.twist.linear.y,
-        odometry->twist.twist.linear.z);
-    const Eigen::Vector3d angular_velocity_body(
-        odometry->twist.twist.angular.x,
-        odometry->twist.twist.angular.y,
-        odometry->twist.twist.angular.z);
-    if (!std::isfinite(stamp) || !linear_velocity_body.allFinite() ||
-        !angular_velocity_body.allFinite()) {
+    const double forward_velocity = odometry->twist.twist.linear.x;
+    const double yaw_rate = odometry->twist.twist.angular.z;
+    if (!std::isfinite(stamp) || !std::isfinite(forward_velocity) ||
+        !std::isfinite(yaw_rate)) {
         return;
     }
 
-    Eigen::Matrix<double, 6, 6> covariance;
-    for (int row = 0; row < 6; ++row) {
-        for (int column = 0; column < 6; ++column) {
-            covariance(row, column) =
-                odometry->twist.covariance[row * 6 + column];
-        }
-    }
-    if (!covariance.allFinite() ||
-        covariance.diagonal().minCoeff() < 0.0 ||
-        covariance.diagonal().maxCoeff() <= 0.0) {
+    Eigen::Matrix2d covariance;
+    covariance << odometry->twist.covariance[0],
+                  odometry->twist.covariance[5],
+                  odometry->twist.covariance[30],
+                  odometry->twist.covariance[35];
+    if (!IsUsableCovariance(covariance)) {
         covariance.setZero();
-        covariance.block<3, 3>(0, 0) =
-            std::pow(wheel_linear_sigma_, 2) * Eigen::Matrix3d::Identity();
-        covariance.block<3, 3>(3, 3) =
-            std::pow(wheel_angular_sigma_, 2) * Eigen::Matrix3d::Identity();
+        covariance(0, 0) = wheel_velocity_std_ * wheel_velocity_std_;
+        covariance(1, 1) = wheel_yaw_rate_std_ * wheel_yaw_rate_std_;
     }
 
     std::lock_guard<std::mutex> lock(filter_mutex_);
-    if (!eskf_.Initialized()) return;
+    if (!ekf_.Initialized()) {
+        if (!manual_initial_guess_pending_ ||
+            !InitializeManualGuess(stamp)) {
+            return;
+        }
+    }
+
     double distance = 0.0;
-    const bool accepted = eskf_.UpdateBodyTwist(
-        stamp, linear_velocity_body, angular_velocity_body, covariance,
-        wheel_linear_axes_, wheel_angular_axes_, wheel_gate_chi2_, &distance);
+    const bool accepted = ekf_.UpdateWheelOdometry(
+        stamp, forward_velocity, yaw_rate, covariance, -1.0, &distance);
     if (accepted) {
-        PublishResult(BuildEskfResult(stamp, "ESKF wheel update", true));
+        PublishResult(BuildEkfResult(
+            stamp, "EKF wheel odometry update", true));
     } else {
         PublishPredictionIfAdvanced(
-            stamp, "ESKF prediction; wheel observation rejected");
+            stamp, "EKF prediction; wheel odometry rejected");
         LOG_EVERY_N(WARNING, 20)
-            << "[LOCALIZATION_ESKF] wheel observation rejected, mahalanobis="
-            << distance;
+            << "[LOCALIZATION_EKF] wheel odometry rejected, stamp=" << stamp
+            << ", mahalanobis=" << distance;
     }
 }
 
 void LocalizationSystem::ProcessImu(const sensor_msgs::msg::Imu::SharedPtr& imu) {
-    if (!UsesImuAngularVelocity() || !imu) return;
-    const double stamp = rclcpp::Time(imu->header.stamp).seconds();
-    const Eigen::Vector3d omega_imu(
-        imu->angular_velocity.x,
-        imu->angular_velocity.y,
-        imu->angular_velocity.z);
-    const Eigen::Vector3d omega = tracking_from_imu_rotation_ * omega_imu;
-    if (!std::isfinite(stamp) || !omega.allFinite()) return;
-    Eigen::Matrix3d covariance = std::pow(imu_angular_sigma_, 2) * Eigen::Matrix3d::Identity();
-    if (ImuCovarianceValid(imu->angular_velocity_covariance)) {
-        Eigen::Matrix3d covariance_imu;
-        for (int row = 0; row < 3; ++row)
-            for (int col = 0; col < 3; ++col)
-                covariance_imu(row, col) =
-                    imu->angular_velocity_covariance[row * 3 + col];
-        covariance = tracking_from_imu_rotation_ * covariance_imu *
-                     tracking_from_imu_rotation_.transpose();
-    }
-    std::lock_guard<std::mutex> lock(filter_mutex_);
-    if (!eskf_.Initialized()) return;
-    double distance = 0.0;
-    const bool accepted = eskf_.UpdateAngularVelocity(stamp, omega, covariance, imu_angular_axes_, imu_angular_gate_chi2_, &distance);
-    if (accepted) {
-        PublishResult(BuildEskfResult(
-            stamp, "ESKF IMU angular velocity update", true));
-    } else {
-        PublishPredictionIfAdvanced(
-            stamp, "ESKF prediction; IMU angular velocity rejected");
-        LOG_EVERY_N(WARNING, 50) << "[LOCALIZATION_ESKF] IMU angular velocity rejected, mahalanobis=" << distance;
-    }
+    // imu_topic remains available to mapping/deskew and future algorithms.
+    // It is deliberately not an implicit yaw-rate measurement for this EKF.
+    (void)imu;
 }
 
 void LocalizationSystem::HandleNdtResult(const loc::LocalizationResult& result) {
-    if (mode_ == Mode::NDT_ONLY) { PublishResult(result); return; }
+    if (result.valid_) {
+        AppendDebugPath(
+            &raw_ndt_path_, raw_ndt_path_pub_, result.timestamp_,
+            result.pose_.translation().head<2>(), PoseYaw(result.pose_));
+    }
     std::lock_guard<std::mutex> lock(filter_mutex_);
     if (!result.valid_) {
-        if (eskf_.Initialized() && eskf_.PredictTo(result.timestamp_)) PublishResult(BuildEskfResult(result.timestamp_, "ESKF prediction; NDT invalid", false));
-        else PublishResult(result);
+        if (ekf_.Initialized() && ekf_.PredictTo(result.timestamp_)) {
+            PublishResult(BuildEkfResult(
+                result.timestamp_, "EKF prediction; NDT invalid", false));
+        }
         return;
     }
 
     bool pose_accepted = false;
-    if (!eskf_.Initialized()) {
-        InitializeEskfFromNdt(result);
-        pose_accepted = eskf_.Initialized();
-    } else {
-        Eigen::Matrix<double, 6, 6> covariance = Eigen::Matrix<double, 6, 6>::Zero();
-        if (result.covariance_valid_) covariance = NdtCovarianceToRightError(result.pose_, result.pose_covariance_);
-        else {
-            covariance.block<3, 3>(0, 0) = 0.25 * Eigen::Matrix3d::Identity();
-            covariance.block<3, 3>(3, 3) = std::pow(5.0 * kDegToRad, 2) * Eigen::Matrix3d::Identity();
+    if (!ekf_.Initialized()) {
+        if (!result.reliable_) {
+            LOG_EVERY_N(WARNING, 20)
+                << "[LOCALIZATION_EKF] waiting for first reliable NDT pose";
+            return;
         }
+        InitializeEkfFromNdt(result);
+        pose_accepted = ekf_.Initialized();
+    } else {
+        Eigen::Vector3d measurement;
+        measurement << result.pose_.translation().x(),
+                       result.pose_.translation().y(),
+                       PoseYaw(result.pose_);
+        const Eigen::Matrix3d covariance = FixedPoseNoise(
+            ndt_position_std_x_, ndt_position_std_y_, ndt_yaw_std_);
         double distance = 0.0;
-        pose_accepted = eskf_.UpdatePose(result.timestamp_, result.pose_, covariance, ndt_pose_gate_chi2_, &distance);
-        if (!pose_accepted) LOG(WARNING) << "[LOCALIZATION_ESKF] NDT pose rejected, mahalanobis=" << distance;
+        pose_accepted = ekf_.UpdateNdtPose(
+            result.timestamp_, measurement, covariance, -1.0, &distance);
+        if (!pose_accepted) {
+            LOG(WARNING) << "[LOCALIZATION_EKF] NDT pose rejected, mahalanobis="
+                         << distance;
+        }
     }
-    PublishResult(BuildEskfResult(result.timestamp_, pose_accepted ? "ESKF NDT update" : "ESKF prediction; NDT rejected", pose_accepted && result.reliable_));
+    if (pose_accepted) {
+        PublishResult(BuildEkfResult(
+            result.timestamp_, "EKF NDT update", result.reliable_));
+    } else {
+        PublishPredictionIfAdvanced(
+            result.timestamp_, "EKF prediction; NDT rejected");
+    }
 }
 
-void LocalizationSystem::InitializeEskfFromNdt(const loc::LocalizationResult& ndt) {
-    const loc::ESKF::Covariance covariance = InitialEskfCovariance(&ndt, initial_velocity_sigma_, initial_angular_velocity_sigma_);
-    if (eskf_.Initialize(ndt.timestamp_, ndt.pose_, Eigen::Vector3d::Zero(),
-                         Eigen::Vector3d::Zero(), covariance)) {
+void LocalizationSystem::InitializeEkfFromNdt(
+    const loc::LocalizationResult& ndt) {
+    const Eigen::Vector2d position = ndt.pose_.translation().head<2>();
+    const loc::EKF::Covariance covariance = InitialEkfCovariance(
+        initial_position_std_, initial_yaw_std_, initial_velocity_std_,
+        initial_yaw_rate_std_);
+    if (ekf_.Initialize(
+            ndt.timestamp_, position.x(), position.y(), PoseYaw(ndt.pose_),
+            0.0, 0.0, covariance)) {
         manual_initial_guess_pending_ = false;
     }
 }
@@ -589,7 +624,7 @@ bool LocalizationSystem::InitializeFixedMapTransform(
         "lat", "lon", "alt", "pitch", "roll", "yaw"};
     for (const char* key : required) {
         if (!map_from_enu || !map_from_enu[key]) {
-            LOG(ERROR) << "[LOCALIZATION_ESKF] localization.map_from_enu is missing '"
+            LOG(ERROR) << "[LOCALIZATION_EKF] localization.map_from_enu is missing '"
                        << key << "'";
             return false;
         }
@@ -608,20 +643,19 @@ bool LocalizationSystem::InitializeFixedMapTransform(
         !std::isfinite(roll) || !std::isfinite(course_deg) ||
         latitude_deg < -90.0 || latitude_deg > 90.0 ||
         longitude_deg < -180.0 || longitude_deg > 180.0) {
-        LOG(ERROR) << "[LOCALIZATION_ESKF] invalid fixed map reference";
+        LOG(ERROR) << "[LOCALIZATION_EKF] invalid fixed map reference";
         return false;
     }
 
     utm_zone_ = math::JsbsimWgs84Enu::UtmZoneFromLongitude(longitude_deg);
-    Eigen::Vector3d reference_gnss_utm;
     if (utm_zone_ <= 0 ||
         !math::JsbsimWgs84Enu::ForwardUtmDegrees(
             latitude_deg, longitude_deg, altitude_m, utm_zone_,
-            &reference_gnss_utm) ||
+            &reference_gnss_utm_) ||
         !ComputeUtmFromTrueEnuRotation(
             latitude_deg, longitude_deg, altitude_m, utm_zone_,
             &utm_from_true_enu_rotation_)) {
-        LOG(ERROR) << "[LOCALIZATION_ESKF] failed to project fixed map reference";
+        LOG(ERROR) << "[LOCALIZATION_EKF] failed to project fixed map reference";
         return false;
     }
 
@@ -632,7 +666,7 @@ bool LocalizationSystem::InitializeFixedMapTransform(
     const Eigen::Matrix3d utm_from_tracking =
         utm_from_true_enu_rotation_ * true_enu_from_tracking;
     const Eigen::Vector3d reference_tracking_utm =
-        reference_gnss_utm -
+        reference_gnss_utm_ -
         utm_from_tracking * rtk_ins_lever_arm_tracking_;
 
     // Current mapping initializes the first tracking pose with IMU roll/pitch,
@@ -649,14 +683,19 @@ bool LocalizationSystem::InitializeFixedMapTransform(
         -map_from_enu_rotation_ * reference_tracking_utm;
     map_from_true_enu_rotation_ =
         map_from_enu_rotation_ * utm_from_true_enu_rotation_;
+    reference_gnss_map_ =
+        map_from_enu_rotation_ * reference_gnss_utm_ +
+        map_from_enu_translation_;
     map_from_enu_ready_ =
         map_from_enu_rotation_.allFinite() &&
-        map_from_enu_translation_.allFinite();
+        map_from_enu_translation_.allFinite() &&
+        reference_gnss_utm_.allFinite() && reference_gnss_map_.allFinite();
     if (!map_from_enu_ready_) return false;
 
-    LOG(INFO) << "[LOCALIZATION_ESKF] fixed map<-UTM transform ready"
+    LOG(INFO) << "[LOCALIZATION_EKF] fixed map<-UTM transform ready"
               << ", zone=" << utm_zone_
-              << ", reference_gnss_utm=" << reference_gnss_utm.transpose()
+              << ", reference_gnss_utm=" << reference_gnss_utm_.transpose()
+              << ", reference_gnss_map=" << reference_gnss_map_.transpose()
               << ", course_deg=" << course_deg
               << ", yaw_enu_deg=" << yaw_enu / kDegToRad
               << ", translation=" << map_from_enu_translation_.transpose();
@@ -665,8 +704,8 @@ bool LocalizationSystem::InitializeFixedMapTransform(
 
 bool LocalizationSystem::PositionToMap(
     const sensor_msgs::msg::NavSatFix& fix,
-    Eigen::Vector3d* position_map,
-    Eigen::Matrix3d* covariance_map) const {
+    Eigen::Vector2d* position_map,
+    Eigen::Matrix2d* covariance_map) const {
     if (!position_map || !covariance_map || !map_from_enu_ready_) return false;
     const double stamp = rclcpp::Time(fix.header.stamp).seconds();
     if (fix.status.status == sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX ||
@@ -681,34 +720,41 @@ bool LocalizationSystem::PositionToMap(
             &position_utm)) {
         return false;
     }
-    *position_map =
-        map_from_enu_rotation_ * position_utm + map_from_enu_translation_;
+    // Rotate the local delta around the configured reference instead of
+    // repeatedly multiplying/subtracting large absolute UTM coordinates.
+    const Eigen::Vector3d position_map_3d =
+        reference_gnss_map_ +
+        map_from_enu_rotation_ * (position_utm - reference_gnss_utm_);
+    *position_map = position_map_3d.head<2>();
 
-    Eigen::Matrix3d covariance_true_enu;
-    covariance_true_enu.setZero();
+    Eigen::Matrix2d covariance_enu;
+    covariance_enu << fix.position_covariance[0],
+                      fix.position_covariance[1],
+                      fix.position_covariance[3],
+                      fix.position_covariance[4];
     if (fix.position_covariance_type !=
-        sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN) {
-        for (int row = 0; row < 3; ++row)
-            for (int column = 0; column < 3; ++column)
-                covariance_true_enu(row, column) =
-                    fix.position_covariance[row * 3 + column];
+            sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN &&
+        IsUsableCovariance(covariance_enu)) {
+        const Eigen::Matrix2d rotation =
+            map_from_true_enu_rotation_.topLeftCorner<2, 2>();
+        *covariance_map =
+            rotation * covariance_enu * rotation.transpose();
+        *covariance_map =
+            0.5 * (*covariance_map + covariance_map->transpose());
+    } else {
+        covariance_map->setZero();
+        (*covariance_map)(0, 0) =
+            rtk_position_std_x_ * rtk_position_std_x_;
+        (*covariance_map)(1, 1) =
+            rtk_position_std_y_ * rtk_position_std_y_;
     }
-    if (!Covariance3Valid(covariance_true_enu)) {
-        covariance_true_enu =
-            DiagonalCovariance(rtk_position_sigma_xy_, rtk_position_sigma_z_);
-    }
-    *covariance_map = map_from_true_enu_rotation_ * covariance_true_enu *
-                      map_from_true_enu_rotation_.transpose();
-    return position_map->allFinite() && covariance_map->allFinite();
+    return position_map->allFinite() && IsUsableCovariance(*covariance_map);
 }
 
 bool LocalizationSystem::OrientationToMapYaw(
     const sensor_msgs::msg::Imu& orientation,
-    Eigen::Matrix3d* rotation_map_tracking,
-    double* yaw_map,
-    double* variance) const {
-    if (!rotation_map_tracking || !yaw_map || !variance ||
-        !map_from_enu_ready_ ||
+    double* yaw_map, double* variance) const {
+    if (!yaw_map || !variance || !map_from_enu_ready_ ||
         orientation.orientation_covariance[0] < 0.0) {
         return false;
     }
@@ -723,50 +769,58 @@ bool LocalizationSystem::OrientationToMapYaw(
         return false;
     }
     quaternion.normalize();
-    *rotation_map_tracking =
+    const Eigen::Matrix3d rotation_map_tracking =
         map_from_true_enu_rotation_ * quaternion.toRotationMatrix() *
         imu_from_tracking_rotation_;
-    *yaw_map = PoseYaw(SE3(Eigen::Quaterniond(*rotation_map_tracking),
+    *yaw_map = PoseYaw(SE3(Eigen::Quaterniond(rotation_map_tracking),
                            Eigen::Vector3d::Zero()));
     const double message_variance = orientation.orientation_covariance[8];
     *variance = std::isfinite(message_variance) && message_variance > 0.0
         ? message_variance
-        : fallback_ins_yaw_sigma_rad_ * fallback_ins_yaw_sigma_rad_;
-    return rotation_map_tracking->allFinite() && std::isfinite(*yaw_map) &&
-           std::isfinite(*variance) &&
-           *variance > 0.0;
+        : ins_yaw_std_ * ins_yaw_std_;
+    return rotation_map_tracking.allFinite() && std::isfinite(*yaw_map) &&
+           std::isfinite(*variance) && *variance > 0.0;
 }
 
 bool LocalizationSystem::VelocityToMap(
     const geometry_msgs::msg::TwistWithCovarianceStamped& velocity,
-    Eigen::Vector3d* velocity_map,
-    Eigen::Matrix3d* covariance_map) const {
-    if (!velocity_map || !covariance_map || !map_from_enu_ready_) return false;
-    const double stamp = rclcpp::Time(velocity.header.stamp).seconds();
-    const Eigen::Vector3d velocity_true_enu(
-        velocity.twist.twist.linear.x,
-        velocity.twist.twist.linear.y,
-        velocity.twist.twist.linear.z);
-    if (!std::isfinite(stamp) || !velocity_true_enu.allFinite()) return false;
-    *velocity_map = map_from_true_enu_rotation_ * velocity_true_enu;
-
-    Eigen::Matrix3d covariance_true_enu;
-    for (int row = 0; row < 3; ++row)
-        for (int column = 0; column < 3; ++column)
-            covariance_true_enu(row, column) =
-                velocity.twist.covariance[row * 6 + column];
-    if (!Covariance3Valid(covariance_true_enu)) {
-        covariance_true_enu =
-            DiagonalCovariance(rtk_velocity_sigma_xy_, rtk_velocity_sigma_z_);
+    Eigen::Vector2d* velocity_map,
+    Eigen::Matrix2d* covariance_map) const {
+    if (!velocity_map || !covariance_map || !map_from_enu_ready_) {
+        return false;
     }
-    covariance_true_enu *= rtk_velocity_covariance_scale_;
-    *covariance_map = map_from_true_enu_rotation_ * covariance_true_enu *
-                      map_from_true_enu_rotation_.transpose();
-    return velocity_map->allFinite() && covariance_map->allFinite();
+    const double stamp = rclcpp::Time(velocity.header.stamp).seconds();
+    const Eigen::Vector2d velocity_enu(
+        velocity.twist.twist.linear.x,
+        velocity.twist.twist.linear.y);
+    if (!std::isfinite(stamp) || !velocity_enu.allFinite()) return false;
+
+    const Eigen::Matrix2d rotation =
+        map_from_true_enu_rotation_.topLeftCorner<2, 2>();
+    *velocity_map = rotation * velocity_enu;
+
+    Eigen::Matrix2d covariance_enu;
+    covariance_enu << velocity.twist.covariance[0],
+                      velocity.twist.covariance[1],
+                      velocity.twist.covariance[6],
+                      velocity.twist.covariance[7];
+    if (IsUsableCovariance(covariance_enu)) {
+        *covariance_map =
+            rotation * covariance_enu * rotation.transpose();
+        *covariance_map =
+            0.5 * (*covariance_map + covariance_map->transpose());
+    } else {
+        covariance_map->setZero();
+        (*covariance_map)(0, 0) =
+            rtk_velocity_std_x_ * rtk_velocity_std_x_;
+        (*covariance_map)(1, 1) =
+            rtk_velocity_std_y_ * rtk_velocity_std_y_;
+    }
+    return velocity_map->allFinite() && IsUsableCovariance(*covariance_map);
 }
 
-void LocalizationSystem::TryInitializeEskfFromGlobalObservations() {
-    if (eskf_.Initialized() || mode_ == Mode::NDT_ONLY ||
+void LocalizationSystem::TryInitializeEkf() {
+    if (ekf_.Initialized() ||
         manual_initial_guess_pending_ ||
         !has_initial_position_ || !has_initial_yaw_) {
         return;
@@ -776,54 +830,55 @@ void LocalizationSystem::TryInitializeEskfFromGlobalObservations() {
         return;
     }
 
-    double stamp = std::max(initial_position_stamp_, initial_yaw_stamp_);
-    const Eigen::Vector3d tracking_position_map =
+    const double stamp =
+        std::max(initial_position_stamp_, initial_yaw_stamp_);
+    const Eigen::Vector2d tracking_position_map =
         initial_sensor_position_map_ -
-        initial_orientation_map_ * rtk_ins_lever_arm_tracking_;
-    Eigen::Vector3d velocity_body = Eigen::Vector3d::Zero();
-    const bool use_initial_velocity =
-        has_initial_velocity_ &&
-        std::fabs(initial_velocity_stamp_ - stamp) <=
-            initial_observation_max_dt_;
-    if (use_initial_velocity) {
-        velocity_body =
-            initial_orientation_map_.transpose() *
-            initial_sensor_velocity_map_;
-        stamp = std::max(stamp, initial_velocity_stamp_);
-    }
-
-    loc::ESKF::Covariance covariance = InitialEskfCovariance(
-        nullptr, initial_velocity_sigma_, initial_angular_velocity_sigma_);
-    covariance.block<3, 3>(0, 0) = initial_position_covariance_map_;
-    covariance(5, 5) = initial_yaw_variance_;
-    if (use_initial_velocity) {
-        covariance.block<3, 3>(6, 6) =
-            initial_orientation_map_.transpose() *
-            initial_velocity_covariance_map_ * initial_orientation_map_;
-    }
-    const SE3 pose(Eigen::Quaterniond(initial_orientation_map_),
-                   tracking_position_map);
-    if (eskf_.Initialize(stamp, pose, velocity_body,
-                         Eigen::Vector3d::Zero(), covariance)) {
+        Rotate2D(initial_yaw_map_, rtk_ins_lever_arm_tracking_.head<2>());
+    const loc::EKF::Covariance covariance = InitialEkfCovariance(
+        initial_position_std_, initial_yaw_std_, initial_velocity_std_,
+        initial_yaw_rate_std_);
+    if (ekf_.Initialize(
+            stamp, tracking_position_map.x(), tracking_position_map.y(),
+            initial_yaw_map_, 0.0, 0.0, covariance)) {
         if (UsesLidar()) {
+            const SE3 pose = ekf_.Pose();
             if (!loc_ || !map_ready_ ||
                 !loc_->SetExternalPose(pose.unit_quaternion(),
                                        pose.translation())) {
-                LOG(ERROR) << "[LOCALIZATION_ESKF] failed to pass GNSS/INS "
+                LOG(ERROR) << "[LOCALIZATION_EKF] failed to pass RTK/INS "
                               "initial pose to NDT";
-                eskf_.Reset();
+                ekf_.Reset();
                 return;
             }
             has_initial_guess_ = true;
         }
-        LOG(INFO) << "[LOCALIZATION_ESKF] initialized from GNSS/INS"
+        LOG(INFO) << "[LOCALIZATION_EKF] initialized from RTK/INS"
                   << ", stamp=" << stamp
                   << ", position_map=" << tracking_position_map.transpose()
-                  << ", yaw_map_deg=" << PoseYaw(pose) / kDegToRad
-                  << ", initial_velocity_body=" << velocity_body.transpose();
-        PublishResult(BuildEskfResult(
-            stamp, "ESKF initialized from fixed-map GNSS/INS", true));
+                  << ", yaw_map_deg=" << initial_yaw_map_ / kDegToRad;
+        PublishResult(BuildEkfResult(
+            stamp, "EKF initialized from fixed-map RTK/INS", true));
     }
+}
+
+bool LocalizationSystem::InitializeManualGuess(double stamp) {
+    if (ekf_.Initialized()) return true;
+    if (!manual_initial_guess_pending_ || !std::isfinite(stamp)) return false;
+    const Eigen::Vector2d position =
+        manual_initial_pose_.translation().head<2>();
+    const loc::EKF::Covariance covariance = InitialEkfCovariance(
+        initial_position_std_, initial_yaw_std_, initial_velocity_std_,
+        initial_yaw_rate_std_);
+    if (!ekf_.Initialize(
+            stamp, position.x(), position.y(), PoseYaw(manual_initial_pose_),
+            0.0, 0.0, covariance)) {
+        return false;
+    }
+    manual_initial_guess_pending_ = false;
+    LOG(INFO) << "[LOCALIZATION_EKF] initialized from manual pose at first "
+                 "observation stamp=" << stamp;
+    return true;
 }
 
 void LocalizationSystem::PublishPredictionIfAdvanced(
@@ -831,33 +886,57 @@ void LocalizationSystem::PublishPredictionIfAdvanced(
     // Every update function predicts first. If the observation is then gated
     // out, publish that new predicted state; do nothing for stale input whose
     // timestamp could not advance the filter.
-    if (eskf_.Initialized() &&
-        std::fabs(eskf_.State().stamp - stamp) <= 1e-6) {
-        PublishResult(BuildEskfResult(stamp, message, false));
+    if (ekf_.Initialized() &&
+        std::fabs(ekf_.GetState().stamp - stamp) <= 1e-6) {
+        PublishResult(BuildEkfResult(stamp, message, false));
     }
 }
 
-loc::LocalizationResult LocalizationSystem::BuildEskfResult(double stamp, const std::string& message, bool reliable) const {
+loc::LocalizationResult LocalizationSystem::BuildEkfResult(
+    double stamp, const std::string& message, bool reliable) const {
     loc::LocalizationResult result;
-    if (!eskf_.Initialized()) return result;
+    if (!ekf_.Initialized()) return result;
     result.timestamp_ = stamp;
     result.valid_ = true;
     result.localization_valid_ = true;
     result.status_ = loc::LocalizationStatus::GOOD;
     result.reliable_ = reliable;
-    result.confidence_ = 1.0 / (1.0 + std::sqrt(std::max(0.0, eskf_.P().block<3, 3>(0, 0).trace())));
-    result.pose_ = eskf_.Pose();
+    result.confidence_ = 1.0 /
+        (1.0 + std::sqrt(std::max(
+            0.0, ekf_.P()(0, 0) + ekf_.P()(1, 1))));
+    result.pose_ = ekf_.Pose();
+    result.velocity_map_ = ekf_.VelocityMap();
+    result.angular_velocity_body_ = Eigen::Vector3d(
+        0.0, 0.0, ekf_.GetState().yaw_rate);
     result.pose_covariance_.setZero();
-    result.pose_covariance_.block<3, 3>(0, 0) = eskf_.P().block<3, 3>(0, 0);
-    result.pose_covariance_.block<3, 3>(0, 3) = eskf_.P().block<3, 3>(0, 3);
-    result.pose_covariance_.block<3, 3>(3, 0) = eskf_.P().block<3, 3>(3, 0);
-    result.pose_covariance_.block<3, 3>(3, 3) = eskf_.P().block<3, 3>(3, 3);
+    constexpr std::array<int, 3> kPoseIndices = {0, 1, 5};
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            result.pose_covariance_(kPoseIndices[row], kPoseIndices[column]) =
+                ekf_.P()(row, column);
+        }
+    }
+    // z, roll and pitch are not estimated by the planar EKF.
+    result.pose_covariance_(2, 2) = 1e8;
+    result.pose_covariance_(3, 3) = 1e8;
+    result.pose_covariance_(4, 4) = 1e8;
     result.covariance_valid_ = true;
-    result.velocity_map_ = eskf_.VelocityMap();
-    result.angular_velocity_body_ = eskf_.State().angular_velocity_body;
-    result.twist_covariance_ = eskf_.P().block<6, 6>(6, 6);
-    result.twist_covariance_ = 0.5 * (result.twist_covariance_ + result.twist_covariance_.transpose());
-    result.twist_covariance_valid_ = result.twist_covariance_.allFinite();
+    result.twist_covariance_.setZero();
+    result.twist_covariance_(0, 0) =
+        ekf_.P()(loc::EKF::kVelocity, loc::EKF::kVelocity);
+    result.twist_covariance_(0, 5) =
+        ekf_.P()(loc::EKF::kVelocity, loc::EKF::kYawRate);
+    result.twist_covariance_(5, 0) =
+        ekf_.P()(loc::EKF::kYawRate, loc::EKF::kVelocity);
+    result.twist_covariance_(5, 5) =
+        ekf_.P()(loc::EKF::kYawRate, loc::EKF::kYawRate);
+    // Lateral/vertical velocity and roll/pitch rates are outside this planar
+    // state, so advertise large uncertainty rather than false zeros.
+    result.twist_covariance_(1, 1) = 1e8;
+    result.twist_covariance_(2, 2) = 1e8;
+    result.twist_covariance_(3, 3) = 1e8;
+    result.twist_covariance_(4, 4) = 1e8;
+    result.twist_covariance_valid_ = true;
     result.frame_id_ = output_frame_;
     result.message_ = message;
     return result;
@@ -869,7 +948,7 @@ void LocalizationSystem::PublishResult(const loc::LocalizationResult& input) {
     { std::lock_guard<std::mutex> lock(result_mutex_); latest_result_ = result; }
     if (!result.valid_) return;
     // Pangolin receives the same final estimator result as ROS publishers.
-    // In fusion modes this is always the ESKF state, never raw NDT output.
+    // Every localization mode visualizes the EKF state, never raw NDT output.
     if (loc_) loc_->UpdateVisualization(result);
     AppendPath(result);
     geometry_msgs::msg::TransformStamped transform = result.ToGeoMsg();
@@ -889,15 +968,23 @@ void LocalizationSystem::PublishResult(const loc::LocalizationResult& input) {
     odometry.header = transform.header;
     odometry.child_frame_id = base_link_frame_;
     odometry.pose.pose = pose.pose;
-    const Eigen::Vector3d velocity_body = result.pose_.so3().inverse().matrix() * result.velocity_map_;
+    if (result.covariance_valid_) for (int row = 0; row < 6; ++row) for (int col = 0; col < 6; ++col) odometry.pose.covariance[row * 6 + col] = result.pose_covariance_(row, col);
+    const Eigen::Vector3d velocity_body =
+        result.pose_.so3().inverse().matrix() * result.velocity_map_;
     odometry.twist.twist.linear.x = velocity_body.x();
     odometry.twist.twist.linear.y = velocity_body.y();
     odometry.twist.twist.linear.z = velocity_body.z();
     odometry.twist.twist.angular.x = result.angular_velocity_body_.x();
     odometry.twist.twist.angular.y = result.angular_velocity_body_.y();
     odometry.twist.twist.angular.z = result.angular_velocity_body_.z();
-    if (result.covariance_valid_) for (int row = 0; row < 6; ++row) for (int col = 0; col < 6; ++col) odometry.pose.covariance[row * 6 + col] = result.pose_covariance_(row, col);
-    if (result.twist_covariance_valid_) for (int row = 0; row < 6; ++row) for (int col = 0; col < 6; ++col) odometry.twist.covariance[row * 6 + col] = result.twist_covariance_(row, col);
+    if (result.twist_covariance_valid_) {
+        for (int row = 0; row < 6; ++row) {
+            for (int col = 0; col < 6; ++col) {
+                odometry.twist.covariance[row * 6 + col] =
+                    result.twist_covariance_(row, col);
+            }
+        }
+    }
     if (loc_odom_pub_) loc_odom_pub_->publish(odometry);
 
     if (loc_pose_quality_pub_) {
@@ -937,6 +1024,36 @@ void LocalizationSystem::AppendPath(const loc::LocalizationResult& result) {
     if (loc_path_pub_) loc_path_pub_->publish(path_);
 }
 
+void LocalizationSystem::AppendDebugPath(
+    nav_msgs::msg::Path* path,
+    const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr& publisher,
+    double stamp, const Eigen::Vector2d& position, double yaw) {
+    if (!path || !std::isfinite(stamp) || !position.allFinite() ||
+        !std::isfinite(yaw)) {
+        return;
+    }
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header.stamp = math::FromSec(stamp);
+    pose.header.frame_id = output_frame_;
+    pose.pose.position.x = position.x();
+    pose.pose.position.y = position.y();
+    pose.pose.position.z = 0.0;
+    const Eigen::Quaterniond quaternion(
+        Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()));
+    pose.pose.orientation.x = quaternion.x();
+    pose.pose.orientation.y = quaternion.y();
+    pose.pose.orientation.z = quaternion.z();
+    pose.pose.orientation.w = quaternion.w();
+
+    std::lock_guard<std::mutex> lock(debug_path_mutex_);
+    path->header = pose.header;
+    path->poses.push_back(pose);
+    if (path->poses.size() > 100000) {
+        path->poses.erase(path->poses.begin(), path->poses.begin() + 1000);
+    }
+    if (publisher) publisher->publish(*path);
+}
+
 void LocalizationSystem::MarkPoor(const std::string& message) {
     loc::LocalizationResult result = GetLatestResult();
     result.localization_valid_ = false;
@@ -952,7 +1069,7 @@ double LocalizationSystem::PoseYaw(const SE3& pose) { return std::atan2(pose.so3
 void LocalizationSystem::Reset() {
     if (loc_) loc_->Finish();
     loc_.reset();
-    { std::lock_guard<std::mutex> lock(filter_mutex_); eskf_.Reset(); }
+    { std::lock_guard<std::mutex> lock(filter_mutex_); ekf_.Reset(); }
     lidar_topic_.clear();
     livox_lidar_topic_.clear();
     imu_topic_.clear();
@@ -967,22 +1084,46 @@ void LocalizationSystem::Reset() {
     map_from_enu_translation_ = Eigen::Vector3d::Zero();
     utm_from_true_enu_rotation_ = Eigen::Matrix3d::Identity();
     map_from_true_enu_rotation_ = Eigen::Matrix3d::Identity();
-    tracking_from_imu_rotation_ = Eigen::Matrix3d::Identity();
+    reference_gnss_utm_ = Eigen::Vector3d::Zero();
+    reference_gnss_map_ = Eigen::Vector3d::Zero();
     imu_from_tracking_rotation_ = Eigen::Matrix3d::Identity();
+    rtk_ins_lever_arm_tracking_ = Eigen::Vector3d::Zero();
+    initial_position_std_ = 0.5;
+    initial_yaw_std_ = 3.0 * kDegToRad;
+    initial_velocity_std_ = 2.0;
+    initial_yaw_rate_std_ = 0.5;
+    rtk_position_std_x_ = 0.05;
+    rtk_position_std_y_ = 0.05;
+    ins_yaw_std_ = 1.0 * kDegToRad;
+    rtk_velocity_std_x_ = 0.10;
+    rtk_velocity_std_y_ = 0.10;
+    ndt_position_std_x_ = 0.10;
+    ndt_position_std_y_ = 0.10;
+    ndt_yaw_std_ = 1.0 * kDegToRad;
+    wheel_velocity_std_ = 0.10;
+    wheel_yaw_rate_std_ = 0.05;
     has_initial_position_ = false;
     has_initial_yaw_ = false;
-    has_initial_velocity_ = false;
-    initial_orientation_map_ = Eigen::Matrix3d::Identity();
+    initial_yaw_map_ = 0.0;
+    initial_observation_max_dt_ = 0.05;
     map_ready_ = false;
     has_initial_guess_ = false;
     manual_initial_guess_pending_ = false;
+    manual_initial_pose_ = SE3();
     last_lidar_stamp_ = -1.0;
     path_ = nav_msgs::msg::Path();
+    {
+        std::lock_guard<std::mutex> lock(debug_path_mutex_);
+        raw_rtk_path_ = nav_msgs::msg::Path();
+        raw_ndt_path_ = nav_msgs::msg::Path();
+    }
     { std::lock_guard<std::mutex> lock(result_mutex_); latest_result_ = loc::LocalizationResult(); }
     tf_broadcaster_.reset();
     loc_odom_pub_.reset();
     loc_pose_pub_.reset();
     loc_path_pub_.reset();
+    raw_rtk_path_pub_.reset();
+    raw_ndt_path_pub_.reset();
     loc_pose_quality_pub_.reset();
 }
 

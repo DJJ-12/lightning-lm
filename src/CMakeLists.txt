@@ -23,7 +23,7 @@ add_library(${PROJECT_NAME}.libs SHARED
 
         core/localization/localization_result.cc
         core/localization/localization.cpp
-        core/localization/ESKF/eskf.cc
+        core/localization/EKF/ekf.cc
         core/localization/GlobalLocalizer/GlobalLozalizer.cpp
         core/localization/GlobalLocalizer/tree_structured_parzen_estimator.cpp
         core/localization/GlobalLocalizer/ndt_omp/estimate_covariance.cpp
