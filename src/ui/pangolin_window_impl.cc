@@ -33,7 +33,8 @@ bool PangolinWindowImpl::Init() {
     // unset the current context from the main thread
     pangolin::GetBoundWindow()->RemoveCurrent();
 
-    // 雷达定位轨迹opengl设置
+    // 定位轨迹 OpenGL 设置。红色轨迹显示最终定位状态；在融合模式下
+    // 该状态来自 ESKF，而不是未经融合的 NDT 位姿。
     traj_newest_state_.reset(new ui::UiTrajectory(Vec3f(1.0, 0.0, 0.0)));  // 红色
     traj_scans_.reset(new ui::UiTrajectory(Vec3f(0.0, 1.0, 0.0)));         // 绿色
 
@@ -44,7 +45,7 @@ bool PangolinWindowImpl::Init() {
     log_vel_.SetLabels(std::vector<std::string>{"vel_x", "vel_y", "vel_z"});
     log_vel_baselink_.SetLabels(std::vector<std::string>{"baselink_vel_x", "baselink_vel_y", "baselink_vel_z"});
     log_bias_acc_.SetLabels(std::vector<std::string>{"ba_x", "ba_y", "ba_z"});
-    log_confidence_.SetLabels(std::vector<std::string>{"lidar loc confidence"});
+    log_confidence_.SetLabels(std::vector<std::string>{"localization confidence"});
     log_error_.SetLabels(std::vector<std::string>{"err v", "err h", "err eval v", "err eval h"});
 
     return true;
@@ -186,29 +187,40 @@ bool PangolinWindowImpl::UpdateState() {
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(mtx_nav_state_);
-    Vec3d pos = pose_.translation().eval();
-    Vec3d vel_baselink = pose_.so3().inverse() * vel_;
-    double roll = pose_.angleX();
-    double pitch = pose_.angleY();
-    double yaw = pose_.angleZ();
+    std::deque<NavState> states;
+    {
+        std::lock_guard<std::mutex> lock(mtx_nav_state_);
+        states.swap(pending_nav_states_);
+        // Clear while holding the same mutex used by the producer. A state
+        // arriving after this point will set the flag again and cannot be lost.
+        kf_result_need_update_.store(false);
+    }
+    if (states.empty()) return false;
 
-    // 滤波器状态作曲线图
-    log_vel_.Log(vel_(0), vel_(1), vel_(2));
-    log_vel_baselink_.Log(vel_baselink(0), vel_baselink(1), vel_baselink(2));
-    log_bias_acc_.Log(bias_acc_(0), bias_acc_(1), bias_acc_(2));
-    log_confidence_.Log(confidence_);
+    for (const NavState& state : states) {
+        pose_ = state.GetPose();
+        vel_ = state.GetVel();
+        bias_acc_ = state.Getba();
+        bias_gyr_ = state.Getbg();
+        confidence_ = state.confidence_;
 
-    newest_frontend_pose_ = pose_;
-    traj_newest_state_->AddPt(newest_frontend_pose_);
+        const Vec3d vel_baselink = pose_.so3().inverse() * vel_;
+        log_vel_.Log(vel_(0), vel_(1), vel_(2));
+        log_vel_baselink_.Log(
+            vel_baselink(0), vel_baselink(1), vel_baselink(2));
+        log_bias_acc_.Log(bias_acc_(0), bias_acc_(1), bias_acc_(2));
+        log_confidence_.Log(confidence_);
+
+        newest_frontend_pose_ = pose_;
+        traj_newest_state_->AddPt(newest_frontend_pose_);
+    }
 
     std::ostringstream ss;
     ss << std::fixed << std::setprecision(4) << "ba: [" << bias_acc_(0) << ", " << bias_acc_(1) << ", " << bias_acc_(2)
        << "]";
     gltext_label_state_ = pangolin::default_font().Text(ss.str());
 
-    kf_result_need_update_.store(false);
-    return false;
+    return true;
 }
 
 void PangolinWindowImpl::DrawAll() {

@@ -79,6 +79,7 @@ class PangolinWindowImpl {
     std::map<int, CloudPtr> cloud_dynamic_map_;
 
     /// 滤波器状态
+    std::deque<NavState> pending_nav_states_;
     Sophus::SE3d pose_;
     double confidence_;
     Vec3d vel_;

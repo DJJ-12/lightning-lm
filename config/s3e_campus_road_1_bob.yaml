@@ -8,13 +8,6 @@ common:
   lidar_topic: "/Bob/velodyne_points"
   livox_lidar_topic: ""
   imu_topic: "/Bob/imu/data"
-
-  rtk_fix_topic: "/fdilink/gnss_fix"
-  rtk_heading_topic: "/fdilink/mag_pose_2d"
-  rtk_utm_zone: 0
-  rtk_sync_max_dt_sec: 0.20
-
-  wheel_odometry_topic: ""
   base_link_frame: "base_link"
 
   # Shared lidar adapter / range-image geometry.
@@ -119,63 +112,6 @@ localization:
     max_translation_std: 10.0
     min_rotation_std_deg: 0.5
     max_rotation_std_deg: 30.0
-
-  rtk_ins:
-    enabled: false
-    lever_arm_tracking: [0.0, 0.0, 0.0]
-    fallback_position_sigma_xy: 0.30
-    fallback_position_sigma_z: 1.00
-    fallback_velocity_sigma_xy: 0.20
-    fallback_velocity_sigma_z: 0.50
-    heading_sigma_deg: 10.0
-    velocity_covariance_scale: 2.0
-    history_limit: 300
-
-  eskf:
-    use_rtk_velocity: false
-    use_rtk_elevation: false
-    rtk_position_axes: [1, 1, 0]
-    rtk_velocity_axes: [1, 1, 1]
-
-    use_course_yaw: false
-    course_yaw_min_speed: 2.0
-    course_yaw_sigma_deg: 10.0
-
-    use_wheel_odometry: false
-    wheel_linear_axes: [1, 0, 0]
-    wheel_angular_axes: [0, 0, 1]
-    wheel_linear_sigma: 0.20
-    wheel_angular_sigma: 0.10
-
-    use_imu_angular_velocity: false
-    imu_angular_axes: [1, 1, 1]
-    imu_angular_sigma: 0.10
-
-    use_ndt_derived_twist: true
-    ndt_twist_covariance_scale: 10.0
-
-    body_acceleration_noise_std: 1.5
-    angular_acceleration_noise_std: 0.8
-    max_prediction_step: 0.05
-    initial_velocity_sigma: 3.0
-    initial_angular_velocity_sigma: 1.0
-
-    ndt_pose_gate_chi2: 20.0
-    rtk_position_gate_chi2: 16.0
-    rtk_velocity_gate_chi2: 16.0
-    course_yaw_gate_chi2: 9.0
-    wheel_gate_chi2: 20.0
-    imu_angular_gate_chi2: 16.0
-    ndt_twist_gate_chi2: 20.0
-
-  map_from_enu:
-    mode: "trajectory_alignment"
-    alignment_max_age: 0.30
-    alignment_min_pairs: 8
-    alignment_min_baseline: 5.0
-    alignment_max_rmse: 1.5
-    translation: [0.0, 0.0, 0.0]
-    yaw_deg: 0.0
 
 mapping:
   block_map_resolution: 20

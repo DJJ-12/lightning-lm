@@ -1,26 +1,24 @@
 #pragma once
 
 #include <cstdint>
-#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <vector>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/twist_with_covariance_stamped.hpp>
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <yaml-cpp/yaml.h>
-#include <Eigen/StdVector>
 
 #include "common/eigen_types.h"
-#include "common/localization_sensor_measurements.h"
 #include "core/localization/ESKF/eskf.h"
 #include "core/localization/localization_diagnostic.h"
 #include "core/localization/localization_result.h"
@@ -45,9 +43,13 @@ class LocalizationSystem {
     loc::LocalizationFrameOutcome ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud, const loc::LocalizationInputDiagnostic& diagnostic = {});
     loc::LocalizationFrameOutcome ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud, const loc::LocalizationInputDiagnostic& diagnostic = {});
 
-    // RTK position comes from NavSatFix; RTK heading comes from Pose2D.theta.
-    void ProcessRtkIns(const RtkInsMeasurement& measurement);
-    void ProcessWheelOdometry(const WheelOdometryMeasurement& measurement);
+    // Each standard ROS observation enters the filter independently. No RTK
+    // synchronization packet or input history is maintained in this module.
+    void ProcessRtkPosition(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
+    void ProcessInsOrientation(const sensor_msgs::msg::Imu::SharedPtr& orientation);
+    void ProcessInsVelocity(
+        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity);
+    void ProcessWheelOdometry(const nav_msgs::msg::Odometry::SharedPtr& odometry);
     void ProcessImu(const sensor_msgs::msg::Imu::SharedPtr& imu);
 
     void MarkPoor(const std::string& message);
@@ -55,43 +57,59 @@ class LocalizationSystem {
     void Reset();
 
     Mode GetMode() const { return mode_; }
-    bool UsesLidar() const { return mode_ != Mode::RTK_ONLY; }
-    bool UsesRtk() const { return mode_ != Mode::NDT_ONLY && use_rtk_position_; }
-    bool UsesWheelOdometry() const { return mode_ != Mode::NDT_ONLY && use_wheel_odometry_; }
-    bool UsesImuAngularVelocity() const { return mode_ != Mode::NDT_ONLY && use_imu_angular_velocity_; }
-    bool RequiresMap() const { return UsesLidar(); }
-    bool RequiresInitialGuess() const { return UsesLidar(); }
-    bool ReadyWithoutMap() const { return mode_ == Mode::RTK_ONLY; }
+    bool UsesLidar() const {
+        return mode_ != Mode::RTK_ONLY &&
+               (!lidar_topic_.empty() || !livox_lidar_topic_.empty());
+    }
+    bool UsesRtk() const {
+        return mode_ != Mode::NDT_ONLY && !rtk_fix_topic_.empty();
+    }
+    bool UsesInsOrientation() const {
+        return mode_ != Mode::NDT_ONLY && !rtk_orientation_topic_.empty();
+    }
+    bool UsesInsVelocity() const {
+        return mode_ != Mode::NDT_ONLY && !rtk_velocity_topic_.empty();
+    }
+    bool UsesWheelOdometry() const {
+        return mode_ != Mode::NDT_ONLY && !wheel_odometry_topic_.empty();
+    }
+    bool UsesImuAngularVelocity() const {
+        return mode_ != Mode::NDT_ONLY && !imu_topic_.empty();
+    }
+    // LiDAR needs the map for NDT; the UI also needs it for visualization.
+    bool RequiresMap() const { return UsesLidar() || with_ui_; }
+    bool RequiresInitialGuess() const {
+        return UsesLidar() && !(UsesRtk() && UsesInsOrientation());
+    }
+    bool ReadyWithoutMap() const { return !RequiresMap(); }
     static Mode ModeFromString(const std::string& value);
     static std::string ModeToString(Mode mode);
 
    private:
-    struct MapAlignmentPair {
-        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-        double rtk_stamp = 0.0;
-        Eigen::Vector3d position_enu = Eigen::Vector3d::Zero();
-        Eigen::Vector3d position_map = Eigen::Vector3d::Zero();
-    };
-
     void SetupPublishers(rclcpp::Node::SharedPtr node);
     void HandleNdtResult(const loc::LocalizationResult& result);
-    void UpdateFromRtkIns(const RtkInsMeasurement& measurement);
-    bool TransformRtkInsToFilterFrame(const RtkInsMeasurement& measurement, Eigen::Vector3d* position, Eigen::Vector3d* velocity, Eigen::Matrix3d* position_covariance, Eigen::Matrix3d* velocity_covariance) const;
-    bool FindClosestRtk(double stamp, RtkInsMeasurement* measurement) const;
-    bool TryInitializeMapFromEnu(const loc::LocalizationResult& ndt);
-    bool SolveMapFromEnuAlignment();
+    bool InitializeFixedMapTransform(const YAML::Node& map_from_enu);
+    bool PositionToMap(const sensor_msgs::msg::NavSatFix& fix,
+                       Eigen::Vector3d* position_map,
+                       Eigen::Matrix3d* covariance_map) const;
+    bool OrientationToMapYaw(const sensor_msgs::msg::Imu& orientation,
+                             Eigen::Matrix3d* rotation_map_tracking,
+                             double* yaw_map,
+                             double* variance) const;
+    bool VelocityToMap(
+        const geometry_msgs::msg::TwistWithCovarianceStamped& velocity,
+        Eigen::Vector3d* velocity_map,
+        Eigen::Matrix3d* covariance_map) const;
+    void TryInitializeEskfFromGlobalObservations();
     void InitializeEskfFromNdt(const loc::LocalizationResult& ndt);
-    void InitializeEskfFromRtkIns(const RtkInsMeasurement& measurement);
-    void ApplyNdtDerivedTwist(const loc::LocalizationResult& ndt);
+    void PublishPredictionIfAdvanced(double stamp, const std::string& message);
     loc::LocalizationResult BuildEskfResult(double stamp, const std::string& message, bool reliable) const;
     void PublishResult(const loc::LocalizationResult& result);
     void AppendPath(const loc::LocalizationResult& result);
     static std::string Normalize(std::string value);
     static Eigen::Vector3d ReadVector3(const YAML::Node& node, const Eigen::Vector3d& fallback);
     static Eigen::Array3i ReadAxisMask(const YAML::Node& node, const Eigen::Array3i& fallback);
-    static double WrapAngle(double angle);
     static double PoseYaw(const SE3& pose);
-    static SE3 PoseFromPositionYaw(const Eigen::Vector3d& position, double yaw, const Eigen::Matrix3d& roll_pitch_hint);
 
     LocalizationSystemOptions options_;
     Mode mode_ = Mode::NDT_ONLY;
@@ -99,63 +117,75 @@ class LocalizationSystem {
     std::string map_path_;
     std::string base_link_frame_ = "base_link";
     std::string output_frame_ = "map";
+    // The topic name is the only sensor switch: empty means disabled.
+    std::string lidar_topic_;
+    std::string livox_lidar_topic_;
+    std::string imu_topic_;
+    std::string rtk_fix_topic_;
+    std::string rtk_orientation_topic_;
+    std::string rtk_velocity_topic_;
+    std::string wheel_odometry_topic_;
+    bool with_ui_ = false;
     bool map_ready_ = false;
     bool has_initial_guess_ = false;
+    bool manual_initial_guess_pending_ = false;
     double last_lidar_stamp_ = -1.0;
 
     std::shared_ptr<loc::Localization> loc_;
     mutable std::mutex filter_mutex_;
     loc::ESKF eskf_;
 
-    bool use_rtk_position_ = true;
-    bool use_rtk_velocity_ = false;
-    bool use_rtk_elevation_ = false;
-    bool use_course_yaw_ = false;
-    bool use_wheel_odometry_ = false;
-    bool use_imu_angular_velocity_ = false;
-    bool use_ndt_derived_twist_ = true;
     Eigen::Array3i rtk_position_axes_ = Eigen::Array3i(1, 1, 0);
     Eigen::Array3i rtk_velocity_axes_ = Eigen::Array3i(1, 1, 1);
     Eigen::Array3i wheel_linear_axes_ = Eigen::Array3i(1, 0, 0);
     Eigen::Array3i wheel_angular_axes_ = Eigen::Array3i(0, 0, 1);
     Eigen::Array3i imu_angular_axes_ = Eigen::Array3i(1, 1, 1);
+    Eigen::Matrix3d tracking_from_imu_rotation_ = Eigen::Matrix3d::Identity();
+    Eigen::Matrix3d imu_from_tracking_rotation_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d rtk_ins_lever_arm_tracking_ = Eigen::Vector3d::Zero();
     double rtk_position_sigma_xy_ = 0.30;
     double rtk_position_sigma_z_ = 1.00;
     double rtk_velocity_sigma_xy_ = 0.20;
     double rtk_velocity_sigma_z_ = 0.50;
     double rtk_velocity_covariance_scale_ = 2.0;
-    double course_yaw_min_speed_ = 2.0;
-    double course_yaw_sigma_rad_ = 10.0 * 3.14159265358979323846 / 180.0;
+    double fallback_ins_yaw_sigma_rad_ =
+        10.0 * 3.14159265358979323846 / 180.0;
     double wheel_linear_sigma_ = 0.20;
     double wheel_angular_sigma_ = 0.10;
     double imu_angular_sigma_ = 0.10;
-    double ndt_twist_covariance_scale_ = 10.0;
     double initial_velocity_sigma_ = 3.0;
     double initial_angular_velocity_sigma_ = 1.0;
     double rtk_position_gate_chi2_ = 16.0;
     double rtk_velocity_gate_chi2_ = 16.0;
-    double course_yaw_gate_chi2_ = 9.0;
+    double ins_yaw_gate_chi2_ = 9.0;
     double wheel_gate_chi2_ = 20.0;
     double imu_angular_gate_chi2_ = 16.0;
     double ndt_pose_gate_chi2_ = 20.0;
-    double ndt_twist_gate_chi2_ = 20.0;
 
-    std::deque<RtkInsMeasurement> rtk_history_;
-    std::size_t rtk_history_limit_ = 300;
-    std::vector<MapAlignmentPair, Eigen::aligned_allocator<MapAlignmentPair>> map_alignment_pairs_;
-    double last_alignment_rtk_stamp_ = -1.0;
-    double map_alignment_max_age_ = 0.30;
-    int map_alignment_min_pairs_ = 8;
-    double map_alignment_min_baseline_ = 5.0;
-    double map_alignment_max_rmse_ = 1.5;
-    std::string map_from_enu_mode_ = "trajectory_alignment";
+    int utm_zone_ = 0;
     bool map_from_enu_ready_ = false;
     Eigen::Matrix3d map_from_enu_rotation_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d map_from_enu_translation_ = Eigen::Vector3d::Zero();
+    // INS attitude/velocity use true local ENU axes. UTM positions use grid
+    // axes, so this fixed rotation applies the reference meridian convergence.
+    Eigen::Matrix3d utm_from_true_enu_rotation_ = Eigen::Matrix3d::Identity();
+    Eigen::Matrix3d map_from_true_enu_rotation_ = Eigen::Matrix3d::Identity();
 
-    bool has_previous_ndt_ = false;
-    loc::LocalizationResult previous_ndt_;
+    // RTK-only initialization keeps one latest value per observation type. It
+    // is state, not a pending-message queue.
+    bool has_initial_position_ = false;
+    double initial_position_stamp_ = 0.0;
+    Eigen::Vector3d initial_sensor_position_map_ = Eigen::Vector3d::Zero();
+    Eigen::Matrix3d initial_position_covariance_map_ = Eigen::Matrix3d::Identity();
+    bool has_initial_yaw_ = false;
+    double initial_yaw_stamp_ = 0.0;
+    Eigen::Matrix3d initial_orientation_map_ = Eigen::Matrix3d::Identity();
+    double initial_yaw_variance_ = 1.0;
+    bool has_initial_velocity_ = false;
+    double initial_velocity_stamp_ = 0.0;
+    Eigen::Vector3d initial_sensor_velocity_map_ = Eigen::Vector3d::Zero();
+    Eigen::Matrix3d initial_velocity_covariance_map_ = Eigen::Matrix3d::Identity();
+    double initial_observation_max_dt_ = 0.05;
 
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr loc_odom_pub_;

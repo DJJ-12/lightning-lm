@@ -56,6 +56,10 @@ class Localization {
 
     void SetTFCallback(TFCallback&& callback);
     void SetResultCallback(ResultCallback&& callback);
+    // The localization system owns the final estimator output. NDT results
+    // reach it through ResultCallback; only the selected final result is sent
+    // back here for visualization.
+    void UpdateVisualization(const LocalizationResult& result);
     void MarkPoor(const std::string& message);
     LocalizationResult GetLatestResult() const;
 

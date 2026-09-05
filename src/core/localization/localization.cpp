@@ -156,7 +156,11 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     }
     if (options_.with_ui_) {
         ui_ = std::make_shared<ui::PangolinWindow>();
-        ui_->Init();
+        if (!ui_->Init()) {
+            LOG(ERROR) << "[LOCALIZATION_UI] failed to create Pangolin window";
+            ui_.reset();
+            return false;
+        }
         LoadTargetMapForUI(global_map_path);
     }
 
@@ -767,11 +771,6 @@ void Localization::PublishResult(const LocalizationResult& result) {
         loc_result_ = result;
     }
 
-    if (ui_ && result.valid_) {
-        ui_->UpdateNavState(result.ToNavState());
-        ui_->UpdateRecentPose(result.pose_);
-    }
-
     const bool pose_is_publishable = result.valid_;
 
     std::string base_link_frame;
@@ -789,6 +788,11 @@ void Localization::PublishResult(const LocalizationResult& result) {
     if (result_callback_) {
         result_callback_(result);
     }
+}
+
+void Localization::UpdateVisualization(const LocalizationResult& result) {
+    if (!ui_ || !result.valid_) return;
+    ui_->UpdateNavState(result.ToNavState());
 }
 
 SE3 Localization::Matrix4dToSE3(const Eigen::Matrix4d& pose) {

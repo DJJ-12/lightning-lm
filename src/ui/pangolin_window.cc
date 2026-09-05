@@ -155,13 +155,10 @@ void PangolinWindow::UpdateNavState(const NavState& state) {
         return;
     }
     std::unique_lock<std::mutex> lock_lio_res(impl->mtx_nav_state_);
-
-    impl->pose_ = state.GetPose();
-    impl->vel_ = state.GetVel();
-    impl->bias_acc_ = state.Getba();
-    impl->bias_gyr_ = state.Getbg();
-    impl->confidence_ = state.confidence_;
-
+    // Do not overwrite an unrendered estimator state. Offline bags can feed
+    // observations much faster than the screen refresh rate, so retain every
+    // final ESKF state until the render thread appends it to the trajectory.
+    impl->pending_nav_states_.push_back(state);
     impl->kf_result_need_update_.store(true);
 }
 

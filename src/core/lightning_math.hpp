@@ -722,7 +722,8 @@ inline bool PoseInterp(double query_time, C&& data, FT&& take_time_func, FP&& ta
 }
 
 
-// WGS84 geodetic/ECEF/local-ENU conversion used by dual-antenna RTK.
+// WGS84 geodetic/ECEF/local-ENU and fixed-zone UTM conversion used by
+// localization global observations.
 // The geodetic-to-ECEF equations and ECEF-to-local-frame construction follow
 // JSBSim FGLocation::SetPositionGeodetic() and FGLocation::ComputeDerivedUnconditional().
 // JSBSim's local frame is NED; the rows below are reordered/sign-flipped to ENU.
