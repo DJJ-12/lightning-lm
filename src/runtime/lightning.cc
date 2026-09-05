@@ -43,8 +43,6 @@ bool Lightning::Init(rclcpp::Node::SharedPtr node, const std::string& yaml_path)
         rclcpp::QoS(1).reliable().transient_local());
 
     YAML::Node yaml = YAML::LoadFile(yaml_path_);
-    const std::string localization_mode = yaml["localization"] && yaml["localization"]["mode"] ? yaml["localization"]["mode"].as<std::string>() : "ndt_only";
-    localization_fusion_mode_ = modules::LocalizationSystem::ModeFromString(localization_mode);
     if (yaml["mapping"]) {
         if (yaml["mapping"]["block_map_resolution"]) {
             save_map_options_.block_resolution = yaml["mapping"]["block_map_resolution"].as<int>();
@@ -66,8 +64,18 @@ bool Lightning::Init(rclcpp::Node::SharedPtr node, const std::string& yaml_path)
                    const TopicInput::LidarReceiveInfo& receive_info) {
                 AcceptLivox(cloud, receive_info);
             },
-            [this](const RtkInsMeasurement& measurement) { AcceptRtkIns(measurement); },
-            [this](const WheelOdometryMeasurement& measurement) { AcceptWheelOdometry(measurement); })) {
+            [this](const sensor_msgs::msg::NavSatFix::SharedPtr& fix) {
+                AcceptRtkPosition(fix);
+            },
+            [this](const sensor_msgs::msg::Imu::SharedPtr& orientation) {
+                AcceptInsOrientation(orientation);
+            },
+            [this](const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity) {
+                AcceptInsVelocity(velocity);
+            },
+            [this](const nav_msgs::msg::Odometry::SharedPtr& odometry) {
+                AcceptWheelOdometry(odometry);
+            })) {
         topic_input_.reset();
         return false;
     }
@@ -82,7 +90,7 @@ void Lightning::Shutdown() {
     }
 
     std::lock_guard<std::mutex> lock(control_mutex_);
-    LOG(INFO) << "[程序退出] [01] 停止在线消息路由";
+    LOG(INFO) << "[程序退出] [01] 停止在线消息输入";
     if (topic_input_) {
         topic_input_->SetEnabled(false);
     }
@@ -155,10 +163,15 @@ ServiceResult Lightning::SetMode(const std::string& mode_text) {
     mode_ = new_mode;
 
     task_.Reset(TaskState::IDLE, ModeToString(mode_) + " mode selected");
-    if (mode_ == Mode::ONLINE_LOCALIZATION && localization_fusion_mode_ == modules::LocalizationSystem::Mode::RTK_ONLY) {
-        if (!EnsureLocalizationSystemLocked()) return {false, "failed to initialize RTK/INS localization"};
-        StartOnlineWorkerLocked();
-        task_.SetState(TaskState::RUNNING, "online RTK/INS localization running");
+    if (mode_ == Mode::ONLINE_LOCALIZATION) {
+        if (!EnsureLocalizationSystemLocked()) {
+            return {false, "failed to initialize localization"};
+        }
+        if (localization_system_->ReadyWithoutMap()) {
+            StartOnlineWorkerLocked();
+            task_.SetState(TaskState::RUNNING,
+                           "online localization running without map");
+        }
     }
     return {true, "mode set to " + ModeToString(mode_)};
 }
@@ -196,38 +209,104 @@ void Lightning::AcceptImu(const sensor_msgs::msg::Imu::SharedPtr& imu) {
     {
         std::lock_guard<std::mutex> lock(online_input_mutex_);
         if (!online_worker_running_) return;
-        pending_imu_.push_back(std::move(input));
+        if (online_worker_is_localization_) {
+            latest_localization_imu_ = std::move(input);
+            has_latest_localization_imu_ = true;
+        } else {
+            pending_mapping_imu_.push_back(std::move(input));
+        }
         ++online_imu_received_;
     }
     online_input_ready_.notify_one();
 }
 
 
-void Lightning::AcceptRtkIns(const RtkInsMeasurement& measurement) {
+void Lightning::AcceptRtkPosition(
+    const sensor_msgs::msg::NavSatFix::SharedPtr& fix) {
+    if (!fix) return;
     InputMessage input;
     input.receive_steady_sec = RuntimeSteadySeconds();
-    input.header_stamp = measurement.stamp;
-    input.type = InputType::RTK_INS;
-    input.rtk_ins = measurement;
+    input.header_stamp = rclcpp::Time(fix->header.stamp).seconds();
+    input.type = InputType::RTK_POSITION;
+    input.rtk_position = fix;
     {
         std::lock_guard<std::mutex> lock(online_input_mutex_);
         if (!online_worker_running_ || !online_worker_is_localization_) return;
-        pending_rtk_.push_back(std::move(input));
-        ++online_rtk_received_;
+        latest_rtk_position_ = std::move(input);
+        has_latest_rtk_position_ = true;
+        ++online_rtk_position_received_;
     }
     online_input_ready_.notify_one();
 }
 
-void Lightning::AcceptWheelOdometry(const WheelOdometryMeasurement& measurement) {
+int LocalizationInputPriority(InputType type) {
+    switch (type) {
+        case InputType::INS_ORIENTATION:
+            return 0;
+        case InputType::RTK_POSITION:
+            return 1;
+        case InputType::IMU:
+            return 2;
+        case InputType::INS_VELOCITY:
+            return 3;
+        case InputType::WHEEL_ODOMETRY:
+            return 4;
+        case InputType::POINT_CLOUD2:
+        case InputType::LIVOX:
+            return 5;
+    }
+    return 6;
+}
+
+void Lightning::AcceptInsOrientation(
+    const sensor_msgs::msg::Imu::SharedPtr& orientation) {
+    if (!orientation) return;
     InputMessage input;
     input.receive_steady_sec = RuntimeSteadySeconds();
-    input.header_stamp = measurement.stamp;
-    input.type = InputType::WHEEL_ODOMETRY;
-    input.wheel_odometry = measurement;
+    input.header_stamp = rclcpp::Time(orientation->header.stamp).seconds();
+    input.type = InputType::INS_ORIENTATION;
+    input.ins_orientation = orientation;
     {
         std::lock_guard<std::mutex> lock(online_input_mutex_);
         if (!online_worker_running_ || !online_worker_is_localization_) return;
-        pending_wheel_odometry_.push_back(std::move(input));
+        latest_ins_orientation_ = std::move(input);
+        has_latest_ins_orientation_ = true;
+        ++online_ins_orientation_received_;
+    }
+    online_input_ready_.notify_one();
+}
+
+void Lightning::AcceptInsVelocity(
+    const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity) {
+    if (!velocity) return;
+    InputMessage input;
+    input.receive_steady_sec = RuntimeSteadySeconds();
+    input.header_stamp = rclcpp::Time(velocity->header.stamp).seconds();
+    input.type = InputType::INS_VELOCITY;
+    input.ins_velocity = velocity;
+    {
+        std::lock_guard<std::mutex> lock(online_input_mutex_);
+        if (!online_worker_running_ || !online_worker_is_localization_) return;
+        latest_ins_velocity_ = std::move(input);
+        has_latest_ins_velocity_ = true;
+        ++online_ins_velocity_received_;
+    }
+    online_input_ready_.notify_one();
+}
+
+void Lightning::AcceptWheelOdometry(
+    const nav_msgs::msg::Odometry::SharedPtr& odometry) {
+    if (!odometry) return;
+    InputMessage input;
+    input.receive_steady_sec = RuntimeSteadySeconds();
+    input.header_stamp = rclcpp::Time(odometry->header.stamp).seconds();
+    input.type = InputType::WHEEL_ODOMETRY;
+    input.wheel_odometry = odometry;
+    {
+        std::lock_guard<std::mutex> lock(online_input_mutex_);
+        if (!online_worker_running_ || !online_worker_is_localization_) return;
+        latest_wheel_odometry_ = std::move(input);
+        has_latest_wheel_odometry_ = true;
         ++online_wheel_odometry_received_;
     }
     online_input_ready_.notify_one();
@@ -275,18 +354,29 @@ void Lightning::OverwriteLatestLidar(InputMessage frame) {
 }
 
 std::size_t Lightning::PendingOnlineInputCountLocked() const {
-    return pending_imu_.size() +
-           pending_rtk_.size() +
-           pending_wheel_odometry_.size() +
+    return pending_mapping_imu_.size() +
+           (has_latest_localization_imu_ ? 1U : 0U) +
+           (has_latest_rtk_position_ ? 1U : 0U) +
+           (has_latest_ins_orientation_ ? 1U : 0U) +
+           (has_latest_ins_velocity_ ? 1U : 0U) +
+           (has_latest_wheel_odometry_ ? 1U : 0U) +
            (has_latest_lidar_ ? 1U : 0U);
 }
 
 void Lightning::ClearPendingOnlineInputLocked() {
     latest_lidar_ = InputMessage();
     has_latest_lidar_ = false;
-    pending_imu_.clear();
-    pending_rtk_.clear();
-    pending_wheel_odometry_.clear();
+    pending_mapping_imu_.clear();
+    latest_localization_imu_ = InputMessage();
+    has_latest_localization_imu_ = false;
+    latest_rtk_position_ = InputMessage();
+    has_latest_rtk_position_ = false;
+    latest_ins_orientation_ = InputMessage();
+    has_latest_ins_orientation_ = false;
+    latest_ins_velocity_ = InputMessage();
+    has_latest_ins_velocity_ = false;
+    latest_wheel_odometry_ = InputMessage();
+    has_latest_wheel_odometry_ = false;
 }
 
 void Lightning::StartOnlineWorkerLocked() {
@@ -297,18 +387,22 @@ void Lightning::StartOnlineWorkerLocked() {
         online_lidar_received_ = 0;
         online_lidar_overwritten_ = 0;
         online_imu_received_ = 0;
-        online_rtk_received_ = 0;
+        online_rtk_position_received_ = 0;
+        online_ins_orientation_received_ = 0;
+        online_ins_velocity_received_ = 0;
         online_wheel_odometry_received_ = 0;
         online_worker_running_ = true;
         online_worker_is_localization_ = !mapping;
     }
 
     online_worker_ = std::thread([this, mapping]() { OnlineWorkerLoop(mapping); });
-    if (topic_input_) topic_input_->SetEnabled(true);
+    if (topic_input_) topic_input_->SetEnabled(true, !mapping);
     LOG(INFO) << "[在线输入] 已启动，mode="
               << (mapping ? "mapping" : "localization")
               << ", LiDAR=latest-only"
-              << ", IMU/RTK/wheel=separate non-dropping queues";
+              << (mapping
+                      ? ", IMU=non-dropping queue"
+                      : ", IMU/RTK-position/INS-orientation/INS-velocity/wheel=independent latest-only slots");
 }
 
 void Lightning::StopOnlineWorkerLocked(bool drain) {
@@ -348,7 +442,7 @@ void Lightning::OnlineWorkerLoop(bool mapping) {
                 std::unique_lock<std::mutex> lock(online_input_mutex_);
                 online_input_ready_.wait(lock, [this]() { return !online_worker_running_ || has_latest_lidar_; });
                 if (!has_latest_lidar_) break;
-                imu_to_process.swap(pending_imu_);
+                imu_to_process.swap(pending_mapping_imu_);
                 lidar_to_process = std::move(latest_lidar_);
                 latest_lidar_ = InputMessage();
                 has_latest_lidar_ = false;
@@ -370,62 +464,76 @@ void Lightning::OnlineWorkerLoop(bool mapping) {
         return;
     }
 
-    // Localization is measurement-driven. RTK-only and wheel updates must be
-    // processed even when no LiDAR frame arrives.
+    // Localization is measurement-driven. Each sensor owns one latest-only
+    // slot, so slow NDT processing never blocks a DDS callback and stale
+    // observations are overwritten by newer observations of the same type.
     std::uint64_t lidar_processed = 0;
     std::uint64_t auxiliary_processed = 0;
     while (true) {
-        std::deque<InputMessage> imu_to_process;
-        std::deque<InputMessage> rtk_to_process;
-        std::deque<InputMessage> wheel_to_process;
-        InputMessage lidar_to_process;
-        bool process_lidar = false;
+        std::vector<InputMessage> ordered_inputs;
+        ordered_inputs.reserve(6);
         {
             std::unique_lock<std::mutex> lock(online_input_mutex_);
             online_input_ready_.wait(lock, [this]() {
                 return !online_worker_running_ ||
                        has_latest_lidar_ ||
-                       !pending_imu_.empty() ||
-                       !pending_rtk_.empty() ||
-                       !pending_wheel_odometry_.empty();
+                       has_latest_localization_imu_ ||
+                       has_latest_rtk_position_ ||
+                       has_latest_ins_orientation_ ||
+                       has_latest_ins_velocity_ ||
+                       has_latest_wheel_odometry_;
             });
             if (!online_worker_running_ &&
                 !has_latest_lidar_ &&
-                pending_imu_.empty() &&
-                pending_rtk_.empty() &&
-                pending_wheel_odometry_.empty()) {
+                !has_latest_localization_imu_ &&
+                !has_latest_rtk_position_ &&
+                !has_latest_ins_orientation_ &&
+                !has_latest_ins_velocity_ &&
+                !has_latest_wheel_odometry_) {
                 break;
             }
-            imu_to_process.swap(pending_imu_);
-            rtk_to_process.swap(pending_rtk_);
-            wheel_to_process.swap(pending_wheel_odometry_);
+
+            if (has_latest_localization_imu_) {
+                ordered_inputs.push_back(std::move(latest_localization_imu_));
+                latest_localization_imu_ = InputMessage();
+                has_latest_localization_imu_ = false;
+            }
+            if (has_latest_rtk_position_) {
+                ordered_inputs.push_back(std::move(latest_rtk_position_));
+                latest_rtk_position_ = InputMessage();
+                has_latest_rtk_position_ = false;
+            }
+            if (has_latest_ins_orientation_) {
+                ordered_inputs.push_back(std::move(latest_ins_orientation_));
+                latest_ins_orientation_ = InputMessage();
+                has_latest_ins_orientation_ = false;
+            }
+            if (has_latest_ins_velocity_) {
+                ordered_inputs.push_back(std::move(latest_ins_velocity_));
+                latest_ins_velocity_ = InputMessage();
+                has_latest_ins_velocity_ = false;
+            }
+            if (has_latest_wheel_odometry_) {
+                ordered_inputs.push_back(std::move(latest_wheel_odometry_));
+                latest_wheel_odometry_ = InputMessage();
+                has_latest_wheel_odometry_ = false;
+            }
             if (has_latest_lidar_) {
-                lidar_to_process = std::move(latest_lidar_);
+                ordered_inputs.push_back(std::move(latest_lidar_));
                 latest_lidar_ = InputMessage();
                 has_latest_lidar_ = false;
-                process_lidar = true;
             }
         }
-        std::vector<InputMessage> ordered_inputs;
-        ordered_inputs.reserve(
-            imu_to_process.size() +
-            rtk_to_process.size() +
-            wheel_to_process.size() +
-            (process_lidar ? 1 : 0));
-        while (!imu_to_process.empty()) {
-            ordered_inputs.push_back(std::move(imu_to_process.front()));
-            imu_to_process.pop_front();
-        }
-        while (!rtk_to_process.empty()) {
-            ordered_inputs.push_back(std::move(rtk_to_process.front()));
-            rtk_to_process.pop_front();
-        }
-        while (!wheel_to_process.empty()) {
-            ordered_inputs.push_back(std::move(wheel_to_process.front()));
-            wheel_to_process.pop_front();
-        }
-        if (process_lidar) ordered_inputs.push_back(std::move(lidar_to_process));
-        std::stable_sort(ordered_inputs.begin(), ordered_inputs.end(), [](const InputMessage& lhs, const InputMessage& rhs) { return lhs.header_stamp < rhs.header_stamp; });
+
+        std::stable_sort(
+            ordered_inputs.begin(), ordered_inputs.end(),
+            [](const InputMessage& lhs, const InputMessage& rhs) {
+                if (lhs.header_stamp != rhs.header_stamp) {
+                    return lhs.header_stamp < rhs.header_stamp;
+                }
+                return LocalizationInputPriority(lhs.type) <
+                       LocalizationInputPriority(rhs.type);
+            });
         for (const InputMessage& input : ordered_inputs) {
             ProcessLocalizationInput(input);
             if (input.type == InputType::POINT_CLOUD2 || input.type == InputType::LIVOX) ++lidar_processed;
@@ -470,8 +578,16 @@ loc::LocalizationFrameOutcome Lightning::ProcessLocalizationInput(const InputMes
         localization_system_->ProcessImu(input.imu);
         return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
     }
-    if (input.type == InputType::RTK_INS) {
-        localization_system_->ProcessRtkIns(input.rtk_ins);
+    if (input.type == InputType::RTK_POSITION) {
+        localization_system_->ProcessRtkPosition(input.rtk_position);
+        return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
+    }
+    if (input.type == InputType::INS_ORIENTATION) {
+        localization_system_->ProcessInsOrientation(input.ins_orientation);
+        return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
+    }
+    if (input.type == InputType::INS_VELOCITY) {
+        localization_system_->ProcessInsVelocity(input.ins_velocity);
         return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
     }
     if (input.type == InputType::WHEEL_ODOMETRY) {
@@ -568,14 +684,29 @@ ServiceResult Lightning::LoadBag(const std::string& bag_path) {
     offline_bag_path_ = bag_path;
 
     if (mode_ == Mode::OFFLINE_LOCALIZATION) {
-        if (localization_fusion_mode_ == modules::LocalizationSystem::Mode::RTK_ONLY) {
-            if (!EnsureLocalizationSystemLocked()) return {false, "failed to initialize RTK/INS localization"};
-            task_.Reset(TaskState::RUNNING, "offline RTK/INS localization running");
-            StartBagLocalizationTaskLocked(bag_path);
-            return {true, "offline RTK/INS localization started: " + bag_path};
+        if (!EnsureLocalizationSystemLocked()) {
+            return {false, "failed to initialize localization"};
         }
-        task_.Reset(TaskState::READY, "offline bag loaded, waiting for set_map_path and set_location");
-        return {true, "offline localization bag loaded: " + bag_path};
+        if (localization_system_->ReadyWithoutMap()) {
+            task_.Reset(TaskState::RUNNING,
+                        "offline localization running without map");
+            StartBagLocalizationTaskLocked(bag_path);
+            return {true,
+                    "offline localization started without map: " + bag_path};
+        }
+        if (localization_map_path_.empty()) {
+            task_.Reset(TaskState::READY,
+                        "offline bag loaded, waiting for set_map_path");
+            return {true, "offline localization bag loaded: " + bag_path};
+        }
+        if (localization_system_->RequiresInitialGuess()) {
+            task_.Reset(TaskState::READY,
+                        "offline bag and map loaded, waiting for set_location");
+            return {true, "offline localization ready; waiting for initial pose"};
+        }
+        task_.Reset(TaskState::RUNNING, "offline localization running");
+        StartBagLocalizationTaskLocked(bag_path);
+        return {true, "offline localization started: " + bag_path};
     }
 
     if (mapping_save_path_.empty()) {
@@ -625,6 +756,8 @@ void Lightning::StartBagMappingTaskLocked(const std::string& bag_path) {
                 input.livox = cloud;
                 ProcessMappingInput(input);
             },
+            nullptr,
+            nullptr,
             nullptr,
             nullptr,
             [this](const BagInputProgress& progress) {
@@ -743,7 +876,27 @@ ServiceResult Lightning::SetMapPath(const std::string& map_path) {
         return {false, "failed to load localization map: " + map_path};
     }
     localization_map_path_ = map_path;
-    task_.Reset(TaskState::READY, localization_system_->RequiresInitialGuess() ? "localization map loaded, waiting for set_location" : "localization ready");
+    if (localization_system_->RequiresInitialGuess()) {
+        task_.Reset(TaskState::READY,
+                    "localization map loaded, waiting for set_location");
+        return {true, "localization map loaded: " + map_path};
+    }
+
+    if (mode_ == Mode::ONLINE_LOCALIZATION) {
+        StartOnlineWorkerLocked();
+        task_.Reset(TaskState::RUNNING,
+                    "online localization waiting for GNSS/INS initialization");
+        return {true, "localization map loaded; online localization started"};
+    }
+    if (mode_ == Mode::OFFLINE_LOCALIZATION && !offline_bag_path_.empty()) {
+        task_.Reset(TaskState::RUNNING,
+                    "offline localization running");
+        StartBagLocalizationTaskLocked(offline_bag_path_);
+        return {true, "localization map loaded; offline localization started"};
+    }
+
+    task_.Reset(TaskState::READY,
+                "localization map loaded, waiting for offline bag");
     return {true, "localization map loaded: " + map_path};
 }
 
@@ -802,24 +955,63 @@ void Lightning::StartBagLocalizationTaskLocked(const std::string& bag_path) {
                 input.livox = cloud;
                 ProcessLocalizationInput(input);
             },
-            [this](const RtkInsMeasurement& measurement) {
+            [this](const sensor_msgs::msg::NavSatFix::SharedPtr& fix) {
                 InputMessage input;
-                input.header_stamp = measurement.stamp;
-                input.type = InputType::RTK_INS;
-                input.rtk_ins = measurement;
+                input.header_stamp = rclcpp::Time(fix->header.stamp).seconds();
+                input.type = InputType::RTK_POSITION;
+                input.rtk_position = fix;
                 ProcessLocalizationInput(input);
             },
-            [this](const WheelOdometryMeasurement& measurement) {
+            [this](const sensor_msgs::msg::Imu::SharedPtr& orientation) {
                 InputMessage input;
-                input.header_stamp = measurement.stamp;
+                input.header_stamp = rclcpp::Time(orientation->header.stamp).seconds();
+                input.type = InputType::INS_ORIENTATION;
+                input.ins_orientation = orientation;
+                ProcessLocalizationInput(input);
+            },
+            [this](const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity) {
+                InputMessage input;
+                input.header_stamp = rclcpp::Time(velocity->header.stamp).seconds();
+                input.type = InputType::INS_VELOCITY;
+                input.ins_velocity = velocity;
+                ProcessLocalizationInput(input);
+            },
+            [this](const nav_msgs::msg::Odometry::SharedPtr& odometry) {
+                InputMessage input;
+                input.header_stamp = rclcpp::Time(odometry->header.stamp).seconds();
                 input.type = InputType::WHEEL_ODOMETRY;
-                input.wheel_odometry = measurement;
+                input.wheel_odometry = odometry;
                 ProcessLocalizationInput(input);
             },
             [this](const BagInputProgress& progress) { task_.SetProgress(progress.processed_frames, progress.total_frames, "offline localization running"); },
             [this]() { return task_.CancelRequested(); });
-        if (task_.CancelRequested()) task_.SetState(TaskState::CANCELLED, "offline localization cancelled");
-        else task_.SetFinished(bag_ok, bag_ok ? "offline localization finished" : "offline bag localization failed");
+        bool localization_ok = bag_ok;
+        if (bag_ok && localization_system_) {
+            const loc::LocalizationResult final_result =
+                localization_system_->GetLatestResult();
+            if (final_result.valid_) {
+                LOG(INFO) << "[offline localization] final estimator result"
+                          << ", stamp=" << final_result.timestamp_
+                          << ", position="
+                          << final_result.pose_.translation().transpose()
+                          << ", message=" << final_result.message_;
+            } else {
+                localization_ok = false;
+                LOG(ERROR) << "[offline localization] bag contained no valid "
+                              "localization result; check GNSS status, INS "
+                              "orientation and observation timestamps";
+            }
+        }
+        if (task_.CancelRequested()) {
+            task_.SetState(TaskState::CANCELLED,
+                           "offline localization cancelled");
+        } else {
+            task_.SetFinished(
+                localization_ok,
+                localization_ok
+                    ? "offline localization finished"
+                    : "offline localization produced no valid estimator result");
+        }
         LOG(INFO) << "[offline localization] bag processing finished";
     });
 }
@@ -833,7 +1025,7 @@ ServiceResult Lightning::FinishLocalization() {
         return {false, "no online localization task"};
     }
 
-    LOG(INFO) << "[结束定位] [01] 关闭Topic到定位队列的路由";
+    LOG(INFO) << "[结束定位] [01] 关闭Topic到定位latest槽位的输入";
     StopOnlineWorkerLocked(true);
     LOG(INFO) << "[结束定位] [02] 定位工作线程已经退出";
     ClearLocalizationSystemLocked();

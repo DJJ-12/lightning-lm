@@ -10,15 +10,17 @@
 #include <string>
 #include <thread>
 
+#include <geometry_msgs/msg/twist_with_covariance_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include "livox_ros_driver2/msg/custom_msg.hpp"
 
 #include "common/eigen_types.h"
-#include "common/localization_sensor_measurements.h"
 #include "core/localization/localization_diagnostic.h"
 #include "core/localization/localization_result.h"
 #include "modules/localizationSystem/localization_system.h"
@@ -35,7 +37,9 @@ enum class InputType {
     IMU,
     POINT_CLOUD2,
     LIVOX,
-    RTK_INS,
+    RTK_POSITION,
+    INS_ORIENTATION,
+    INS_VELOCITY,
     WHEEL_ODOMETRY
 };
 
@@ -48,8 +52,10 @@ struct InputMessage {
     sensor_msgs::msg::Imu::SharedPtr imu;
     sensor_msgs::msg::PointCloud2::SharedPtr cloud;
     livox_ros_driver2::msg::CustomMsg::SharedPtr livox;
-    RtkInsMeasurement rtk_ins;
-    WheelOdometryMeasurement wheel_odometry;
+    sensor_msgs::msg::NavSatFix::SharedPtr rtk_position;
+    sensor_msgs::msg::Imu::SharedPtr ins_orientation;
+    geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr ins_velocity;
+    nav_msgs::msg::Odometry::SharedPtr wheel_odometry;
 };
 
 struct ServiceResult {
@@ -89,8 +95,11 @@ class Lightning {
 
     // Topic callbacks only place data into these lightweight online buffers.
     void AcceptImu(const sensor_msgs::msg::Imu::SharedPtr& imu);
-    void AcceptRtkIns(const RtkInsMeasurement& measurement);
-    void AcceptWheelOdometry(const WheelOdometryMeasurement& measurement);
+    void AcceptRtkPosition(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
+    void AcceptInsOrientation(const sensor_msgs::msg::Imu::SharedPtr& orientation);
+    void AcceptInsVelocity(
+        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity);
+    void AcceptWheelOdometry(const nav_msgs::msg::Odometry::SharedPtr& odometry);
     void AcceptCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud,
                      const TopicInput::LidarReceiveInfo& receive_info);
     void AcceptLivox(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud,
@@ -121,7 +130,6 @@ class Lightning {
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr mapping_map_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr mapping_path_pub_;
     std::string yaml_path_;
-    modules::LocalizationSystem::Mode localization_fusion_mode_ = modules::LocalizationSystem::Mode::NDT_ONLY;
 
     mutable std::mutex control_mutex_;
     std::atomic_bool shutdown_{false};
@@ -140,12 +148,19 @@ class Lightning {
     InputMessage latest_lidar_;
     bool has_latest_lidar_ = false;
 
-    // Different sensors stay in different queues. LiDAR is latest-only for
-    // online realtime behavior; IMU/RTK/wheel keep every callback-delivered
-    // message until the worker consumes it.
-    std::deque<InputMessage> pending_imu_;
-    std::deque<InputMessage> pending_rtk_;
-    std::deque<InputMessage> pending_wheel_odometry_;
+    // Mapping alone retains every IMU sample. Every localization sensor uses
+    // one overwriteable slot so the worker always consumes its freshest value.
+    std::deque<InputMessage> pending_mapping_imu_;
+    InputMessage latest_localization_imu_;
+    bool has_latest_localization_imu_ = false;
+    InputMessage latest_rtk_position_;
+    bool has_latest_rtk_position_ = false;
+    InputMessage latest_ins_orientation_;
+    bool has_latest_ins_orientation_ = false;
+    InputMessage latest_ins_velocity_;
+    bool has_latest_ins_velocity_ = false;
+    InputMessage latest_wheel_odometry_;
+    bool has_latest_wheel_odometry_ = false;
 
     bool online_worker_running_ = false;
     bool online_worker_is_localization_ = false;
@@ -154,7 +169,9 @@ class Lightning {
     std::uint64_t online_lidar_received_ = 0;
     std::uint64_t online_lidar_overwritten_ = 0;
     std::uint64_t online_imu_received_ = 0;
-    std::uint64_t online_rtk_received_ = 0;
+    std::uint64_t online_rtk_position_received_ = 0;
+    std::uint64_t online_ins_orientation_received_ = 0;
+    std::uint64_t online_ins_velocity_received_ = 0;
     std::uint64_t online_wheel_odometry_received_ = 0;
 
     std::unique_ptr<modules::MappingSystem> mapping_system_;
