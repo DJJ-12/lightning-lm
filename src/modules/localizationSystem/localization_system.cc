@@ -4,9 +4,11 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include <Eigen/Cholesky>
+#include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
 #include <glog/logging.h>
 #include <rclcpp/node.hpp>
@@ -134,6 +136,120 @@ bool IsUsableCovariance(const loc::EKF::Matrix6d& covariance) {
     Eigen::LDLT<loc::EKF::Matrix6d> decomposition(symmetric);
     return decomposition.info() == Eigen::Success &&
            decomposition.isPositive();
+}
+
+double MahalanobisDistance(const Eigen::VectorXd& residual,
+                           const Eigen::MatrixXd& covariance) {
+    if (residual.size() == 0 || covariance.rows() != residual.size() ||
+        covariance.cols() != residual.size() || !residual.allFinite() ||
+        !covariance.allFinite()) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    const Eigen::MatrixXd symmetric =
+        0.5 * (covariance + covariance.transpose());
+    Eigen::LDLT<Eigen::MatrixXd> decomposition(symmetric);
+    if (decomposition.info() != Eigen::Success ||
+        !decomposition.isPositive()) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    const Eigen::VectorXd solved = decomposition.solve(residual);
+    if (decomposition.info() != Eigen::Success || !solved.allFinite()) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return residual.dot(solved);
+}
+
+void LogNdtRejectionDiagnostic(
+    const loc::LocalizationResult& result,
+    const loc::EKF::State& predicted,
+    const loc::EKF::Matrix6d& predicted_pose_covariance,
+    const loc::EKF::Matrix6d& measurement_covariance,
+    double mahalanobis_total,
+    bool covariance_from_hessian) {
+    const Eigen::Vector3d measured_rpy =
+        loc::EKF::RpyFromRotation(result.pose_.rotationMatrix());
+    Eigen::Matrix<double, 6, 1> residual;
+    residual.head<3>() =
+        result.pose_.translation() - predicted.position_map;
+    for (int axis = 0; axis < 3; ++axis) {
+        residual(3 + axis) = loc::EKF::WrapAngle(
+            measured_rpy(axis) - predicted.rpy_map(axis));
+    }
+
+    const loc::EKF::Matrix6d innovation_covariance =
+        predicted_pose_covariance + measurement_covariance;
+    const Eigen::Matrix<double, 6, 1> predicted_std =
+        predicted_pose_covariance.diagonal().cwiseMax(0.0).cwiseSqrt();
+    const Eigen::Matrix<double, 6, 1> measurement_std =
+        measurement_covariance.diagonal().cwiseMax(0.0).cwiseSqrt();
+    const Eigen::Matrix<double, 6, 1> innovation_std =
+        innovation_covariance.diagonal().cwiseMax(0.0).cwiseSqrt();
+
+    Eigen::SelfAdjointEigenSolver<loc::EKF::Matrix6d> measurement_solver(
+        measurement_covariance);
+    Eigen::SelfAdjointEigenSolver<loc::EKF::Matrix6d> innovation_solver(
+        innovation_covariance);
+    Eigen::Matrix<double, 6, 1> measurement_eigenvalues =
+        Eigen::Matrix<double, 6, 1>::Constant(
+            std::numeric_limits<double>::quiet_NaN());
+    if (measurement_solver.info() == Eigen::Success) {
+        measurement_eigenvalues = measurement_solver.eigenvalues();
+    }
+    Eigen::Matrix<double, 6, 1> innovation_eigenvalues =
+        Eigen::Matrix<double, 6, 1>::Constant(
+            std::numeric_limits<double>::quiet_NaN());
+    if (innovation_solver.info() == Eigen::Success) {
+        innovation_eigenvalues = innovation_solver.eigenvalues();
+    }
+
+    const Eigen::Vector2d residual_xy = residual.head<2>();
+    const Eigen::Matrix2d innovation_xy =
+        innovation_covariance.topLeftCorner<2, 2>();
+    const Eigen::Vector2d residual_roll_pitch = residual.segment<2>(3);
+    const Eigen::Matrix2d innovation_roll_pitch =
+        innovation_covariance.block<2, 2>(3, 3);
+    const double nis_xy =
+        MahalanobisDistance(residual_xy, innovation_xy);
+    const double nis_z = innovation_covariance(2, 2) > 0.0
+        ? residual(2) * residual(2) / innovation_covariance(2, 2)
+        : std::numeric_limits<double>::quiet_NaN();
+    const double nis_roll_pitch = MahalanobisDistance(
+        residual_roll_pitch, innovation_roll_pitch);
+    const double nis_yaw = innovation_covariance(5, 5) > 0.0
+        ? residual(5) * residual(5) / innovation_covariance(5, 5)
+        : std::numeric_limits<double>::quiet_NaN();
+    const double recomputed_total_nis =
+        MahalanobisDistance(residual, innovation_covariance);
+
+    // A compact line every ten rejected frames is enough to identify the bad
+    // dimension without flooding a full offline-bag run with 6-D matrices.
+    LOG_EVERY_N(WARNING, 10)
+        << "[LOCALIZATION_EKF][NDT_REJECT_DIAGNOSTIC] stamp="
+        << result.timestamp_
+        << ", filter_stamp=" << predicted.stamp
+        << ", observation_minus_filter_stamp="
+        << result.timestamp_ - predicted.stamp
+        << ", mahalanobis_total=" << mahalanobis_total
+        << ", recomputed_total_nis=" << recomputed_total_nis
+        << ", covariance_source="
+        << (covariance_from_hessian ? "hessian" : "fixed_fallback")
+        << ", predicted_position=" << predicted.position_map.transpose()
+        << ", measured_position=" << result.pose_.translation().transpose()
+        << ", residual_position=" << residual.head<3>().transpose()
+        << ", predicted_rpy_deg="
+        << (predicted.rpy_map / kDegToRad).transpose()
+        << ", measured_rpy_deg=" << (measured_rpy / kDegToRad).transpose()
+        << ", residual_rpy_deg="
+        << (residual.tail<3>() / kDegToRad).transpose()
+        << ", predicted_pose_std=" << predicted_std.transpose()
+        << ", ndt_measurement_std=" << measurement_std.transpose()
+        << ", innovation_std=" << innovation_std.transpose()
+        << ", block_nis_xy=" << nis_xy
+        << ", block_nis_z=" << nis_z
+        << ", block_nis_roll_pitch=" << nis_roll_pitch
+        << ", block_nis_yaw=" << nis_yaw
+        << ", ndt_cov_eigenvalues=" << measurement_eigenvalues.transpose()
+        << ", innovation_eigenvalues=" << innovation_eigenvalues.transpose();
 }
 
 }  // namespace
@@ -305,7 +421,6 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
         [this](const loc::LocalizationResult& result) {
             HandleNdtResult(result);
         });
-    has_initial_guess_ = !RequiresInitialGuess();
     if (node) SetupPublishers(node);
     LOG(INFO) << "[LOCALIZATION_SYSTEM] mode=" << ModeToString(mode_)
               << ", filter=3d_pose_planar_motion_12_state"
@@ -313,7 +428,8 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
               << ", rtk_velocity=" << UsesRtkVelocity()
               << ", wheel_input_reserved=" << UsesWheelOdometry()
               << ", imu_input_reserved=" << (!imu_topic_.empty())
-              << " (not fused into localization EKF)";
+              << " (not fused into localization EKF)"
+              << ", rtk_z_std_floor_m=" << rtk_position_std_z_;
     return true;
 }
 
@@ -336,7 +452,23 @@ bool LocalizationSystem::SetMapPath(const std::string& map_path) {
     if (!loc_ || map_path.empty()) return false;
     map_path_ = map_path;
     map_ready_ = loc_->Init(yaml_path_, map_path_);
-    has_initial_guess_ = !RequiresInitialGuess();
+    if (map_ready_ && UsesLidar() && !UsesRtk()) {
+        // A map built from this recording starts at map-frame identity. Seed
+        // the existing NDT initialization path once so LiDAR-only offline
+        // localization starts immediately after the map is loaded. This does
+        // not alter NDT registration or feed EKF predictions into NDT.
+        const SE3 map_origin(
+            Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero());
+        if (!loc_->SetExternalPose(
+                map_origin.unit_quaternion(), map_origin.translation())) {
+            LOG(ERROR) << "[LOCALIZATION_SYSTEM] failed to set the automatic "
+                          "LiDAR-only NDT initial pose at map origin";
+            map_ready_ = false;
+            return false;
+        }
+        LOG(INFO) << "[LOCALIZATION_SYSTEM] LiDAR-only NDT initial pose set "
+                     "to map origin; no set_location call is required";
+    }
     if (map_ready_) {
         LOG(INFO) << "[LOCALIZATION_SYSTEM] map and visualization initialized"
                   << ", path=" << map_path_
@@ -355,12 +487,10 @@ bool LocalizationSystem::SetInitialGuess(const SE3& init_pose, bool* initialized
         // otherwise an offline bag would request a multi-year prediction.
         manual_initial_pose_ = init_pose;
         manual_initial_guess_pending_ = true;
-        has_initial_guess_ = true;
         return true;
     }
     if (!loc_ || !map_ready_) return false;
     const bool accepted = loc_->SetExternalPose(init_pose.unit_quaternion(), init_pose.translation());
-    has_initial_guess_ = accepted;
     if (accepted) {
         std::lock_guard<std::mutex> lock(filter_mutex_);
         ekf_.Reset();
@@ -372,27 +502,11 @@ bool LocalizationSystem::SetInitialGuess(const SE3& init_pose, bool* initialized
 
 loc::LocalizationFrameOutcome LocalizationSystem::ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud, const loc::LocalizationInputDiagnostic& diagnostic) {
     if (!UsesLidar() || !loc_ || !map_ready_) return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
-    if (cloud) {
-        const double stamp = rclcpp::Time(cloud->header.stamp).seconds();
-        last_lidar_stamp_ = stamp;
-        std::lock_guard<std::mutex> lock(filter_mutex_);
-        if (ekf_.Initialized() && ekf_.PredictTo(stamp)) {
-            loc_->SetPredictionPose(ekf_.Pose());
-        }
-    }
     return loc_->ProcessLidarMsg(cloud, diagnostic);
 }
 
 loc::LocalizationFrameOutcome LocalizationSystem::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud, const loc::LocalizationInputDiagnostic& diagnostic) {
     if (!UsesLidar() || !loc_ || !map_ready_) return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
-    if (cloud) {
-        const double stamp = rclcpp::Time(cloud->header.stamp).seconds();
-        last_lidar_stamp_ = stamp;
-        std::lock_guard<std::mutex> lock(filter_mutex_);
-        if (ekf_.Initialized() && ekf_.PredictTo(stamp)) {
-            loc_->SetPredictionPose(ekf_.Pose());
-        }
-    }
     return loc_->ProcessLivoxLidarMsg(cloud, diagnostic);
 }
 
@@ -412,6 +526,22 @@ void LocalizationSystem::ProcessRtkPosition(
         return;
     }
     const double stamp = rclcpp::Time(fix->header.stamp).seconds();
+    Eigen::Vector3d receiver_std_enu;
+    receiver_std_enu <<
+        std::sqrt(std::max(0.0, fix->position_covariance[0])),
+        std::sqrt(std::max(0.0, fix->position_covariance[4])),
+        std::sqrt(std::max(0.0, fix->position_covariance[8]));
+    LOG_EVERY_N(INFO, 50)
+        << "[LOCALIZATION_EKF][GNSS_DIAGNOSTIC] stamp=" << stamp
+        << ", lat_lon_alt=" << fix->latitude << "," << fix->longitude
+        << "," << fix->altitude
+        << ", receiver_covariance_type="
+        << static_cast<int>(fix->position_covariance_type)
+        << ", receiver_std_enu=" << receiver_std_enu.transpose()
+        << ", antenna_position_map=" << position_map.transpose()
+        << ", observation_std_map="
+        << covariance_map.diagonal().cwiseMax(0.0).cwiseSqrt().transpose()
+        << ", configured_z_std_floor_m=" << rtk_position_std_z_;
     AppendDebugPath(
         &raw_rtk_path_, raw_rtk_path_pub_, stamp, position_map.head<2>(), 0.0);
     // Green UI trajectory: the raw GNSS antenna position after coordinate
@@ -493,10 +623,28 @@ void LocalizationSystem::ProcessImu(const sensor_msgs::msg::Imu::SharedPtr& imu)
 
 void LocalizationSystem::HandleNdtResult(const loc::LocalizationResult& result) {
     if (result.valid_) {
+        const Eigen::Vector2d ndt_position_map =
+            result.pose_.translation().head<2>();
         AppendDebugPath(
             &raw_ndt_path_, raw_ndt_path_pub_, result.timestamp_,
-            result.pose_.translation().head<2>(), PoseYaw(result.pose_));
+            ndt_position_map, PoseYaw(result.pose_));
+
+        // Yellow UI trajectory is the raw NDT output. This happens before the
+        // EKF gate so a rejected NDT observation is still visible.
+        if (loc_) {
+            loc_->UpdateNdtObservationVisualization(ndt_position_map);
+        }
     }
+
+    // With LiDAR as the only active localization observation, preserve the
+    // original NDT localization architecture: NDT is the final result and its
+    // own constant-velocity pose history supplies the next initial guess.
+    // There is no reason to route a single observation source through the EKF.
+    if (UsesLidar() && !UsesRtk() && !UsesRtkVelocity()) {
+        if (result.valid_) PublishResult(result);
+        return;
+    }
+
     std::lock_guard<std::mutex> lock(filter_mutex_);
     if (!result.valid_) {
         if (ekf_.Initialized() && ekf_.PredictTo(result.timestamp_)) {
@@ -519,17 +667,23 @@ void LocalizationSystem::HandleNdtResult(const loc::LocalizationResult& result) 
         loc::EKF::Matrix6d covariance = FixedPoseNoise(
             ndt_position_std_x_, ndt_position_std_y_, ndt_position_std_z_,
             ndt_orientation_std_);
+        bool covariance_from_hessian = false;
         if (result.covariance_valid_ &&
             IsUsableCovariance(result.pose_covariance_)) {
             covariance = 0.5 *
                 (result.pose_covariance_ + result.pose_covariance_.transpose());
+            covariance_from_hessian = true;
         }
         double distance = 0.0;
         pose_accepted = ekf_.UpdateNdtPose(
             result.timestamp_, result.pose_, covariance, -1.0, &distance);
         if (!pose_accepted) {
-            LOG(WARNING) << "[LOCALIZATION_EKF] NDT pose rejected, mahalanobis="
-                         << distance;
+            // UpdateNdtPose predicts before applying its gate. A rejected
+            // observation therefore leaves the EKF at the exact predicted
+            // state used to compute this innovation.
+            LogNdtRejectionDiagnostic(
+                result, ekf_.GetState(), ekf_.PoseCovariance(), covariance,
+                distance, covariance_from_hessian);
         }
     }
     if (pose_accepted) {
@@ -688,6 +842,19 @@ bool LocalizationSystem::PositionToMap(
         (*covariance_map)(2, 2) =
             rtk_position_std_z_ * rtk_position_std_z_;
     }
+
+    // GNSS altitude and the LiDAR map's vertical datum/tracking origin can
+    // differ far more than the receiver's millimetre-level internal standard
+    // deviation. Apply the configured z standard deviation as a mandatory
+    // floor even when NavSatFix reports a valid covariance. Clearing x/z and
+    // y/z correlations makes the deliberately weak height observation unable
+    // to distort horizontal positioning through a vendor cross term.
+    const double vertical_variance = std::max(
+        (*covariance_map)(2, 2),
+        rtk_position_std_z_ * rtk_position_std_z_);
+    covariance_map->row(2).setZero();
+    covariance_map->col(2).setZero();
+    (*covariance_map)(2, 2) = vertical_variance;
     return position_map->allFinite() && IsUsableCovariance(*covariance_map);
 }
 
@@ -751,9 +918,13 @@ void LocalizationSystem::TryInitializeEkf() {
     const Eigen::Vector3d tracking_position_map =
         initial_sensor_position_map_ -
         loc::EKF::RotationFromRpy(initial_rpy) * lever_arm;
-    const loc::EKF::Covariance covariance = InitialEkfCovariance(
+    loc::EKF::Covariance covariance = InitialEkfCovariance(
         initial_position_std_, kPi, initial_velocity_std_,
         initial_yaw_rate_std_);
+    // RTK initializes x/y, but its altitude is intentionally weak. Give the
+    // first NDT observation enough prior uncertainty to establish map z.
+    covariance(loc::EKF::kPositionZ, loc::EKF::kPositionZ) =
+        rtk_position_std_z_ * rtk_position_std_z_;
     if (ekf_.Initialize(
             stamp, tracking_position_map, initial_rpy,
             Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), covariance)) {
@@ -767,7 +938,6 @@ void LocalizationSystem::TryInitializeEkf() {
                 ekf_.Reset();
                 return;
             }
-            has_initial_guess_ = true;
         }
         LOG(INFO) << "[LOCALIZATION_EKF] initialized from RTK position"
                   << ", stamp=" << stamp
@@ -844,8 +1014,9 @@ void LocalizationSystem::PublishResult(const loc::LocalizationResult& input) {
     if (result.frame_id_.empty()) result.frame_id_ = output_frame_;
     { std::lock_guard<std::mutex> lock(result_mutex_); latest_result_ = result; }
     if (!result.valid_) return;
-    // Pangolin receives the same final estimator result as ROS publishers.
-    // Every localization mode visualizes the EKF state, never raw NDT output.
+    // The red trajectory receives exactly the same final localization result
+    // as the ROS publishers: raw NDT in LiDAR-only mode, EKF in fusion mode.
+    // Raw RTK and raw NDT observations use independent green/yellow paths.
     if (loc_) loc_->UpdateVisualization(result);
     AppendPath(result);
     geometry_msgs::msg::TransformStamped transform = result.ToGeoMsg();
@@ -989,7 +1160,7 @@ void LocalizationSystem::Reset() {
     initial_yaw_rate_std_ = 0.5;
     rtk_position_std_x_ = 0.05;
     rtk_position_std_y_ = 0.05;
-    rtk_position_std_z_ = 0.10;
+    rtk_position_std_z_ = 100.0;
     rtk_velocity_std_x_ = 0.10;
     rtk_velocity_std_y_ = 0.10;
     ndt_position_std_x_ = 0.10;
@@ -1000,10 +1171,8 @@ void LocalizationSystem::Reset() {
     initial_position_stamp_ = 0.0;
     initial_sensor_position_map_.setZero();
     map_ready_ = false;
-    has_initial_guess_ = false;
     manual_initial_guess_pending_ = false;
     manual_initial_pose_ = SE3();
-    last_lidar_stamp_ = -1.0;
     path_ = nav_msgs::msg::Path();
     {
         std::lock_guard<std::mutex> lock(debug_path_mutex_);

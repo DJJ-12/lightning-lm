@@ -45,6 +45,9 @@ class PangolinWindow {
     /// 增加一帧已经转换到map坐标系的原始RTK位置观测
     void UpdateRtkPosition(const Eigen::Vector2d& position_map);
 
+    /// 增加一帧原始NDT位置观测
+    void UpdateNdtPosition(const Eigen::Vector2d& position_map);
+
     /// 更新最新的pose
     void UpdateRecentPose(const SE3& pose);
 

@@ -65,9 +65,10 @@ class LocalizationSystem {
     // LiDAR needs the map for NDT; the UI also needs it for visualization.
     bool RequiresMap() const { return UsesLidar() || with_ui_; }
     bool RequiresInitialGuess() const {
-        // A GNSS position establishes the absolute map position. Initial 3-D
-        // orientation is zero by definition and is corrected by NDT pose.
-        return !UsesRtk();
+        // GNSS initializes fusion mode. LiDAR-only mode is initialized once
+        // at the map origin by SetMapPath(), so neither path needs another
+        // service call before online/offline processing can start.
+        return !UsesRtk() && !UsesLidar();
     }
     bool ReadyWithoutMap() const { return !RequiresMap(); }
     static Mode ModeFromString(const std::string& value);
@@ -115,10 +116,8 @@ class LocalizationSystem {
     std::string wheel_odometry_topic_;
     bool with_ui_ = false;
     bool map_ready_ = false;
-    bool has_initial_guess_ = false;
     bool manual_initial_guess_pending_ = false;
     SE3 manual_initial_pose_;
-    double last_lidar_stamp_ = -1.0;
 
     std::shared_ptr<loc::Localization> loc_;
     mutable std::mutex filter_mutex_;
@@ -132,7 +131,9 @@ class LocalizationSystem {
     double initial_yaw_rate_std_ = 0.5;
     double rtk_position_std_x_ = 0.05;
     double rtk_position_std_y_ = 0.05;
-    double rtk_position_std_z_ = 0.10;
+    // Mandatory GNSS altitude uncertainty floor. The map-frame height is
+    // intentionally established by NDT rather than receiver altitude.
+    double rtk_position_std_z_ = 100.0;
     double rtk_velocity_std_x_ = 0.10;
     double rtk_velocity_std_y_ = 0.10;
     double ndt_position_std_x_ = 0.10;

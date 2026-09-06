@@ -54,7 +54,9 @@ class PangolinWindowImpl {
     std::mutex mtx_map_cloud_;
     std::mutex mtx_current_scan_;
     std::mutex mtx_nav_state_;
-    std::mutex mtx_rtk_position_;
+    // These queues only bridge sensor callbacks to the UI render thread. They
+    // never participate in localization scheduling or EKF computation.
+    std::mutex mtx_observation_visualization_;
     std::mutex mtx_gps_pose_;
     std::mutex mtx_loop_info_;
 
@@ -65,7 +67,6 @@ class PangolinWindowImpl {
     std::atomic<bool> cloud_global_need_update_;   // 全局点云是否需要更新
     std::atomic<bool> cloud_dynamic_need_update_;  // 动态点云是否需要更新
     std::atomic<bool> kf_result_need_update_;      // 卡尔曼滤波结果
-    std::atomic<bool> rtk_position_need_update_;   // 原始RTK位置观测
     std::atomic<bool> current_scan_need_update_;   // 更新当前扫描
     std::atomic<bool> lidarloc_need_update_;       // 雷达位置？
 
@@ -83,6 +84,7 @@ class PangolinWindowImpl {
     /// 滤波器状态
     std::deque<NavState> pending_nav_states_;
     std::deque<Vec3d> pending_rtk_positions_;
+    std::deque<Vec3d> pending_ndt_positions_;
     Sophus::SE3d pose_;
     double confidence_;
     Vec3d vel_;
@@ -109,7 +111,7 @@ class PangolinWindowImpl {
     bool UpdateGlobalMap();
     bool UpdateDynamicMap();
     bool UpdateState();
-    bool UpdateRtkTrajectory();
+    bool UpdateObservationVisualization();
     bool UpdateCurrentScan();
 
     void RenderLabels();
@@ -152,9 +154,10 @@ class PangolinWindowImpl {
     std::deque<std::pair<int, int>> loop_info_ui_;
 
     // trajectory
-    std::shared_ptr<ui::UiTrajectory> traj_scans_ = nullptr;          // 激光扫描轨迹（黄色）
-    std::shared_ptr<ui::UiTrajectory> traj_newest_state_ = nullptr;   // 最终EKF轨迹（红色）
+    std::shared_ptr<ui::UiTrajectory> traj_scans_ = nullptr;           // 建图扫描轨迹
+    std::shared_ptr<ui::UiTrajectory> traj_newest_state_ = nullptr;    // 最终定位轨迹（红色）
     std::shared_ptr<ui::UiTrajectory> traj_rtk_observation_ = nullptr; // 原始RTK观测（绿色）
+    std::shared_ptr<ui::UiTrajectory> traj_ndt_observation_ = nullptr; // 原始NDT观测（黄色）
 
     // 滤波器状态相关 Data logger object
     pangolin::DataLog log_vel_;           // odom frame下的速度

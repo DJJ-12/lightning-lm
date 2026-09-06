@@ -139,8 +139,6 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     init_in_progress_ = false;
     pending_initial_pose_ = Eigen::Matrix4d::Identity();
     latest_pose_ = Eigen::Matrix4d::Identity();
-    prediction_pose_ = Eigen::Matrix4d::Identity();
-    has_prediction_pose_ = false;
     latest_cloud_timestamp_ = 0.0;
     has_last_processed_cloud_timestamp_ = false;
     last_processed_cloud_timestamp_ = 0.0;
@@ -498,17 +496,13 @@ LocalizationFrameOutcome Localization::ProcessLocalizationCloud(const LocCloudFr
     XYZCloud::Ptr cloud_reg(new XYZCloud);
     robot_localizer::LocalizationQuality quality;
 
-    Eigen::Matrix4d external_initial_guess = Eigen::Matrix4d::Identity();
-    const Eigen::Matrix4d* external_initial_guess_ptr = nullptr;
-    {
-        UL lock(global_mutex_);
-        if (has_prediction_pose_) {
-            external_initial_guess = prediction_pose_;
-            external_initial_guess_ptr = &external_initial_guess;
-            has_prediction_pose_ = false;
-        }
-    }
-    const bool reliable = localizer_.RegisterFrame(current_cloud, cloud_reg, pose, quality, frame.diagnostic.pipeline_sequence, frame.timestamp, external_initial_guess_ptr);
+    // After the one-time absolute initialization, NDT keeps its own
+    // last/last-last pose history as the next-frame initial guess. EKF output
+    // is deliberately not fed back here; NDT is an independent observation
+    // source for the fusion filter.
+    const bool reliable = localizer_.RegisterFrame(
+        current_cloud, cloud_reg, pose, quality,
+        frame.diagnostic.pipeline_sequence, frame.timestamp);
     const double ndt_ms = (SteadySeconds() - ndt_begin_steady_sec) * 1000.0;
     diagnostic_max_ndt_ms_ = std::max(diagnostic_max_ndt_ms_, ndt_ms);
     ++diagnostic_ndt_frames_;
@@ -735,8 +729,6 @@ bool Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
             localization_inited_ = false;
             init_in_progress_ = false;
             latest_pose_ = Eigen::Matrix4d::Identity();
-            prediction_pose_ = Eigen::Matrix4d::Identity();
-            has_prediction_pose_ = false;
             has_last_processed_cloud_timestamp_ = false;
             last_processed_cloud_timestamp_ = 0.0;
         }
@@ -757,13 +749,6 @@ bool Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
               << ", z=" << init_guess(2, 3);
     return true;
 }
-
-void Localization::SetPredictionPose(const SE3& pose) {
-    UL lock(global_mutex_);
-    prediction_pose_ = pose.matrix();
-    has_prediction_pose_ = true;
-}
-
 
 void Localization::PublishResult(const LocalizationResult& result) {
     {
@@ -799,6 +784,12 @@ void Localization::UpdateRtkObservationVisualization(
     const Eigen::Vector2d& position_map) {
     if (!ui_ || !position_map.allFinite()) return;
     ui_->UpdateRtkPosition(position_map);
+}
+
+void Localization::UpdateNdtObservationVisualization(
+    const Eigen::Vector2d& position_map) {
+    if (!ui_ || !position_map.allFinite()) return;
+    ui_->UpdateNdtPosition(position_map);
 }
 
 SE3 Localization::Matrix4dToSE3(const Eigen::Matrix4d& pose) {
