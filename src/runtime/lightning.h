@@ -53,7 +53,7 @@ struct InputMessage {
     sensor_msgs::msg::PointCloud2::SharedPtr cloud;
     livox_ros_driver2::msg::CustomMsg::SharedPtr livox;
     sensor_msgs::msg::NavSatFix::SharedPtr rtk_position;
-    sensor_msgs::msg::Imu::SharedPtr ins_orientation;
+    geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr ins_orientation;
     geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr ins_velocity;
     nav_msgs::msg::Odometry::SharedPtr wheel_odometry;
 };
@@ -96,7 +96,8 @@ class Lightning {
     // Topic callbacks only place data into these lightweight online buffers.
     void AcceptImu(const sensor_msgs::msg::Imu::SharedPtr& imu);
     void AcceptRtkPosition(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
-    void AcceptInsOrientation(const sensor_msgs::msg::Imu::SharedPtr& orientation);
+    void AcceptInsOrientation(
+        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation);
     void AcceptInsVelocity(
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity);
     void AcceptWheelOdometry(const nav_msgs::msg::Odometry::SharedPtr& odometry);

@@ -35,7 +35,7 @@ class TopicInput {
     using RtkPositionCallback = std::function<void(
         const sensor_msgs::msg::NavSatFix::SharedPtr&)>;
     using InsOrientationCallback = std::function<void(
-        const sensor_msgs::msg::Imu::SharedPtr&)>;
+        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr&)>;
     using InsVelocityCallback = std::function<void(
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr&)>;
     using WheelOdometryCallback = std::function<void(
@@ -96,7 +96,8 @@ class TopicInput {
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_sub_;
     rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr rtk_fix_sub_;
-    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr rtk_orientation_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr
+        rtk_orientation_sub_;
     rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr
         rtk_velocity_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_odometry_sub_;

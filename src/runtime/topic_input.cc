@@ -195,10 +195,11 @@ bool TopicInput::Start(const std::string& yaml_path,
 
     if (ins_orientation_cb_ && !rtk_orientation_topic.empty()) {
         rtk_orientation_sub_ =
-            node_->create_subscription<sensor_msgs::msg::Imu>(
+            node_->create_subscription<
+                geometry_msgs::msg::TwistWithCovarianceStamped>(
                 rtk_orientation_topic,
                 latest_observation_qos,
-                [this](sensor_msgs::msg::Imu::SharedPtr msg) {
+                [this](geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg) {
                     std::lock_guard<std::mutex> callback_gate(
                         callback_gate_mutex_);
                     if (!input_enabled_.load(std::memory_order_acquire) ||

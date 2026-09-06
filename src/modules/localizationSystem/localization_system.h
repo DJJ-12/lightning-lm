@@ -46,7 +46,8 @@ class LocalizationSystem {
     // Each standard ROS observation enters the filter independently. No RTK
     // synchronization packet or input history is maintained in this module.
     void ProcessRtkPosition(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
-    void ProcessInsOrientation(const sensor_msgs::msg::Imu::SharedPtr& orientation);
+    void ProcessInsOrientation(
+        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation);
     void ProcessInsVelocity(
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity);
     void ProcessWheelOdometry(const nav_msgs::msg::Odometry::SharedPtr& odometry);
@@ -83,8 +84,9 @@ class LocalizationSystem {
     bool PositionToMap(const sensor_msgs::msg::NavSatFix& fix,
                        Eigen::Vector2d* position_map,
                        Eigen::Matrix2d* covariance_map) const;
-    bool OrientationToMapYaw(const sensor_msgs::msg::Imu& orientation,
-                             double* yaw_map, double* variance) const;
+    bool OrientationToMapYaw(
+        const geometry_msgs::msg::TwistWithCovarianceStamped& orientation,
+        double* yaw_map, double* variance) const;
     bool VelocityToMap(
         const geometry_msgs::msg::TwistWithCovarianceStamped& velocity,
         Eigen::Vector2d* velocity_map,
@@ -155,6 +157,9 @@ class LocalizationSystem {
     Eigen::Matrix3d map_from_true_enu_rotation_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d reference_gnss_utm_ = Eigen::Vector3d::Zero();
     Eigen::Vector3d reference_gnss_map_ = Eigen::Vector3d::Zero();
+    // Course of the map +X axis: true north is zero and clockwise is
+    // positive. This is exactly localization.map_from_enu.yaw, in radians.
+    double map_reference_course_rad_ = 0.0;
 
     // RTK-only initialization keeps one latest value per observation type. It
     // is state, not a pending-message queue.

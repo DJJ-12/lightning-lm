@@ -67,7 +67,7 @@ bool Lightning::Init(rclcpp::Node::SharedPtr node, const std::string& yaml_path)
             [this](const sensor_msgs::msg::NavSatFix::SharedPtr& fix) {
                 AcceptRtkPosition(fix);
             },
-            [this](const sensor_msgs::msg::Imu::SharedPtr& orientation) {
+            [this](const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation) {
                 AcceptInsOrientation(orientation);
             },
             [this](const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity) {
@@ -259,7 +259,7 @@ int LocalizationInputPriority(InputType type) {
 }
 
 void Lightning::AcceptInsOrientation(
-    const sensor_msgs::msg::Imu::SharedPtr& orientation) {
+    const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation) {
     if (!orientation) return;
     InputMessage input;
     input.receive_steady_sec = RuntimeSteadySeconds();
@@ -962,7 +962,7 @@ void Lightning::StartBagLocalizationTaskLocked(const std::string& bag_path) {
                 input.rtk_position = fix;
                 ProcessLocalizationInput(input);
             },
-            [this](const sensor_msgs::msg::Imu::SharedPtr& orientation) {
+            [this](const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation) {
                 InputMessage input;
                 input.header_stamp = rclcpp::Time(orientation->header.stamp).seconds();
                 input.type = InputType::INS_ORIENTATION;

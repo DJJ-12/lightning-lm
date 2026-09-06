@@ -27,7 +27,7 @@ class BagInput {
     using RtkPositionCallback = std::function<void(
         const sensor_msgs::msg::NavSatFix::SharedPtr&)>;
     using InsOrientationCallback = std::function<void(
-        const sensor_msgs::msg::Imu::SharedPtr&)>;
+        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr&)>;
     using InsVelocityCallback = std::function<void(
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr&)>;
     using WheelOdometryCallback = std::function<void(

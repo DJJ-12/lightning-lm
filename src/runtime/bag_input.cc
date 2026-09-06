@@ -113,10 +113,11 @@ bool BagInput::Run(const std::string& bag_path, const std::string& yaml_path,
     }
 
     if (!rtk_orientation_topic.empty() && ins_orientation_cb) {
-        rosbag.AddImuHandle(
+        rosbag.AddTwistHandle(
             rtk_orientation_topic,
             [ins_orientation_cb, progress_cb, cancel_requested, &progress](
-                sensor_msgs::msg::Imu::SharedPtr msg) -> bool {
+                geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg)
+                -> bool {
                 if (cancel_requested && cancel_requested()) return false;
                 ins_orientation_cb(msg);
                 ++progress.processed_frames;

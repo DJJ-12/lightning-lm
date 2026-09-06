@@ -29,20 +29,21 @@ std::string ReadTopic(const YAML::Node& common, const char* name) {
         : std::string();
 }
 
-Eigen::Matrix3d MapFromTrueEnuRotation(
-    double yaw_from_true_north_ccw_degrees) {
-    const double yaw_from_true_north_ccw =
-        yaw_from_true_north_ccw_degrees * kDegToRad;
-    const double sine = std::sin(yaw_from_true_north_ccw);
-    const double cosine = std::cos(yaw_from_true_north_ccw);
+Eigen::Matrix3d MapFromTrueEnuRotation(double course_degrees) {
+    const double course = course_degrees * kDegToRad;
+    const double sine = std::sin(course);
+    const double cosine = std::cos(course);
 
-    // The map +X axis is yaw_from_true_north_ccw counterclockwise from true
-    // north, so its standard ENU yaw (counterclockwise from east) is
-    // yaw_from_true_north_ccw + 90 deg. The matrix below is the inverse basis
-    // matrix: it converts true-ENU coordinate values into map coordinates.
+    // course is measured clockwise from true north to the map +X axis.
+    // Therefore map +X has standard ENU yaw (90 deg - course). Coordinate
+    // values are converted by the inverse basis rotation:
+    //
+    //   R_map_true_enu = Rz(course - 90 deg)
+    //                  = [ sin(course)   cos(course)
+    //                     -cos(course)   sin(course) ].
     Eigen::Matrix3d rotation;
-    rotation << -sine, cosine, 0.0,
-                -cosine, -sine, 0.0,
+    rotation << sine, cosine, 0.0,
+                -cosine, sine, 0.0,
                0.0, 0.0, 1.0;
     return rotation;
 }
@@ -439,7 +440,7 @@ void LocalizationSystem::ProcessRtkPosition(
 }
 
 void LocalizationSystem::ProcessInsOrientation(
-    const sensor_msgs::msg::Imu::SharedPtr& orientation) {
+    const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation) {
     if (!UsesInsOrientation() || !orientation) return;
 
     double yaw_map = 0.0;
@@ -628,13 +629,12 @@ bool LocalizationSystem::InitializeFixedMapTransform(
     const double altitude_m = map_from_enu["alt"].as<double>();
     const double pitch_deg = map_from_enu["pitch"].as<double>();
     const double roll_deg = map_from_enu["roll"].as<double>();
-    // `yaw` is the counterclockwise angle from true north to the map +X axis.
-    const double yaw_from_true_north_ccw_deg =
-        map_from_enu["yaw"].as<double>();
+    // `yaw` is the clockwise course from true north to the map +X axis.
+    const double map_course_deg = map_from_enu["yaw"].as<double>();
     if (!std::isfinite(latitude_deg) || !std::isfinite(longitude_deg) ||
         !std::isfinite(altitude_m) || !std::isfinite(pitch_deg) ||
         !std::isfinite(roll_deg) ||
-        !std::isfinite(yaw_from_true_north_ccw_deg) ||
+        !std::isfinite(map_course_deg) ||
         latitude_deg < -90.0 || latitude_deg > 90.0 ||
         longitude_deg < -180.0 || longitude_deg > 180.0) {
         LOG(ERROR) << "[LOCALIZATION_EKF] invalid fixed map reference";
@@ -653,11 +653,11 @@ bool LocalizationSystem::InitializeFixedMapTransform(
         return false;
     }
 
-    // The map +X axis is (yaw + 90 deg) counterclockwise from ENU east.
-    // R_map_true_enu converts coordinate values, so it is the inverse of that
-    // axis rotation: R_map_true_enu = Rz(-(yaw + 90 deg)).
-    map_from_true_enu_rotation_ =
-        MapFromTrueEnuRotation(yaw_from_true_north_ccw_deg);
+    // map_from_enu.yaw and every INS course use the same convention: true
+    // north is zero and clockwise is positive. At the reference instant the
+    // vehicle/map +X course is C0, so R_map_true_enu = Rz(C0 - 90 deg).
+    map_reference_course_rad_ = map_course_deg * kDegToRad;
+    map_from_true_enu_rotation_ = MapFromTrueEnuRotation(map_course_deg);
     const double map_x_yaw_in_true_enu = std::atan2(
         map_from_true_enu_rotation_(0, 1),
         map_from_true_enu_rotation_(0, 0));
@@ -691,8 +691,8 @@ bool LocalizationSystem::InitializeFixedMapTransform(
               << ", reference_gnss_map=" << reference_gnss_map_.transpose()
               << ", reference_roll_deg=" << roll_deg
               << ", reference_pitch_deg=" << pitch_deg
-              << ", yaw_from_true_north_ccw_deg="
-              << yaw_from_true_north_ccw_deg
+              << ", map_course_from_true_north_clockwise_deg="
+              << map_course_deg
               << ", map_x_yaw_in_true_enu_deg="
               << map_x_yaw_in_true_enu / kDegToRad
               << ", map_from_true_enu_yaw_deg="
@@ -761,33 +761,35 @@ bool LocalizationSystem::PositionToMap(
 }
 
 bool LocalizationSystem::OrientationToMapYaw(
-    const sensor_msgs::msg::Imu& orientation,
+    const geometry_msgs::msg::TwistWithCovarianceStamped& orientation,
     double* yaw_map, double* variance) const {
-    if (!yaw_map || !variance || !map_from_enu_ready_ ||
-        orientation.orientation_covariance[0] < 0.0) {
+    if (!yaw_map || !variance || !map_from_enu_ready_) {
         return false;
     }
     const double stamp = rclcpp::Time(orientation.header.stamp).seconds();
-    Eigen::Quaterniond quaternion(
-        orientation.orientation.w,
-        orientation.orientation.x,
-        orientation.orientation.y,
-        orientation.orientation.z);
-    if (!std::isfinite(stamp) || !quaternion.coeffs().allFinite() ||
-        quaternion.squaredNorm() < 1e-12) {
+    // This topic deliberately uses TwistWithCovarianceStamped as a
+    // covariance-bearing container for attitude angles, not velocities:
+    // angular.x=roll, angular.y=pitch, angular.z=course, all in radians.
+    // Course is measured clockwise from true north.
+    const double roll = orientation.twist.twist.angular.x;
+    const double pitch = orientation.twist.twist.angular.y;
+    const double course = orientation.twist.twist.angular.z;
+    if (!std::isfinite(stamp) || !std::isfinite(roll) ||
+        !std::isfinite(pitch) || !std::isfinite(course)) {
         return false;
     }
-    quaternion.normalize();
-    const Eigen::Matrix3d rotation_map_tracking =
-        map_from_true_enu_rotation_ * quaternion.toRotationMatrix();
-    *yaw_map = PoseYaw(SE3(Eigen::Quaterniond(rotation_map_tracking),
-                           Eigen::Vector3d::Zero()));
-    const double message_variance = orientation.orientation_covariance[8];
+
+    // C0 is the clockwise course of map +X and Ck is the current clockwise
+    // vehicle course. ROS/map yaw is counterclockwise, hence psi=C0-Ck.
+    *yaw_map = std::atan2(
+        std::sin(map_reference_course_rad_ - course),
+        std::cos(map_reference_course_rad_ - course));
+    const double message_variance = orientation.twist.covariance[35];
     *variance = std::isfinite(message_variance) && message_variance > 0.0
         ? message_variance
         : ins_yaw_std_ * ins_yaw_std_;
-    return rotation_map_tracking.allFinite() && std::isfinite(*yaw_map) &&
-           std::isfinite(*variance) && *variance > 0.0;
+    return std::isfinite(*yaw_map) && std::isfinite(*variance) &&
+           *variance > 0.0;
 }
 
 bool LocalizationSystem::VelocityToMap(
@@ -1144,6 +1146,7 @@ void LocalizationSystem::Reset() {
     map_from_true_enu_rotation_ = Eigen::Matrix3d::Identity();
     reference_gnss_utm_ = Eigen::Vector3d::Zero();
     reference_gnss_map_ = Eigen::Vector3d::Zero();
+    map_reference_course_rad_ = 0.0;
     rtk_ins_lever_arm_tracking_ = Eigen::Vector3d::Zero();
     initial_position_std_ = 0.5;
     initial_yaw_std_ = 3.0 * kDegToRad;
