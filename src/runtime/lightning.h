@@ -90,6 +90,7 @@ class Lightning {
    private:
     bool CanChangeModeLocked() const;
     bool EnsureLocalizationSystemLocked();
+    bool SetOfflineLocalizationOriginGuessLocked();
 
     // Topic callbacks only place data into these lightweight online buffers.
     void AcceptImu(const sensor_msgs::msg::Imu::SharedPtr& imu);
@@ -145,11 +146,9 @@ class Lightning {
     InputMessage latest_lidar_;
     bool has_latest_lidar_ = false;
 
-    // Mapping alone retains every IMU sample. Every localization sensor uses
-    // one overwriteable slot so the worker always consumes its freshest value.
+    // Mapping retains every IMU sample. Localization-only observations use
+    // one overwriteable slot per sensor so the worker consumes fresh data.
     std::deque<InputMessage> pending_mapping_imu_;
-    InputMessage latest_localization_imu_;
-    bool has_latest_localization_imu_ = false;
     InputMessage latest_rtk_position_;
     bool has_latest_rtk_position_ = false;
     InputMessage latest_rtk_velocity_;

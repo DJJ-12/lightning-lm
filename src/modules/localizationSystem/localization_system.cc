@@ -452,23 +452,6 @@ bool LocalizationSystem::SetMapPath(const std::string& map_path) {
     if (!loc_ || map_path.empty()) return false;
     map_path_ = map_path;
     map_ready_ = loc_->Init(yaml_path_, map_path_);
-    if (map_ready_ && UsesLidar() && !UsesRtk()) {
-        // A map built from this recording starts at map-frame identity. Seed
-        // the existing NDT initialization path once so LiDAR-only offline
-        // localization starts immediately after the map is loaded. This does
-        // not alter NDT registration or feed EKF predictions into NDT.
-        const SE3 map_origin(
-            Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero());
-        if (!loc_->SetExternalPose(
-                map_origin.unit_quaternion(), map_origin.translation())) {
-            LOG(ERROR) << "[LOCALIZATION_SYSTEM] failed to set the automatic "
-                          "LiDAR-only NDT initial pose at map origin";
-            map_ready_ = false;
-            return false;
-        }
-        LOG(INFO) << "[LOCALIZATION_SYSTEM] LiDAR-only NDT initial pose set "
-                     "to map origin; no set_location call is required";
-    }
     if (map_ready_) {
         LOG(INFO) << "[LOCALIZATION_SYSTEM] map and visualization initialized"
                   << ", path=" << map_path_

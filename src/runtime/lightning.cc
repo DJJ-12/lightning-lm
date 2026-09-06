@@ -136,6 +136,24 @@ bool Lightning::EnsureLocalizationSystemLocked() {
     return true;
 }
 
+bool Lightning::SetOfflineLocalizationOriginGuessLocked() {
+    if (mode_ != Mode::OFFLINE_LOCALIZATION || !localization_system_) {
+        return false;
+    }
+
+    const SE3 map_origin(
+        Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero());
+    if (!localization_system_->SetInitialGuess(map_origin)) {
+        LOG(ERROR) << "[offline localization] failed to set automatic "
+                      "map-origin initial pose";
+        return false;
+    }
+
+    LOG(INFO) << "[offline localization] automatic initial pose set to "
+                 "map-frame identity";
+    return true;
+}
+
 ServiceResult Lightning::SetMode(const std::string& mode_text) {
     std::lock_guard<std::mutex> lock(control_mutex_);
     if (!CanChangeModeLocked()) {
@@ -159,17 +177,10 @@ ServiceResult Lightning::SetMode(const std::string& mode_text) {
     offline_bag_path_.clear();
     mode_ = new_mode;
 
+    // Selecting a mode never starts a localization worker. Online
+    // localization keeps the original explicit service sequence and starts
+    // only after set_map_path followed by set_location.
     task_.Reset(TaskState::IDLE, ModeToString(mode_) + " mode selected");
-    if (mode_ == Mode::ONLINE_LOCALIZATION) {
-        if (!EnsureLocalizationSystemLocked()) {
-            return {false, "failed to initialize localization"};
-        }
-        if (localization_system_->ReadyWithoutMap()) {
-            StartOnlineWorkerLocked();
-            task_.SetState(TaskState::RUNNING,
-                           "online localization running without map");
-        }
-    }
     return {true, "mode set to " + ModeToString(mode_)};
 }
 
@@ -205,13 +216,8 @@ void Lightning::AcceptImu(const sensor_msgs::msg::Imu::SharedPtr& imu) {
 
     {
         std::lock_guard<std::mutex> lock(online_input_mutex_);
-        if (!online_worker_running_) return;
-        if (online_worker_is_localization_) {
-            latest_localization_imu_ = std::move(input);
-            has_latest_localization_imu_ = true;
-        } else {
-            pending_mapping_imu_.push_back(std::move(input));
-        }
+        if (!online_worker_running_ || online_worker_is_localization_) return;
+        pending_mapping_imu_.push_back(std::move(input));
         ++online_imu_received_;
     }
     online_input_ready_.notify_one();
@@ -332,7 +338,6 @@ void Lightning::OverwriteLatestLidar(InputMessage frame) {
 
 std::size_t Lightning::PendingOnlineInputCountLocked() const {
     return pending_mapping_imu_.size() +
-           (has_latest_localization_imu_ ? 1U : 0U) +
            (has_latest_rtk_position_ ? 1U : 0U) +
            (has_latest_rtk_velocity_ ? 1U : 0U) +
            (has_latest_wheel_odometry_ ? 1U : 0U) +
@@ -343,8 +348,6 @@ void Lightning::ClearPendingOnlineInputLocked() {
     latest_lidar_ = InputMessage();
     has_latest_lidar_ = false;
     pending_mapping_imu_.clear();
-    latest_localization_imu_ = InputMessage();
-    has_latest_localization_imu_ = false;
     latest_rtk_position_ = InputMessage();
     has_latest_rtk_position_ = false;
     latest_rtk_velocity_ = InputMessage();
@@ -375,7 +378,7 @@ void Lightning::StartOnlineWorkerLocked() {
               << ", LiDAR=latest-only"
               << (mapping
                       ? ", IMU=non-dropping queue"
-                      : ", IMU/RTK-position/INS-velocity/wheel=independent latest-only slots");
+                      : ", RTK-position/INS-velocity/wheel=independent latest-only slots");
 }
 
 void Lightning::StopOnlineWorkerLocked(bool drain) {
@@ -444,31 +447,24 @@ void Lightning::OnlineWorkerLoop(bool mapping) {
     std::uint64_t auxiliary_processed = 0;
     while (true) {
         std::vector<InputMessage> ordered_inputs;
-        ordered_inputs.reserve(6);
+        ordered_inputs.reserve(4);
         {
             std::unique_lock<std::mutex> lock(online_input_mutex_);
             online_input_ready_.wait(lock, [this]() {
                 return !online_worker_running_ ||
                        has_latest_lidar_ ||
-                       has_latest_localization_imu_ ||
                        has_latest_rtk_position_ ||
                        has_latest_rtk_velocity_ ||
                        has_latest_wheel_odometry_;
             });
             if (!online_worker_running_ &&
                 !has_latest_lidar_ &&
-                !has_latest_localization_imu_ &&
                 !has_latest_rtk_position_ &&
                 !has_latest_rtk_velocity_ &&
                 !has_latest_wheel_odometry_) {
                 break;
             }
 
-            if (has_latest_localization_imu_) {
-                ordered_inputs.push_back(std::move(latest_localization_imu_));
-                latest_localization_imu_ = InputMessage();
-                has_latest_localization_imu_ = false;
-            }
             if (has_latest_rtk_position_) {
                 ordered_inputs.push_back(std::move(latest_rtk_position_));
                 latest_rtk_position_ = InputMessage();
@@ -650,6 +646,11 @@ ServiceResult Lightning::LoadBag(const std::string& bag_path) {
             return {false, "failed to initialize localization"};
         }
         if (localization_system_->ReadyWithoutMap()) {
+            if (!SetOfflineLocalizationOriginGuessLocked()) {
+                task_.Reset(TaskState::READY,
+                            "offline bag loaded; failed to set zero initial pose");
+                return {false, "failed to set automatic offline initial pose"};
+            }
             task_.Reset(TaskState::RUNNING,
                         "offline localization running without map");
             StartBagLocalizationTaskLocked(bag_path);
@@ -661,10 +662,10 @@ ServiceResult Lightning::LoadBag(const std::string& bag_path) {
                         "offline bag loaded, waiting for set_map_path");
             return {true, "offline localization bag loaded: " + bag_path};
         }
-        if (localization_system_->RequiresInitialGuess()) {
+        if (!SetOfflineLocalizationOriginGuessLocked()) {
             task_.Reset(TaskState::READY,
-                        "offline bag and map loaded, waiting for set_location");
-            return {true, "offline localization ready; waiting for initial pose"};
+                        "offline bag and map loaded; failed to set zero initial pose");
+            return {false, "failed to set automatic offline initial pose"};
         }
         task_.Reset(TaskState::RUNNING, "offline localization running");
         StartBagLocalizationTaskLocked(bag_path);
@@ -837,19 +838,22 @@ ServiceResult Lightning::SetMapPath(const std::string& map_path) {
         return {false, "failed to load localization map: " + map_path};
     }
     localization_map_path_ = map_path;
-    if (localization_system_->RequiresInitialGuess()) {
+
+    // Loading a map must not start online localization or invent its initial
+    // pose. Preserve the original service contract: set_location is the only
+    // operation that starts the online localization worker.
+    if (mode_ == Mode::ONLINE_LOCALIZATION) {
         task_.Reset(TaskState::READY,
-                    "localization map loaded, waiting for set_location");
+                    "online localization map loaded, waiting for set_location");
         return {true, "localization map loaded: " + map_path};
     }
 
-    if (mode_ == Mode::ONLINE_LOCALIZATION) {
-        StartOnlineWorkerLocked();
-        task_.Reset(TaskState::RUNNING,
-                    "online localization waiting for first enabled observation");
-        return {true, "localization map loaded; online localization started"};
-    }
     if (mode_ == Mode::OFFLINE_LOCALIZATION && !offline_bag_path_.empty()) {
+        if (!SetOfflineLocalizationOriginGuessLocked()) {
+            task_.Reset(TaskState::READY,
+                        "offline bag and map loaded; failed to set zero initial pose");
+            return {false, "failed to set automatic offline initial pose"};
+        }
         task_.Reset(TaskState::RUNNING,
                     "offline localization running");
         StartBagLocalizationTaskLocked(offline_bag_path_);
@@ -891,13 +895,7 @@ void Lightning::StartBagLocalizationTaskLocked(const std::string& bag_path) {
         offline_localization_sequence_ = 0;
         BagInput bag_input;
         const bool bag_ok = bag_input.Run(
-            bag_path, yaml_path_, [this](const sensor_msgs::msg::Imu::SharedPtr& imu) {
-                InputMessage input;
-                input.header_stamp = rclcpp::Time(imu->header.stamp).seconds();
-                input.type = InputType::IMU;
-                input.imu = imu;
-                ProcessLocalizationInput(input);
-            },
+            bag_path, yaml_path_, BagInput::ImuCallback(),
             [this](const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
                 InputMessage input;
                 input.lidar_sequence = ++offline_localization_sequence_;

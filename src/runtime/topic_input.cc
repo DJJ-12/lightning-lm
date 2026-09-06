@@ -102,7 +102,9 @@ bool TopicInput::Start(const std::string& yaml_path,
             imu_topic, imu_qos,
             [this](sensor_msgs::msg::Imu::SharedPtr msg) {
                 std::lock_guard<std::mutex> callback_gate(callback_gate_mutex_);
-                if (!input_enabled_.load(std::memory_order_acquire)) {
+                if (!input_enabled_.load(std::memory_order_acquire) ||
+                    localization_input_enabled_.load(
+                        std::memory_order_acquire)) {
                     return;
                 }
                 ++imu_received_;

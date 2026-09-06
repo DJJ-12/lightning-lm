@@ -80,10 +80,11 @@ RTK 位置和 RTK/INS 速度是两个相互独立的观测，不再组装成复�
 厂家 INS 中的 `pitch/roll/courseang` 不再转换、订阅或用于初始化。这些量不被
 当作车体相对 ENU 的绝对姿态，也不能用于求固定的 `map <- ENU` 关系。
 `/ins/velocity` 的 ENU 东、北速度先旋转到 map，然后直接更新水平速度；天向
-速度不进入滤波器。轮速和 IMU topic 的接收链路仍然保留，但定位模块中的
-`ProcessWheelOdometry()` 和 `ProcessImu()` 都是明确的空入口。特别是
-`/imu_data` 的线加速度和角速度均不作为定位观测；建图模块原有的 IMU
-去畸变/LIO 链路不受这个定位策略影响。状态顺序为：
+速度不进入滤波器。轮速定位入口继续保留，但 `ProcessWheelOdometry()` 当前是
+明确的空入口。IMU topic 订阅专门服务于建图；定位侧的 `ProcessImu()` 兼容
+入口仍保留为空，在线和离线定位运行时都不向它路由 IMU。`/imu_data` 的线
+加速度和角速度均不作为定位观测，建图模块原有的 IMU 去畸变/LIO 链路不受
+影响。状态顺序为：
 
 ```text
 x = [p_map(3), rpy_map(3), v_map(3), omega(3)]
@@ -125,8 +126,11 @@ NDT 更新完整的 map 系三维位置和 `roll/pitch/yaw`；GNSS 使用当前�
 在线模式的缓存规则只有两条：
 
 - 在线建图：LiDAR 只保留最新帧，IMU 保留所有帧；
-- 在线定位：LiDAR、IMU、GNSS 位置、RTK/INS 速度和轮速各自只保留
-  一个最新值，新消息覆盖尚未消费的同类旧消息。
+- 在线定位：LiDAR、GNSS 位置、RTK/INS 速度和轮速各自只保留一个最新值，
+  新消息覆盖尚未消费的同类旧消息；IMU 不进入定位输入槽位。
+
+离线 bag 按记录顺序逐条处理。离线建图注册 IMU 回调并保留全部 IMU 数据；
+离线定位不注册 IMU 回调，只读取已启用的定位观测。
 
 `cx16.yaml` 中 `localization.map_from_enu.lat/lon/alt` 是建图起点 GNSS 天线的
 WGS84 参考坐标；`map_from_true_enu_yaw_deg` 是另外标定得到的固定
@@ -161,10 +165,10 @@ ros2 service call /lightning/mapping/finish_mapping lightning_interfaces/srv/Fin
 
 ## 在线定位
 
-使用 `cx16.yaml` 的融合模式时，`set_map_path` 成功后会立即开始接收定位
-观测。第一帧有效 GNSS 位置直接初始化 EKF，并自动作为
-第一帧 NDT 的地图内初值；不再要求先调用 `set_location`。`set_location`
-仍可用于人工重定位。纯 `ndt_only` 配置仍然必须先调用 `set_location`。
+在线定位保持原来的显式服务流程：`set_mode` 只切换模式，`set_map_path`
+只加载地图并进入 `READY` 状态；随后必须调用 `set_location` 手动提供 map
+坐标系中的初始猜测位姿，在线定位线程才会启动。是否启用 GNSS、速度或
+LiDAR 观测都不会绕过这一步。
 
 当 `lidar_topic` 和 `livox_lidar_topic` 都为空时，不创建点云订阅，也不产生
 NDT 观测；但 `set_map_path` 仍会加载地图并创建定位 UI。RTK 位置、RTK/INS
@@ -176,8 +180,9 @@ NDT 观测；但 `set_map_path` 仍会加载地图并创建定位 UI。RTK 位�
 Pangolin UI 中红线是最终 EKF 状态轨迹，绿线是进入 EKF 更新前、已经完成
 WGS84/UTM/ENU 到 map 转换的原始 RTK 天线位置轨迹，黄线是激光扫描位姿轨迹。
 
-只配置 `rtk_fix_topic` 也可以直接启动在线或离线定位。此时第一帧有效
-`NavSatFix` 直接初始化位置 EKF，后续每帧继续更新位置并输出红色轨迹；绿色
+只配置 `rtk_fix_topic` 时，在线定位仍然必须先调用 `set_location`；离线定位
+使用自动设置的 map 原点初值。第一帧有效 `NavSatFix` 随后更新位置 EKF，
+后续每帧继续更新位置并输出红色轨迹；绿色
 轨迹始终是未经滤波的 GNSS 天线位置。没有 LiDAR/NDT 时不存在姿态观测，代码
 会禁用杆臂补偿，避免 GNSS 位置残差通过杆臂雅可比虚构姿态和旋转；这时红线
 表示天线位置。启用 LiDAR/NDT 后完整三维姿态可观，才使用三维杆臂补偿。
@@ -186,6 +191,7 @@ WGS84/UTM/ENU 到 map 转换的原始 RTK 天线位置轨迹，黄线是激光�
 ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'online_localization'}"
 
 ros2 service call /lightning/localization/set_map_path lightning_interfaces/srv/SetMapPath "{map_path: '/home/mt/maps/cx16_map'}"
+ros2 service call /lightning/localization/set_location lightning_interfaces/srv/SetLocation "{x: 0.0, y: 0.0, z: 0.0, roll: 0.0, pitch: 0.0, yaw: 0.0}"
 ros2 service call /lightning/localization/get_map_path lightning_interfaces/srv/GetMapPath "{}"
 ros2 service call /lightning/localization/get_localization_quality lightning_interfaces/srv/GetLocalizationQuality "{}"
 
@@ -195,9 +201,10 @@ ros2 service call /lightning/localization/finish_localization lightning_interfac
 
 ## 离线定位
 
-融合模式下，先设置 bag 或先设置地图均可；bag 和地图都准备好后会自动
-开始逐条读取，所有消息按 bag 内原始顺序处理且不跳帧。纯 `ndt_only`
-模式仍在 `set_location` 之后开始读取。
+离线定位可以先设置 bag，也可以先设置地图。两者都准备好后，运行时自动使用
+map 原点单位位姿 `(0, 0, 0, 0, 0, 0)` 作为初始猜测并开始逐条读取；所有
+消息按 bag 内原始顺序处理且不跳帧。离线定位不需要调用 `set_location`，这项
+自动零初值只存在于离线定位，不影响在线定位和任何建图流程。
 
 ```bash
 ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'offline_localization'}"

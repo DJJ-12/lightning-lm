@@ -64,12 +64,7 @@ class LocalizationSystem {
     bool UsesWheelOdometry() const { return !wheel_odometry_topic_.empty(); }
     // LiDAR needs the map for NDT; the UI also needs it for visualization.
     bool RequiresMap() const { return UsesLidar() || with_ui_; }
-    bool RequiresInitialGuess() const {
-        // GNSS initializes fusion mode. LiDAR-only mode is initialized once
-        // at the map origin by SetMapPath(), so neither path needs another
-        // service call before online/offline processing can start.
-        return !UsesRtk() && !UsesLidar();
-    }
+    bool RequiresInitialGuess() const { return UsesLidar(); }
     bool ReadyWithoutMap() const { return !RequiresMap(); }
     static Mode ModeFromString(const std::string& value);
     static std::string ModeToString(Mode mode);
