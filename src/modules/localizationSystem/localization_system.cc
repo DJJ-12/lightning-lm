@@ -29,18 +29,22 @@ std::string ReadTopic(const YAML::Node& common, const char* name) {
         : std::string();
 }
 
-double CourseDegreesToEnuYaw(double course_degrees) {
-    return std::atan2(
-        std::sin((90.0 - course_degrees) * kDegToRad),
-        std::cos((90.0 - course_degrees) * kDegToRad));
-}
+Eigen::Matrix3d MapFromTrueEnuRotation(
+    double yaw_from_true_north_ccw_degrees) {
+    const double yaw_from_true_north_ccw =
+        yaw_from_true_north_ccw_degrees * kDegToRad;
+    const double sine = std::sin(yaw_from_true_north_ccw);
+    const double cosine = std::cos(yaw_from_true_north_ccw);
 
-Eigen::Matrix3d RotationFromRollPitchYaw(
-    double roll, double pitch, double yaw) {
-    return (Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) *
-            Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
-            Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX()))
-        .toRotationMatrix();
+    // The map +X axis is yaw_from_true_north_ccw counterclockwise from true
+    // north, so its standard ENU yaw (counterclockwise from east) is
+    // yaw_from_true_north_ccw + 90 deg. The matrix below is the inverse basis
+    // matrix: it converts true-ENU coordinate values into map coordinates.
+    Eigen::Matrix3d rotation;
+    rotation << -sine, cosine, 0.0,
+                -cosine, -sine, 0.0,
+               0.0, 0.0, 1.0;
+    return rotation;
 }
 
 // UTM uses grid east/north while the INS reports true local ENU. Determine the
@@ -83,7 +87,9 @@ loc::EKF::Covariance InitialEkfCovariance(
     covariance(loc::EKF::kY, loc::EKF::kY) =
         position_std * position_std;
     covariance(loc::EKF::kYaw, loc::EKF::kYaw) = yaw_std * yaw_std;
-    covariance(loc::EKF::kVelocity, loc::EKF::kVelocity) =
+    covariance(loc::EKF::kVelocityX, loc::EKF::kVelocityX) =
+        velocity_std * velocity_std;
+    covariance(loc::EKF::kVelocityY, loc::EKF::kVelocityY) =
         velocity_std * velocity_std;
     covariance(loc::EKF::kYawRate, loc::EKF::kYawRate) =
         yaw_rate_std * yaw_rate_std;
@@ -239,8 +245,6 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
         "ndt_yaw_std_deg", ndt_yaw_std_ / kDegToRad) * kDegToRad;
     wheel_velocity_std_ = read_ekf(
         "wheel_velocity_std", wheel_velocity_std_);
-    wheel_yaw_rate_std_ = read_ekf(
-        "wheel_yaw_rate_std", wheel_yaw_rate_std_);
 
     const std::array<double, 13> standard_deviations = {
         filter_options.process_acceleration_std,
@@ -258,7 +262,6 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
     if (!std::isfinite(filter_options.max_prediction_step) ||
         filter_options.max_prediction_step <= 0.0 ||
         ndt_yaw_std_ <= 0.0 || wheel_velocity_std_ <= 0.0 ||
-        wheel_yaw_rate_std_ <= 0.0 ||
         std::any_of(standard_deviations.begin(), standard_deviations.end(),
                     [](double value) {
                         return !std::isfinite(value) || value <= 0.0;
@@ -269,19 +272,6 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
         LOG(ERROR) << "[LOCALIZATION_EKF] EKF standard deviations, gates and "
                       "max_prediction_step must be finite and positive";
         return false;
-    }
-
-    if (yaml["lio_sam"] && yaml["lio_sam"]["extrinsicRPY"]) {
-        const std::vector<double> values =
-            yaml["lio_sam"]["extrinsicRPY"].as<std::vector<double>>();
-        if (values.size() != 9) {
-            LOG(ERROR) << "[LOCALIZATION_EKF] lio_sam.extrinsicRPY must contain 9 values";
-            return false;
-        }
-        imu_from_tracking_rotation_ <<
-            values[0], values[1], values[2],
-            values[3], values[4], values[5],
-            values[6], values[7], values[8];
     }
 
     ekf_.Configure(filter_options);
@@ -404,10 +394,21 @@ void LocalizationSystem::ProcessRtkPosition(
 
     Eigen::Vector2d position_map;
     Eigen::Matrix2d covariance_map;
-    if (!PositionToMap(*fix, &position_map, &covariance_map)) return;
+    if (!PositionToMap(*fix, &position_map, &covariance_map)) {
+        LOG_EVERY_N(WARNING, 100)
+            << "[LOCALIZATION_EKF] RTK fix rejected before coordinate conversion"
+            << ", status=" << static_cast<int>(fix->status.status)
+            << ", latitude=" << fix->latitude
+            << ", longitude=" << fix->longitude
+            << ", altitude=" << fix->altitude;
+        return;
+    }
     const double stamp = rclcpp::Time(fix->header.stamp).seconds();
     AppendDebugPath(
         &raw_rtk_path_, raw_rtk_path_pub_, stamp, position_map, 0.0);
+    // Green UI trajectory: the raw GNSS antenna position after coordinate
+    // conversion, before initialization, prediction, gating or EKF update.
+    if (loc_) loc_->UpdateRtkObservationVisualization(position_map);
 
     std::lock_guard<std::mutex> lock(filter_mutex_);
     if (!ekf_.Initialized()) {
@@ -424,7 +425,7 @@ void LocalizationSystem::ProcessRtkPosition(
 
     double distance = 0.0;
     const bool accepted = ekf_.UpdateRtkPosition(
-        stamp, position_map, rtk_ins_lever_arm_tracking_.head<2>(),
+        stamp, position_map, RtkLeverArmForFilter(),
         covariance_map, -1.0, &distance);
     if (accepted) {
         PublishResult(BuildEkfResult(stamp, "EKF RTK position update", true));
@@ -492,8 +493,7 @@ void LocalizationSystem::ProcessInsVelocity(
 
     double distance = 0.0;
     const bool accepted = ekf_.UpdateMapVelocity(
-        stamp, velocity_map, rtk_ins_lever_arm_tracking_.head<2>(),
-        covariance_map, -1.0, &distance);
+        stamp, velocity_map, covariance_map, -1.0, &distance);
     if (accepted) {
         PublishResult(BuildEkfResult(
             stamp, "EKF INS velocity update", true));
@@ -511,22 +511,15 @@ void LocalizationSystem::ProcessWheelOdometry(
     if (!UsesWheelOdometry() || !odometry) return;
     const double stamp = rclcpp::Time(odometry->header.stamp).seconds();
     const double forward_velocity = odometry->twist.twist.linear.x;
-    const double yaw_rate = odometry->twist.twist.angular.z;
-    if (!std::isfinite(stamp) || !std::isfinite(forward_velocity) ||
-        !std::isfinite(yaw_rate)) {
+    if (!std::isfinite(stamp) || !std::isfinite(forward_velocity)) {
         return;
     }
 
-    Eigen::Matrix2d covariance;
-    covariance << odometry->twist.covariance[0],
-                  odometry->twist.covariance[5],
-                  odometry->twist.covariance[30],
-                  odometry->twist.covariance[35];
-    if (!IsUsableCovariance(covariance)) {
-        covariance.setZero();
-        covariance(0, 0) = wheel_velocity_std_ * wheel_velocity_std_;
-        covariance(1, 1) = wheel_yaw_rate_std_ * wheel_yaw_rate_std_;
-    }
+    const double message_variance = odometry->twist.covariance[0];
+    const double variance =
+        std::isfinite(message_variance) && message_variance > 0.0
+            ? message_variance
+            : wheel_velocity_std_ * wheel_velocity_std_;
 
     std::lock_guard<std::mutex> lock(filter_mutex_);
     if (!ekf_.Initialized()) {
@@ -538,7 +531,7 @@ void LocalizationSystem::ProcessWheelOdometry(
 
     double distance = 0.0;
     const bool accepted = ekf_.UpdateWheelOdometry(
-        stamp, forward_velocity, yaw_rate, covariance, -1.0, &distance);
+        stamp, forward_velocity, variance, -1.0, &distance);
     if (accepted) {
         PublishResult(BuildEkfResult(
             stamp, "EKF wheel odometry update", true));
@@ -613,7 +606,7 @@ void LocalizationSystem::InitializeEkfFromNdt(
         initial_yaw_rate_std_);
     if (ekf_.Initialize(
             ndt.timestamp_, position.x(), position.y(), PoseYaw(ndt.pose_),
-            0.0, 0.0, covariance)) {
+            Eigen::Vector2d::Zero(), 0.0, covariance)) {
         manual_initial_guess_pending_ = false;
     }
 }
@@ -633,14 +626,15 @@ bool LocalizationSystem::InitializeFixedMapTransform(
     const double latitude_deg = map_from_enu["lat"].as<double>();
     const double longitude_deg = map_from_enu["lon"].as<double>();
     const double altitude_m = map_from_enu["alt"].as<double>();
-    const double pitch = map_from_enu["pitch"].as<double>() * kDegToRad;
-    const double roll = map_from_enu["roll"].as<double>() * kDegToRad;
-    // `yaw` intentionally follows the source INS convention requested for the
-    // map reference: north=0 degrees and clockwise positive (course angle).
-    const double course_deg = map_from_enu["yaw"].as<double>();
+    const double pitch_deg = map_from_enu["pitch"].as<double>();
+    const double roll_deg = map_from_enu["roll"].as<double>();
+    // `yaw` is the counterclockwise angle from true north to the map +X axis.
+    const double yaw_from_true_north_ccw_deg =
+        map_from_enu["yaw"].as<double>();
     if (!std::isfinite(latitude_deg) || !std::isfinite(longitude_deg) ||
-        !std::isfinite(altitude_m) || !std::isfinite(pitch) ||
-        !std::isfinite(roll) || !std::isfinite(course_deg) ||
+        !std::isfinite(altitude_m) || !std::isfinite(pitch_deg) ||
+        !std::isfinite(roll_deg) ||
+        !std::isfinite(yaw_from_true_north_ccw_deg) ||
         latitude_deg < -90.0 || latitude_deg > 90.0 ||
         longitude_deg < -180.0 || longitude_deg > 180.0) {
         LOG(ERROR) << "[LOCALIZATION_EKF] invalid fixed map reference";
@@ -659,36 +653,35 @@ bool LocalizationSystem::InitializeFixedMapTransform(
         return false;
     }
 
-    const double yaw_enu = CourseDegreesToEnuYaw(course_deg);
-    const Eigen::Matrix3d true_enu_from_tracking =
-        RotationFromRollPitchYaw(roll, pitch, yaw_enu) *
-        imu_from_tracking_rotation_;
-    const Eigen::Matrix3d utm_from_tracking =
-        utm_from_true_enu_rotation_ * true_enu_from_tracking;
-    const Eigen::Vector3d reference_tracking_utm =
-        reference_gnss_utm_ -
-        utm_from_tracking * rtk_ins_lever_arm_tracking_;
-
-    // Current mapping initializes the first tracking pose with IMU roll/pitch,
-    // forces map yaw to zero, and sets its translation to zero. Therefore the
-    // same six reference values are sufficient for both T_utm_tracking0 and
-    // T_map_tracking0; no seventh "initial map pose" parameter is needed.
-    const Eigen::Vector3d tracking_rpy =
-        math::RotMtoEuler(true_enu_from_tracking);
-    const Eigen::Matrix3d map_from_tracking_at_reference =
-        RotationFromRollPitchYaw(tracking_rpy.x(), tracking_rpy.y(), 0.0);
-    map_from_enu_rotation_ =
-        map_from_tracking_at_reference * utm_from_tracking.transpose();
-    map_from_enu_translation_ =
-        -map_from_enu_rotation_ * reference_tracking_utm;
+    // The map +X axis is (yaw + 90 deg) counterclockwise from ENU east.
+    // R_map_true_enu converts coordinate values, so it is the inverse of that
+    // axis rotation: R_map_true_enu = Rz(-(yaw + 90 deg)).
     map_from_true_enu_rotation_ =
-        map_from_enu_rotation_ * utm_from_true_enu_rotation_;
-    reference_gnss_map_ =
-        map_from_enu_rotation_ * reference_gnss_utm_ +
-        map_from_enu_translation_;
+        MapFromTrueEnuRotation(yaw_from_true_north_ccw_deg);
+    const double map_x_yaw_in_true_enu = std::atan2(
+        map_from_true_enu_rotation_(0, 1),
+        map_from_true_enu_rotation_(0, 0));
+    const double map_from_true_enu_yaw = std::atan2(
+        map_from_true_enu_rotation_(1, 0),
+        map_from_true_enu_rotation_(0, 0));
+
+    // NavSatFix is projected into UTM grid east/north, whereas course,
+    // orientation and velocity use true ENU. Remove the fixed grid
+    // convergence before applying the map yaw.
+    map_from_utm_rotation_ =
+        map_from_true_enu_rotation_ *
+        utm_from_true_enu_rotation_.transpose();
+
+    // At mapping start the tracking origin is the map origin and its +X axis
+    // is the map +X axis. The reference GNSS antenna therefore lies at the
+    // configured tracking-frame lever arm in map coordinates.
+    reference_gnss_map_ = rtk_ins_lever_arm_tracking_;
+    map_from_utm_translation_ =
+        reference_gnss_map_ -
+        map_from_utm_rotation_ * reference_gnss_utm_;
     map_from_enu_ready_ =
-        map_from_enu_rotation_.allFinite() &&
-        map_from_enu_translation_.allFinite() &&
+        map_from_utm_rotation_.allFinite() &&
+        map_from_utm_translation_.allFinite() &&
         reference_gnss_utm_.allFinite() && reference_gnss_map_.allFinite();
     if (!map_from_enu_ready_) return false;
 
@@ -696,9 +689,25 @@ bool LocalizationSystem::InitializeFixedMapTransform(
               << ", zone=" << utm_zone_
               << ", reference_gnss_utm=" << reference_gnss_utm_.transpose()
               << ", reference_gnss_map=" << reference_gnss_map_.transpose()
-              << ", course_deg=" << course_deg
-              << ", yaw_enu_deg=" << yaw_enu / kDegToRad
-              << ", translation=" << map_from_enu_translation_.transpose();
+              << ", reference_roll_deg=" << roll_deg
+              << ", reference_pitch_deg=" << pitch_deg
+              << ", yaw_from_true_north_ccw_deg="
+              << yaw_from_true_north_ccw_deg
+              << ", map_x_yaw_in_true_enu_deg="
+              << map_x_yaw_in_true_enu / kDegToRad
+              << ", map_from_true_enu_yaw_deg="
+              << map_from_true_enu_yaw / kDegToRad
+              << ", R_map_true_enu=["
+              << map_from_true_enu_rotation_(0, 0) << ","
+              << map_from_true_enu_rotation_(0, 1) << ";"
+              << map_from_true_enu_rotation_(1, 0) << ","
+              << map_from_true_enu_rotation_(1, 1) << "]"
+              << ", R_map_utm=["
+              << map_from_utm_rotation_(0, 0) << ","
+              << map_from_utm_rotation_(0, 1) << ";"
+              << map_from_utm_rotation_(1, 0) << ","
+              << map_from_utm_rotation_(1, 1) << "]"
+              << ", translation=" << map_from_utm_translation_.transpose();
     return true;
 }
 
@@ -724,7 +733,7 @@ bool LocalizationSystem::PositionToMap(
     // repeatedly multiplying/subtracting large absolute UTM coordinates.
     const Eigen::Vector3d position_map_3d =
         reference_gnss_map_ +
-        map_from_enu_rotation_ * (position_utm - reference_gnss_utm_);
+        map_from_utm_rotation_ * (position_utm - reference_gnss_utm_);
     *position_map = position_map_3d.head<2>();
 
     Eigen::Matrix2d covariance_enu;
@@ -770,8 +779,7 @@ bool LocalizationSystem::OrientationToMapYaw(
     }
     quaternion.normalize();
     const Eigen::Matrix3d rotation_map_tracking =
-        map_from_true_enu_rotation_ * quaternion.toRotationMatrix() *
-        imu_from_tracking_rotation_;
+        map_from_true_enu_rotation_ * quaternion.toRotationMatrix();
     *yaw_map = PoseYaw(SE3(Eigen::Quaterniond(rotation_map_tracking),
                            Eigen::Vector3d::Zero()));
     const double message_variance = orientation.orientation_covariance[8];
@@ -819,46 +827,73 @@ bool LocalizationSystem::VelocityToMap(
     return velocity_map->allFinite() && IsUsableCovariance(*covariance_map);
 }
 
+Eigen::Vector2d LocalizationSystem::RtkLeverArmForFilter() const {
+    // GNSS measures the antenna position. Converting it to the tracking
+    // origin requires the current tracking yaw. Without an enabled absolute
+    // yaw observation that correction is unobservable, so keep the measured
+    // antenna position unchanged instead of applying a guessed rotation.
+    if (!UsesInsOrientation()) return Eigen::Vector2d::Zero();
+    return rtk_ins_lever_arm_tracking_.head<2>();
+}
+
 void LocalizationSystem::TryInitializeEkf() {
     if (ekf_.Initialized() ||
         manual_initial_guess_pending_ ||
-        !has_initial_position_ || !has_initial_yaw_) {
-        return;
-    }
-    if (std::fabs(initial_position_stamp_ - initial_yaw_stamp_) >
-        initial_observation_max_dt_) {
+        !has_initial_position_) {
         return;
     }
 
-    const double stamp =
-        std::max(initial_position_stamp_, initial_yaw_stamp_);
+    const bool yaw_observed = UsesInsOrientation();
+    if (yaw_observed) {
+        if (!has_initial_yaw_ ||
+            std::fabs(initial_position_stamp_ - initial_yaw_stamp_) >
+                initial_observation_max_dt_) {
+            return;
+        }
+    }
+
+    const double stamp = yaw_observed
+        ? std::max(initial_position_stamp_, initial_yaw_stamp_)
+        : initial_position_stamp_;
+    const double initial_yaw = yaw_observed ? initial_yaw_map_ : 0.0;
+    const Eigen::Vector2d lever_arm = RtkLeverArmForFilter();
     const Eigen::Vector2d tracking_position_map =
         initial_sensor_position_map_ -
-        Rotate2D(initial_yaw_map_, rtk_ins_lever_arm_tracking_.head<2>());
+        Rotate2D(initial_yaw, lever_arm);
     const loc::EKF::Covariance covariance = InitialEkfCovariance(
-        initial_position_std_, initial_yaw_std_, initial_velocity_std_,
+        initial_position_std_, yaw_observed ? initial_yaw_std_ : kPi,
+        initial_velocity_std_,
         initial_yaw_rate_std_);
     if (ekf_.Initialize(
             stamp, tracking_position_map.x(), tracking_position_map.y(),
-            initial_yaw_map_, 0.0, 0.0, covariance)) {
+            initial_yaw, Eigen::Vector2d::Zero(), 0.0, covariance)) {
         if (UsesLidar()) {
             const SE3 pose = ekf_.Pose();
             if (!loc_ || !map_ready_ ||
                 !loc_->SetExternalPose(pose.unit_quaternion(),
                                        pose.translation())) {
-                LOG(ERROR) << "[LOCALIZATION_EKF] failed to pass RTK/INS "
-                              "initial pose to NDT";
+                LOG(ERROR) << "[LOCALIZATION_EKF] failed to pass automatic "
+                              "EKF initial pose to NDT";
                 ekf_.Reset();
                 return;
             }
             has_initial_guess_ = true;
         }
-        LOG(INFO) << "[LOCALIZATION_EKF] initialized from RTK/INS"
+        LOG(INFO) << "[LOCALIZATION_EKF] initialized from "
+                  << (yaw_observed ? "RTK position + INS yaw"
+                                   : "RTK position only")
                   << ", stamp=" << stamp
                   << ", position_map=" << tracking_position_map.transpose()
-                  << ", yaw_map_deg=" << initial_yaw_map_ / kDegToRad;
+                  << ", yaw_map_deg=" << initial_yaw / kDegToRad
+                  << ", yaw_observed=" << yaw_observed
+                  << ", lever_arm_applied=" << yaw_observed;
         PublishResult(BuildEkfResult(
-            stamp, "EKF initialized from fixed-map RTK/INS", true));
+            stamp,
+            yaw_observed
+                ? "EKF initialized from fixed-map RTK position + INS yaw"
+                : "EKF initialized from fixed-map RTK antenna position; "
+                  "yaw unobserved and lever arm disabled",
+            yaw_observed));
     }
 }
 
@@ -872,7 +907,7 @@ bool LocalizationSystem::InitializeManualGuess(double stamp) {
         initial_yaw_rate_std_);
     if (!ekf_.Initialize(
             stamp, position.x(), position.y(), PoseYaw(manual_initial_pose_),
-            0.0, 0.0, covariance)) {
+            Eigen::Vector2d::Zero(), 0.0, covariance)) {
         return false;
     }
     manual_initial_guess_pending_ = false;
@@ -922,17 +957,40 @@ loc::LocalizationResult LocalizationSystem::BuildEkfResult(
     result.pose_covariance_(4, 4) = 1e8;
     result.covariance_valid_ = true;
     result.twist_covariance_.setZero();
-    result.twist_covariance_(0, 0) =
-        ekf_.P()(loc::EKF::kVelocity, loc::EKF::kVelocity);
-    result.twist_covariance_(0, 5) =
-        ekf_.P()(loc::EKF::kVelocity, loc::EKF::kYawRate);
-    result.twist_covariance_(5, 0) =
-        ekf_.P()(loc::EKF::kYawRate, loc::EKF::kVelocity);
-    result.twist_covariance_(5, 5) =
-        ekf_.P()(loc::EKF::kYawRate, loc::EKF::kYawRate);
-    // Lateral/vertical velocity and roll/pitch rates are outside this planar
-    // state, so advertise large uncertainty rather than false zeros.
-    result.twist_covariance_(1, 1) = 1e8;
+    // nav_msgs/Odometry expresses twist in child_frame_id (base_link), while
+    // the EKF stores velocity in map. Propagate the full state covariance
+    // through v_body = R(-yaw) * v_map, including yaw uncertainty and all
+    // velocity/yaw-rate cross correlations.
+    const double yaw = ekf_.GetState().yaw;
+    const double cosine = std::cos(yaw);
+    const double sine = std::sin(yaw);
+    const double velocity_x = ekf_.GetState().velocity_x_map;
+    const double velocity_y = ekf_.GetState().velocity_y_map;
+    const double forward_velocity =
+        cosine * velocity_x + sine * velocity_y;
+    const double lateral_velocity =
+        -sine * velocity_x + cosine * velocity_y;
+    Eigen::Matrix<double, 3, loc::EKF::kStateDim> twist_jacobian =
+        Eigen::Matrix<double, 3, loc::EKF::kStateDim>::Zero();
+    twist_jacobian(0, loc::EKF::kYaw) = lateral_velocity;
+    twist_jacobian(0, loc::EKF::kVelocityX) = cosine;
+    twist_jacobian(0, loc::EKF::kVelocityY) = sine;
+    twist_jacobian(1, loc::EKF::kYaw) = -forward_velocity;
+    twist_jacobian(1, loc::EKF::kVelocityX) = -sine;
+    twist_jacobian(1, loc::EKF::kVelocityY) = cosine;
+    twist_jacobian(2, loc::EKF::kYawRate) = 1.0;
+    const Eigen::Matrix3d twist_covariance =
+        twist_jacobian * ekf_.P() * twist_jacobian.transpose();
+    constexpr std::array<int, 3> kTwistIndices = {0, 1, 5};
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            result.twist_covariance_(
+                kTwistIndices[row], kTwistIndices[column]) =
+                twist_covariance(row, column);
+        }
+    }
+    // Vertical velocity and roll/pitch rates are outside this planar state,
+    // so advertise large uncertainty rather than false certainty.
     result.twist_covariance_(2, 2) = 1e8;
     result.twist_covariance_(3, 3) = 1e8;
     result.twist_covariance_(4, 4) = 1e8;
@@ -1080,13 +1138,12 @@ void LocalizationSystem::Reset() {
     with_ui_ = false;
     utm_zone_ = 0;
     map_from_enu_ready_ = false;
-    map_from_enu_rotation_ = Eigen::Matrix3d::Identity();
-    map_from_enu_translation_ = Eigen::Vector3d::Zero();
+    map_from_utm_rotation_ = Eigen::Matrix3d::Identity();
+    map_from_utm_translation_ = Eigen::Vector3d::Zero();
     utm_from_true_enu_rotation_ = Eigen::Matrix3d::Identity();
     map_from_true_enu_rotation_ = Eigen::Matrix3d::Identity();
     reference_gnss_utm_ = Eigen::Vector3d::Zero();
     reference_gnss_map_ = Eigen::Vector3d::Zero();
-    imu_from_tracking_rotation_ = Eigen::Matrix3d::Identity();
     rtk_ins_lever_arm_tracking_ = Eigen::Vector3d::Zero();
     initial_position_std_ = 0.5;
     initial_yaw_std_ = 3.0 * kDegToRad;
@@ -1101,7 +1158,6 @@ void LocalizationSystem::Reset() {
     ndt_position_std_y_ = 0.10;
     ndt_yaw_std_ = 1.0 * kDegToRad;
     wheel_velocity_std_ = 0.10;
-    wheel_yaw_rate_std_ = 0.05;
     has_initial_position_ = false;
     has_initial_yaw_ = false;
     initial_yaw_map_ = 0.0;

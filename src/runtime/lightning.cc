@@ -885,7 +885,7 @@ ServiceResult Lightning::SetMapPath(const std::string& map_path) {
     if (mode_ == Mode::ONLINE_LOCALIZATION) {
         StartOnlineWorkerLocked();
         task_.Reset(TaskState::RUNNING,
-                    "online localization waiting for GNSS/INS initialization");
+                    "online localization waiting for first enabled observation");
         return {true, "localization map loaded; online localization started"};
     }
     if (mode_ == Mode::OFFLINE_LOCALIZATION && !offline_bag_path_.empty()) {
@@ -998,8 +998,8 @@ void Lightning::StartBagLocalizationTaskLocked(const std::string& bag_path) {
             } else {
                 localization_ok = false;
                 LOG(ERROR) << "[offline localization] bag contained no valid "
-                              "localization result; check GNSS status, INS "
-                              "orientation and observation timestamps";
+                              "localization result; check configured topics, "
+                              "GNSS status and observation timestamps";
             }
         }
         if (task_.CancelRequested()) {

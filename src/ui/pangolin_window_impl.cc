@@ -33,10 +33,14 @@ bool PangolinWindowImpl::Init() {
     // unset the current context from the main thread
     pangolin::GetBoundWindow()->RemoveCurrent();
 
-    // 定位轨迹 OpenGL 设置。红色轨迹显示最终定位状态；在融合模式下
-    // 该状态来自 EKF，而不是未经融合的 NDT 位姿。
-    traj_newest_state_.reset(new ui::UiTrajectory(Vec3f(1.0, 0.0, 0.0)));  // 红色
-    traj_scans_.reset(new ui::UiTrajectory(Vec3f(0.0, 1.0, 0.0)));         // 绿色
+    // 定位轨迹：红色是最终EKF状态，绿色是进入EKF前的原始RTK map
+    // 位置观测，黄色保留给激光扫描位姿。
+    traj_newest_state_.reset(
+        new ui::UiTrajectory(Vec3f(1.0, 0.0, 0.0), 4.0f));  // 红色
+    traj_rtk_observation_.reset(
+        new ui::UiTrajectory(Vec3f(0.0, 1.0, 0.0), 7.0f));  // 绿色
+    traj_scans_.reset(
+        new ui::UiTrajectory(Vec3f(1.0, 1.0, 0.0), 3.0f));  // 黄色
 
     current_scan_.reset(new PointCloudType);  // 重置pcl点云指针
     current_scan_ui_.reset(new ui::UiCloud);  // 重置用于渲染的点云指针
@@ -57,6 +61,18 @@ void PangolinWindowImpl::Reset(const std::vector<Keyframe::Ptr> &keyframes) {
     scans_.clear();
     current_scan_ui_ = nullptr;
     traj_scans_->Clear();
+    traj_newest_state_->Clear();
+    traj_rtk_observation_->Clear();
+    {
+        std::lock_guard<std::mutex> state_lock(mtx_nav_state_);
+        pending_nav_states_.clear();
+        kf_result_need_update_.store(false);
+    }
+    {
+        std::lock_guard<std::mutex> rtk_lock(mtx_rtk_position_);
+        pending_rtk_positions_.clear();
+        rtk_position_need_update_.store(false);
+    }
 
     for (const auto &keyframe : keyframes) {
         traj_scans_->AddPt(keyframe->GetOptPose());
@@ -223,6 +239,24 @@ bool PangolinWindowImpl::UpdateState() {
     return true;
 }
 
+bool PangolinWindowImpl::UpdateRtkTrajectory() {
+    if (!rtk_position_need_update_.load()) return false;
+
+    std::deque<Vec3d> positions;
+    {
+        std::lock_guard<std::mutex> lock(mtx_rtk_position_);
+        positions.swap(pending_rtk_positions_);
+        rtk_position_need_update_.store(false);
+    }
+    if (positions.empty()) return false;
+
+    for (const Vec3d& position : positions) {
+        traj_rtk_observation_->AddPt(
+            SE3(Eigen::Quaterniond::Identity(), position));
+    }
+    return true;
+}
+
 void PangolinWindowImpl::DrawAll() {
     /// 地图
     for (const auto &pc : cloud_map_ui_) {
@@ -247,6 +281,12 @@ void PangolinWindowImpl::DrawAll() {
         frontend_car_.SetPose(newest_frontend_pose_);  // 车在current pose上
         frontend_car_.Render();
     }
+
+    // Raw RTK is deliberately independent of the EKF/scan toggles. It is
+    // wider than the red trajectory: where both lines overlap, the red center
+    // and green border remain distinguishable; where they diverge, both paths
+    // are directly visible.
+    traj_rtk_observation_->Render();
 
     if (draw_backend_traj_) {
         traj_scans_->Render();
@@ -291,6 +331,7 @@ void PangolinWindowImpl::RenderClouds() {
     UpdateGlobalMap();
     UpdateDynamicMap();
     UpdateState();
+    UpdateRtkTrajectory();
     UpdateCurrentScan();
 
     // 绘制
@@ -458,7 +499,7 @@ void PangolinWindowImpl::AllocateBuffer() {
     std::string global_text(
         "Welcome to SAD.UI. Open source code: https://github.com/gaoxiang12/slam_in_autonomous_driving. All right "
         "reserved.\n"
-        "Red: newest IMU pose, yellow: lidar scan pose");
+        "Red: final EKF pose, green: raw RTK map observation, yellow: lidar scan pose");
     auto &font = pangolin::default_font();
     gltext_label_global_ = font.Text(global_text);
     gltext_label_state_ = font.Text("ba: [0.0000, 0.0000, 0.0000]");

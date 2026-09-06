@@ -795,6 +795,12 @@ void Localization::UpdateVisualization(const LocalizationResult& result) {
     ui_->UpdateNavState(result.ToNavState());
 }
 
+void Localization::UpdateRtkObservationVisualization(
+    const Eigen::Vector2d& position_map) {
+    if (!ui_ || !position_map.allFinite()) return;
+    ui_->UpdateRtkPosition(position_map);
+}
+
 SE3 Localization::Matrix4dToSE3(const Eigen::Matrix4d& pose) {
     Mat3d rotation = pose.block<3, 3>(0, 0);
     Quatd q(rotation);

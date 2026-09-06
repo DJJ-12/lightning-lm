@@ -26,6 +26,7 @@ bool PangolinWindow::Init() {
     auto impl = std::make_shared<PangolinWindowImpl>();
     impl->cloud_global_need_update_.store(false);
     impl->kf_result_need_update_.store(false);
+    impl->rtk_position_need_update_.store(false);
     impl->lidarloc_need_update_.store(false);
     impl->current_scan_need_update_.store(false);
 
@@ -160,6 +161,19 @@ void PangolinWindow::UpdateNavState(const NavState& state) {
     // final EKF state until the render thread appends it to the trajectory.
     impl->pending_nav_states_.push_back(state);
     impl->kf_result_need_update_.store(true);
+}
+
+void PangolinWindow::UpdateRtkPosition(
+    const Eigen::Vector2d& position_map) {
+    if (!position_map.allFinite()) return;
+    std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+    auto impl = impl_.lock();
+    if (!impl) return;
+
+    std::lock_guard<std::mutex> lock(impl->mtx_rtk_position_);
+    impl->pending_rtk_positions_.emplace_back(
+        position_map.x(), position_map.y(), 0.0);
+    impl->rtk_position_need_update_.store(true);
 }
 
 void PangolinWindow::UpdateRecentPose(const SE3& pose) {

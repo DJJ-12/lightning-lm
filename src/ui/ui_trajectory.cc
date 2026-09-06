@@ -14,7 +14,7 @@ void UiTrajectory::AddPt(const SE3& pose) {
 
 void UiTrajectory::Render() {
     // 点线形式
-    glLineWidth(5.0);
+    glLineWidth(line_width_);
     glBegin(GL_LINE_STRIP);
     glColor3f(color_[0], color_[1], color_[2]);
 

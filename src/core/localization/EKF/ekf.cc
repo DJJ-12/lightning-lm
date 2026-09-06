@@ -10,7 +10,6 @@
 namespace lightning::loc {
 namespace {
 
-constexpr double kOmegaEpsilon = 1e-5;
 constexpr double kTimeEpsilon = 1e-9;
 
 }  // namespace
@@ -28,10 +27,10 @@ void EKF::Reset() {
 }
 
 bool EKF::Initialize(double stamp, double x, double y, double yaw,
-                     double velocity, double yaw_rate,
+                     const Eigen::Vector2d& velocity_map, double yaw_rate,
                      const Covariance& covariance) {
     if (!std::isfinite(stamp) || !std::isfinite(x) || !std::isfinite(y) ||
-        !std::isfinite(yaw) || !std::isfinite(velocity) ||
+        !std::isfinite(yaw) || !velocity_map.allFinite() ||
         !std::isfinite(yaw_rate) || !covariance.allFinite()) {
         return false;
     }
@@ -40,7 +39,8 @@ bool EKF::Initialize(double stamp, double x, double y, double yaw,
     state_.x = x;
     state_.y = y;
     state_.yaw = WrapAngle(yaw);
-    state_.velocity = velocity;
+    state_.velocity_x_map = velocity_map.x();
+    state_.velocity_y_map = velocity_map.y();
     state_.yaw_rate = yaw_rate;
     covariance_ = covariance;
     initialized_ = true;
@@ -69,62 +69,36 @@ bool EKF::PredictTo(double stamp) {
 }
 
 void EKF::PredictStep(double dt) {
-    const double yaw = state_.yaw;
-    const double velocity = state_.velocity;
-    const double yaw_rate = state_.yaw_rate;
-    const double sine = std::sin(yaw);
-    const double cosine = std::cos(yaw);
-
+    // Constant velocity in map coordinates and constant yaw rate. This model
+    // is linear except for wrapping yaw after propagation.
     StateMatrix jacobian = StateMatrix::Identity();
-    if (std::fabs(yaw_rate) >= kOmegaEpsilon) {
-        const double yaw2 = yaw + yaw_rate * dt;
-        const double sine2 = std::sin(yaw2);
-        const double cosine2 = std::cos(yaw2);
-        const double inverse_rate = 1.0 / yaw_rate;
-        const double inverse_rate_squared = inverse_rate * inverse_rate;
-        const double sine_difference = sine2 - sine;
-        const double cosine_difference = cosine - cosine2;
-
-        state_.x += velocity * inverse_rate * sine_difference;
-        state_.y += velocity * inverse_rate * cosine_difference;
-        state_.yaw = WrapAngle(yaw2);
-
-        jacobian(kX, kYaw) =
-            velocity * inverse_rate * (cosine2 - cosine);
-        jacobian(kX, kVelocity) = inverse_rate * sine_difference;
-        jacobian(kX, kYawRate) =
-            velocity * inverse_rate_squared *
-            (yaw_rate * dt * cosine2 - sine_difference);
-        jacobian(kY, kYaw) = velocity * inverse_rate * sine_difference;
-        jacobian(kY, kVelocity) = inverse_rate * cosine_difference;
-        jacobian(kY, kYawRate) =
-            velocity * inverse_rate_squared *
-            (yaw_rate * dt * sine2 - cosine_difference);
-    } else {
-        state_.x += velocity * cosine * dt;
-        state_.y += velocity * sine * dt;
-        state_.yaw = WrapAngle(yaw + yaw_rate * dt);
-
-        jacobian(kX, kYaw) = -velocity * sine * dt;
-        jacobian(kX, kVelocity) = cosine * dt;
-        jacobian(kY, kYaw) = velocity * cosine * dt;
-        jacobian(kY, kVelocity) = sine * dt;
-    }
+    jacobian(kX, kVelocityX) = dt;
+    jacobian(kY, kVelocityY) = dt;
     jacobian(kYaw, kYawRate) = dt;
 
-    Eigen::Matrix<double, kStateDim, 2> noise_input =
-        Eigen::Matrix<double, kStateDim, 2>::Zero();
-    const double half_dt_squared = 0.5 * dt * dt;
-    noise_input(kX, 0) = cosine * half_dt_squared;
-    noise_input(kY, 0) = sine * half_dt_squared;
-    noise_input(kYaw, 1) = half_dt_squared;
-    noise_input(kVelocity, 0) = dt;
-    noise_input(kYawRate, 1) = dt;
+    state_.x += state_.velocity_x_map * dt;
+    state_.y += state_.velocity_y_map * dt;
+    state_.yaw = WrapAngle(state_.yaw + state_.yaw_rate * dt);
 
-    Eigen::Matrix2d driving_noise = Eigen::Matrix2d::Zero();
+    // Driving noise is [acceleration_x_map, acceleration_y_map,
+    // yaw_acceleration]. The discrete G matrix integrates acceleration into
+    // both pose and velocity for this prediction interval.
+    Eigen::Matrix<double, kStateDim, 3> noise_input =
+        Eigen::Matrix<double, kStateDim, 3>::Zero();
+    const double half_dt_squared = 0.5 * dt * dt;
+    noise_input(kX, 0) = half_dt_squared;
+    noise_input(kY, 1) = half_dt_squared;
+    noise_input(kYaw, 2) = half_dt_squared;
+    noise_input(kVelocityX, 0) = dt;
+    noise_input(kVelocityY, 1) = dt;
+    noise_input(kYawRate, 2) = dt;
+
+    Eigen::Matrix3d driving_noise = Eigen::Matrix3d::Zero();
     driving_noise(0, 0) = options_.process_acceleration_std *
                           options_.process_acceleration_std;
-    driving_noise(1, 1) = options_.process_yaw_acceleration_std *
+    driving_noise(1, 1) = options_.process_acceleration_std *
+                          options_.process_acceleration_std;
+    driving_noise(2, 2) = options_.process_yaw_acceleration_std *
                           options_.process_yaw_acceleration_std;
     const Covariance process_noise =
         noise_input * driving_noise * noise_input.transpose();
@@ -191,37 +165,22 @@ bool EKF::UpdateYaw(double stamp, double yaw, double variance,
 }
 
 bool EKF::UpdateMapVelocity(
-    double stamp, const Eigen::Vector2d& sensor_velocity_map,
-    const Eigen::Vector2d& lever_arm_tracking,
+    double stamp, const Eigen::Vector2d& velocity_map,
     const Eigen::Matrix2d& covariance, double gate_chi2,
     double* mahalanobis) {
-    if (!PredictTo(stamp) || !sensor_velocity_map.allFinite() ||
-        !lever_arm_tracking.allFinite() || !covariance.allFinite()) {
+    if (!PredictTo(stamp) || !velocity_map.allFinite() ||
+        !covariance.allFinite()) {
         return false;
     }
 
-    const double cosine = std::cos(state_.yaw);
-    const double sine = std::sin(state_.yaw);
-    const double a =
-        state_.velocity - state_.yaw_rate * lever_arm_tracking.y();
-    const double b = state_.yaw_rate * lever_arm_tracking.x();
     const Eigen::Vector2d predicted(
-        cosine * a - sine * b,
-        sine * a + cosine * b);
-    const Eigen::Vector2d residual = sensor_velocity_map - predicted;
+        state_.velocity_x_map, state_.velocity_y_map);
+    const Eigen::Vector2d residual = velocity_map - predicted;
 
     Eigen::Matrix<double, 2, kStateDim> jacobian =
         Eigen::Matrix<double, 2, kStateDim>::Zero();
-    jacobian(0, kYaw) = -sine * a - cosine * b;
-    jacobian(1, kYaw) = cosine * a - sine * b;
-    jacobian(0, kVelocity) = cosine;
-    jacobian(1, kVelocity) = sine;
-    jacobian(0, kYawRate) =
-        -cosine * lever_arm_tracking.y() -
-        sine * lever_arm_tracking.x();
-    jacobian(1, kYawRate) =
-        -sine * lever_arm_tracking.y() +
-        cosine * lever_arm_tracking.x();
+    jacobian(0, kVelocityX) = 1.0;
+    jacobian(1, kVelocityY) = 1.0;
 
     return ApplyUpdate(
         residual, jacobian, covariance,
@@ -252,21 +211,29 @@ bool EKF::UpdateNdtPose(double stamp, const Eigen::Vector3d& pose,
 }
 
 bool EKF::UpdateWheelOdometry(double stamp, double forward_velocity,
-                              double yaw_rate,
-                              const Eigen::Matrix2d& covariance,
+                              double variance,
                               double gate_chi2, double* mahalanobis) {
     if (!PredictTo(stamp) || !std::isfinite(forward_velocity) ||
-        !std::isfinite(yaw_rate) || !covariance.allFinite()) {
+        !std::isfinite(variance) || variance <= 0.0) {
         return false;
     }
 
-    Eigen::Vector2d residual(
-        forward_velocity - state_.velocity,
-        yaw_rate - state_.yaw_rate);
-    Eigen::Matrix<double, 2, kStateDim> jacobian =
-        Eigen::Matrix<double, 2, kStateDim>::Zero();
-    jacobian(0, kVelocity) = 1.0;
-    jacobian(1, kYawRate) = 1.0;
+    const double cosine = std::cos(state_.yaw);
+    const double sine = std::sin(state_.yaw);
+    const double predicted_forward_velocity =
+        cosine * state_.velocity_x_map +
+        sine * state_.velocity_y_map;
+    Eigen::Matrix<double, 1, 1> residual;
+    residual(0) = forward_velocity - predicted_forward_velocity;
+    Eigen::Matrix<double, 1, kStateDim> jacobian =
+        Eigen::Matrix<double, 1, kStateDim>::Zero();
+    jacobian(0, kYaw) =
+        -sine * state_.velocity_x_map +
+        cosine * state_.velocity_y_map;
+    jacobian(0, kVelocityX) = cosine;
+    jacobian(0, kVelocityY) = sine;
+    Eigen::Matrix<double, 1, 1> covariance;
+    covariance(0, 0) = variance;
     return ApplyUpdate(
         residual, jacobian, covariance,
         gate_chi2 > 0.0 ? gate_chi2 : options_.wheel_gate_chi2,
@@ -341,7 +308,8 @@ bool EKF::ApplyUpdate(const Eigen::VectorXd& residual,
 EKF::StateVector EKF::ToVector() const {
     StateVector vector;
     vector << state_.x, state_.y, state_.yaw,
-              state_.velocity, state_.yaw_rate;
+              state_.velocity_x_map, state_.velocity_y_map,
+              state_.yaw_rate;
     return vector;
 }
 
@@ -349,7 +317,8 @@ void EKF::SetVector(const StateVector& vector) {
     state_.x = vector(kX);
     state_.y = vector(kY);
     state_.yaw = WrapAngle(vector(kYaw));
-    state_.velocity = vector(kVelocity);
+    state_.velocity_x_map = vector(kVelocityX);
+    state_.velocity_y_map = vector(kVelocityY);
     state_.yaw_rate = vector(kYawRate);
 }
 
@@ -383,8 +352,7 @@ SE3 EKF::Pose() const {
 
 Eigen::Vector3d EKF::VelocityMap() const {
     return Eigen::Vector3d(
-        state_.velocity * std::cos(state_.yaw),
-        state_.velocity * std::sin(state_.yaw), 0.0);
+        state_.velocity_x_map, state_.velocity_y_map, 0.0);
 }
 
 double EKF::WrapAngle(double angle) {

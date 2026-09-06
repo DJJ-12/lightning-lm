@@ -71,16 +71,18 @@ common:
 
 `localization.mode` 保留用于兼容服务和日志，不参与传感器开关判断；是否使用
 某一种观测只由对应 topic 是否为空决定。当前定位滤波器是状态为
-`[x, y, yaw, velocity, yaw_rate]` 的标准二维 EKF，预测模型为 CTRV；过程噪声、
-初始化不确定度、各观测的 fallback 标准差及卡方门限统一放在
-`localization.ekf` 中。
+`[x_map, y_map, yaw_map, vx_map, vy_map, yaw_rate]` 的标准二维 EKF。预测使用
+map 系恒速度、恒 yaw-rate 模型；过程噪声、初始化不确定度、各观测的
+fallback 标准差及卡方门限统一放在 `localization.ekf` 中。
 
 RTK 位置、INS 姿态和 INS 速度是三个相互独立的观测，不再组装成复合 RTK 消息。
-每一条观测到来后，EKF 都先用 CTRV 预测到对应 `Header.stamp`，再执行该观测
+每一条观测到来后，EKF 都先预测到对应 `Header.stamp`，再执行该观测
 自己的更新。`Pose2D` 没有时间戳和协方差，不再作为 INS 航向输入。
-`/ins/velocity` 非空时作为 map 系二维速度观测，轮速 topic 非空时更新车体前向
-速度和 yaw rate。`imu_topic` 不会被隐式当作 yaw-rate 观测，只继续服务建图、
-点云去畸变和未来扩展。
+`/ins/velocity` 的 ENU 东、北速度先旋转到 map，然后直接更新 `vx_map、vy_map`，
+不再套用车体前向速度模型，也不再使用位置杆臂修正速度。轮速 topic 非空时只把
+`linear.x` 作为 body 系前向速度，通过
+`cos(yaw) * vx_map + sin(yaw) * vy_map` 更新；不会把 `angular.z` 隐式当作陀螺仪。
+`imu_topic` 继续只服务建图、点云去畸变和未来扩展。
 
 在线模式的缓存规则只有两条：
 
@@ -89,10 +91,15 @@ RTK 位置、INS 姿态和 INS 速度是三个相互独立的观测，不再组�
   一个最新值，新消息覆盖尚未消费的同类旧消息。
 
 `cx16.yaml` 中 `localization.map_from_enu` 的 `lat/lon/alt/pitch/roll/yaw`
-描述建图起点；其中角度单位为度，`yaw` 沿用厂家航向角定义（北为 0°、
-顺时针为正）。定位启动时用这六个地图参考值和现有
+描述建图起点；其中角度单位为度，`yaw` 是从真北轴到 map 的 +X 轴逆时针
+旋转的角度。定位启动时用这六个地图参考值和现有
 `lever_arm_tracking` 一次性计算固定的 `map <- UTM/ENU` 关系，不再运行时
-积累轨迹求对齐。
+积累轨迹求对齐。这里的 `yaw` 不是设备安装角，而是从真北轴到 map 的 +X 轴
+逆时针旋转的角度。map 的 +X 轴在标准 true ENU 中的 yaw 是 `yaw+90°`；把
+true ENU 坐标值转换到 map 时使用逆变换
+`R_map_true_enu=Rz(-(yaw+90°))`。UTM 位置另行消除参考点的网格收敛角。
+定位模块不再读取或乘入 `lio_sam.extrinsicRPY`。`pitch/roll` 保留为建图起点
+的参考元数据，但不参与当前二维 EKF 的平面坐标旋转。
 
 
 ## 在线建图
@@ -131,6 +138,15 @@ NDT 观测；但 `set_map_path` 仍会加载地图并创建定位 UI。RTK 位�
 调试时可同时查看 `/lightning/localization/debug/raw_rtk_path`、
 `/lightning/localization/debug/raw_ndt_path` 和最终
 `/lightning/localization/path`，用来区分坐标预处理与滤波本身的问题。
+Pangolin UI 中红线是最终 EKF 状态轨迹，绿线是进入 EKF 更新前、已经完成
+WGS84/UTM/ENU 到 map 转换的原始 RTK 天线位置轨迹，黄线是激光扫描位姿轨迹。
+
+只配置 `rtk_fix_topic` 也可以直接启动在线或离线定位。此时第一帧有效
+`NavSatFix` 直接初始化位置 EKF，后续每帧继续更新位置并输出红色轨迹；绿色
+轨迹始终是未经滤波的 GNSS 天线位置。由于没有航向就无法把天线杆臂旋转到
+map，位置单传感器模式会主动忽略 `lever_arm_tracking`，同时把输出 yaw 保持为
+未观测的 0，并给它较大的初始协方差。只有配置了 `rtk_orientation_topic` 时才
+等待同步的初始航向并启用杆臂补偿。
 
 ```bash
 ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'online_localization'}"

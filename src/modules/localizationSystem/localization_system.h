@@ -67,9 +67,10 @@ class LocalizationSystem {
     // LiDAR needs the map for NDT; the UI also needs it for visualization.
     bool RequiresMap() const { return UsesLidar() || with_ui_; }
     bool RequiresInitialGuess() const {
-        // Automatic global initialization needs both antenna position and
-        // absolute yaw. Every other sensor combination needs set_location.
-        return !(UsesRtk() && UsesInsOrientation());
+        // A GNSS position is sufficient to start the position-only EKF. If
+        // INS yaw is disabled, yaw remains unobserved and lever-arm
+        // compensation is deliberately disabled as well.
+        return !UsesRtk();
     }
     bool ReadyWithoutMap() const { return !RequiresMap(); }
     static Mode ModeFromString(const std::string& value);
@@ -88,6 +89,7 @@ class LocalizationSystem {
         const geometry_msgs::msg::TwistWithCovarianceStamped& velocity,
         Eigen::Vector2d* velocity_map,
         Eigen::Matrix2d* covariance_map) const;
+    Eigen::Vector2d RtkLeverArmForFilter() const;
     void TryInitializeEkf();
     void InitializeEkfFromNdt(const loc::LocalizationResult& ndt);
     bool InitializeManualGuess(double stamp);
@@ -128,7 +130,6 @@ class LocalizationSystem {
     mutable std::mutex filter_mutex_;
     loc::EKF ekf_;
 
-    Eigen::Matrix3d imu_from_tracking_rotation_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d rtk_ins_lever_arm_tracking_ = Eigen::Vector3d::Zero();
     double initial_position_std_ = 0.5;
     double initial_yaw_std_ = 3.0 * 3.14159265358979323846 / 180.0;
@@ -143,12 +144,11 @@ class LocalizationSystem {
     double ndt_position_std_y_ = 0.10;
     double ndt_yaw_std_ = 1.0 * 3.14159265358979323846 / 180.0;
     double wheel_velocity_std_ = 0.10;
-    double wheel_yaw_rate_std_ = 0.05;
 
     int utm_zone_ = 0;
     bool map_from_enu_ready_ = false;
-    Eigen::Matrix3d map_from_enu_rotation_ = Eigen::Matrix3d::Identity();
-    Eigen::Vector3d map_from_enu_translation_ = Eigen::Vector3d::Zero();
+    Eigen::Matrix3d map_from_utm_rotation_ = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d map_from_utm_translation_ = Eigen::Vector3d::Zero();
     // INS attitude/velocity use true local ENU axes. UTM positions use grid
     // axes, so this fixed rotation applies the reference meridian convergence.
     Eigen::Matrix3d utm_from_true_enu_rotation_ = Eigen::Matrix3d::Identity();

@@ -60,6 +60,10 @@ class Localization {
     // reach it through ResultCallback; only the selected final result is sent
     // back here for visualization.
     void UpdateVisualization(const LocalizationResult& result);
+    // Draws the pre-filter RTK antenna position after WGS84/UTM/ENU -> map
+    // conversion. This is visualization only and never changes localization.
+    void UpdateRtkObservationVisualization(
+        const Eigen::Vector2d& position_map);
     void MarkPoor(const std::string& message);
     LocalizationResult GetLatestResult() const;
 
