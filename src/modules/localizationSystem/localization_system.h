@@ -46,9 +46,7 @@ class LocalizationSystem {
     // Each standard ROS observation enters the filter independently. No RTK
     // synchronization packet or input history is maintained in this module.
     void ProcessRtkPosition(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
-    void ProcessInsOrientation(
-        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation);
-    void ProcessInsVelocity(
+    void ProcessRtkVelocity(
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity);
     void ProcessWheelOdometry(const nav_msgs::msg::Odometry::SharedPtr& odometry);
     void ProcessImu(const sensor_msgs::msg::Imu::SharedPtr& imu);
@@ -62,15 +60,13 @@ class LocalizationSystem {
         return !lidar_topic_.empty() || !livox_lidar_topic_.empty();
     }
     bool UsesRtk() const { return !rtk_fix_topic_.empty(); }
-    bool UsesInsOrientation() const { return !rtk_orientation_topic_.empty(); }
-    bool UsesInsVelocity() const { return !rtk_velocity_topic_.empty(); }
+    bool UsesRtkVelocity() const { return !rtk_velocity_topic_.empty(); }
     bool UsesWheelOdometry() const { return !wheel_odometry_topic_.empty(); }
     // LiDAR needs the map for NDT; the UI also needs it for visualization.
     bool RequiresMap() const { return UsesLidar() || with_ui_; }
     bool RequiresInitialGuess() const {
-        // A GNSS position is sufficient to start the position-only EKF. If
-        // INS yaw is disabled, yaw remains unobserved and lever-arm
-        // compensation is deliberately disabled as well.
+        // A GNSS position establishes the absolute map position. Initial 3-D
+        // orientation is zero by definition and is corrected by NDT pose.
         return !UsesRtk();
     }
     bool ReadyWithoutMap() const { return !RequiresMap(); }
@@ -82,16 +78,13 @@ class LocalizationSystem {
     void HandleNdtResult(const loc::LocalizationResult& result);
     bool InitializeFixedMapTransform(const YAML::Node& map_from_enu);
     bool PositionToMap(const sensor_msgs::msg::NavSatFix& fix,
-                       Eigen::Vector2d* position_map,
-                       Eigen::Matrix2d* covariance_map) const;
-    bool OrientationToMapYaw(
-        const geometry_msgs::msg::TwistWithCovarianceStamped& orientation,
-        double* yaw_map, double* variance) const;
+                       Eigen::Vector3d* position_map,
+                       Eigen::Matrix3d* covariance_map) const;
     bool VelocityToMap(
         const geometry_msgs::msg::TwistWithCovarianceStamped& velocity,
         Eigen::Vector2d* velocity_map,
         Eigen::Matrix2d* covariance_map) const;
-    Eigen::Vector2d RtkLeverArmForFilter() const;
+    Eigen::Vector3d RtkLeverArmForFilter() const;
     void TryInitializeEkf();
     void InitializeEkfFromNdt(const loc::LocalizationResult& ndt);
     bool InitializeManualGuess(double stamp);
@@ -118,7 +111,6 @@ class LocalizationSystem {
     std::string livox_lidar_topic_;
     std::string imu_topic_;
     std::string rtk_fix_topic_;
-    std::string rtk_orientation_topic_;
     std::string rtk_velocity_topic_;
     std::string wheel_odometry_topic_;
     bool with_ui_ = false;
@@ -134,42 +126,36 @@ class LocalizationSystem {
 
     Eigen::Vector3d rtk_ins_lever_arm_tracking_ = Eigen::Vector3d::Zero();
     double initial_position_std_ = 0.5;
-    double initial_yaw_std_ = 3.0 * 3.14159265358979323846 / 180.0;
+    double initial_orientation_std_ =
+        3.0 * 3.14159265358979323846 / 180.0;
     double initial_velocity_std_ = 2.0;
     double initial_yaw_rate_std_ = 0.5;
     double rtk_position_std_x_ = 0.05;
     double rtk_position_std_y_ = 0.05;
-    double ins_yaw_std_ = 1.0 * 3.14159265358979323846 / 180.0;
+    double rtk_position_std_z_ = 0.10;
     double rtk_velocity_std_x_ = 0.10;
     double rtk_velocity_std_y_ = 0.10;
     double ndt_position_std_x_ = 0.10;
     double ndt_position_std_y_ = 0.10;
-    double ndt_yaw_std_ = 1.0 * 3.14159265358979323846 / 180.0;
-    double wheel_velocity_std_ = 0.10;
+    double ndt_position_std_z_ = 0.20;
+    double ndt_orientation_std_ =
+        1.0 * 3.14159265358979323846 / 180.0;
 
     int utm_zone_ = 0;
     bool map_from_enu_ready_ = false;
     Eigen::Matrix3d map_from_utm_rotation_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d map_from_utm_translation_ = Eigen::Vector3d::Zero();
-    // INS attitude/velocity use true local ENU axes. UTM positions use grid
-    // axes, so this fixed rotation applies the reference meridian convergence.
+    // RTK/INS velocity uses true local ENU axes. UTM positions use grid axes, so
+    // this fixed rotation applies the reference meridian convergence.
     Eigen::Matrix3d utm_from_true_enu_rotation_ = Eigen::Matrix3d::Identity();
     Eigen::Matrix3d map_from_true_enu_rotation_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d reference_gnss_utm_ = Eigen::Vector3d::Zero();
     Eigen::Vector3d reference_gnss_map_ = Eigen::Vector3d::Zero();
-    // Course of the map +X axis: true north is zero and clockwise is
-    // positive. This is exactly localization.map_from_enu.yaw, in radians.
-    double map_reference_course_rad_ = 0.0;
-
     // RTK-only initialization keeps one latest value per observation type. It
     // is state, not a pending-message queue.
     bool has_initial_position_ = false;
     double initial_position_stamp_ = 0.0;
-    Eigen::Vector2d initial_sensor_position_map_ = Eigen::Vector2d::Zero();
-    bool has_initial_yaw_ = false;
-    double initial_yaw_stamp_ = 0.0;
-    double initial_yaw_map_ = 0.0;
-    double initial_observation_max_dt_ = 0.05;
+    Eigen::Vector3d initial_sensor_position_map_ = Eigen::Vector3d::Zero();
 
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr loc_odom_pub_;

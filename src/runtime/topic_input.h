@@ -34,9 +34,7 @@ class TopicInput {
     using ImuCallback = std::function<void(const sensor_msgs::msg::Imu::SharedPtr&)>;
     using RtkPositionCallback = std::function<void(
         const sensor_msgs::msg::NavSatFix::SharedPtr&)>;
-    using InsOrientationCallback = std::function<void(
-        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr&)>;
-    using InsVelocityCallback = std::function<void(
+    using RtkVelocityCallback = std::function<void(
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr&)>;
     using WheelOdometryCallback = std::function<void(
         const nav_msgs::msg::Odometry::SharedPtr&)>;
@@ -53,8 +51,7 @@ class TopicInput {
                CloudCallback cloud_cb,
                LivoxCallback livox_cb,
                RtkPositionCallback rtk_position_cb,
-               InsOrientationCallback ins_orientation_cb,
-               InsVelocityCallback ins_velocity_cb,
+               RtkVelocityCallback rtk_velocity_cb,
                WheelOdometryCallback wheel_odometry_cb);
     void SetEnabled(bool enabled, bool localization = false);
     void Shutdown();
@@ -75,7 +72,6 @@ class TopicInput {
     std::uint64_t cloud_received_ = 0;
     std::uint64_t livox_received_ = 0;
     std::uint64_t rtk_fix_received_ = 0;
-    std::uint64_t rtk_orientation_received_ = 0;
     std::uint64_t rtk_velocity_received_ = 0;
     std::uint64_t wheel_odometry_received_ = 0;
     std::uint64_t lidar_topic_sequence_ = 0;
@@ -84,8 +80,7 @@ class TopicInput {
     CloudCallback cloud_cb_;
     LivoxCallback livox_cb_;
     RtkPositionCallback rtk_position_cb_;
-    InsOrientationCallback ins_orientation_cb_;
-    InsVelocityCallback ins_velocity_cb_;
+    RtkVelocityCallback rtk_velocity_cb_;
     WheelOdometryCallback wheel_odometry_cb_;
 
     rclcpp::Node::SharedPtr node_;
@@ -96,8 +91,6 @@ class TopicInput {
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_sub_;
     rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr rtk_fix_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr
-        rtk_orientation_sub_;
     rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr
         rtk_velocity_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_odometry_sub_;

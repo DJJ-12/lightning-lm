@@ -37,8 +37,7 @@ bool TopicInput::Start(const std::string& yaml_path,
                        CloudCallback cloud_cb,
                        LivoxCallback livox_cb,
                        RtkPositionCallback rtk_position_cb,
-                       InsOrientationCallback ins_orientation_cb,
-                       InsVelocityCallback ins_velocity_cb,
+                       RtkVelocityCallback rtk_velocity_cb,
                        WheelOdometryCallback wheel_odometry_cb) {
     if (running_.load()) {
         return true;
@@ -53,7 +52,6 @@ bool TopicInput::Start(const std::string& yaml_path,
     cloud_received_ = 0;
     livox_received_ = 0;
     rtk_fix_received_ = 0;
-    rtk_orientation_received_ = 0;
     rtk_velocity_received_ = 0;
     wheel_odometry_received_ = 0;
     lidar_topic_sequence_ = 0;
@@ -69,8 +67,6 @@ bool TopicInput::Start(const std::string& yaml_path,
     const std::string cloud_topic = ReadTopic(common, "lidar_topic");
     const std::string livox_topic = ReadTopic(common, "livox_lidar_topic");
     const std::string rtk_fix_topic = ReadTopic(common, "rtk_fix_topic");
-    const std::string rtk_orientation_topic =
-        ReadTopic(common, "rtk_orientation_topic");
     const std::string rtk_velocity_topic =
         ReadTopic(common, "rtk_velocity_topic");
     const std::string wheel_odometry_topic =
@@ -80,8 +76,7 @@ bool TopicInput::Start(const std::string& yaml_path,
     cloud_cb_ = std::move(cloud_cb);
     livox_cb_ = std::move(livox_cb);
     rtk_position_cb_ = std::move(rtk_position_cb);
-    ins_orientation_cb_ = std::move(ins_orientation_cb);
-    ins_velocity_cb_ = std::move(ins_velocity_cb);
+    rtk_velocity_cb_ = std::move(rtk_velocity_cb);
     wheel_odometry_cb_ = std::move(wheel_odometry_cb);
 
     node_ = std::make_shared<rclcpp::Node>("lightning_topic_input");
@@ -193,33 +188,7 @@ bool TopicInput::Start(const std::string& yaml_path,
                 });
     }
 
-    if (ins_orientation_cb_ && !rtk_orientation_topic.empty()) {
-        rtk_orientation_sub_ =
-            node_->create_subscription<
-                geometry_msgs::msg::TwistWithCovarianceStamped>(
-                rtk_orientation_topic,
-                latest_observation_qos,
-                [this](geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg) {
-                    std::lock_guard<std::mutex> callback_gate(
-                        callback_gate_mutex_);
-                    if (!input_enabled_.load(std::memory_order_acquire) ||
-                        !localization_input_enabled_.load(
-                            std::memory_order_acquire)) {
-                        return;
-                    }
-                    ++rtk_orientation_received_;
-                    try {
-                        ins_orientation_cb_(msg);
-                    } catch (const std::exception& e) {
-                        LOG(ERROR) << "[Topic input][INS orientation] callback exception: "
-                                   << e.what();
-                    } catch (...) {
-                        LOG(ERROR) << "[Topic input][INS orientation] unknown callback exception";
-                    }
-                });
-    }
-
-    if (ins_velocity_cb_ && !rtk_velocity_topic.empty()) {
+    if (rtk_velocity_cb_ && !rtk_velocity_topic.empty()) {
         rtk_velocity_sub_ =
             node_->create_subscription<
                 geometry_msgs::msg::TwistWithCovarianceStamped>(
@@ -235,12 +204,12 @@ bool TopicInput::Start(const std::string& yaml_path,
                     }
                     ++rtk_velocity_received_;
                     try {
-                        ins_velocity_cb_(msg);
+                        rtk_velocity_cb_(msg);
                     } catch (const std::exception& e) {
-                        LOG(ERROR) << "[Topic input][INS velocity] callback exception: "
+                        LOG(ERROR) << "[Topic input][RTK velocity] callback exception: "
                                    << e.what();
                     } catch (...) {
-                        LOG(ERROR) << "[Topic input][INS velocity] unknown callback exception";
+                        LOG(ERROR) << "[Topic input][RTK velocity] unknown callback exception";
                     }
                 });
     }
@@ -279,7 +248,6 @@ bool TopicInput::Start(const std::string& yaml_path,
               << ", livox=" << livox_topic
               << ", imu=" << imu_topic
               << ", rtk_fix=" << (rtk_fix_topic.empty() ? "disabled" : rtk_fix_topic)
-              << ", rtk_orientation=" << (rtk_orientation_topic.empty() ? "disabled" : rtk_orientation_topic)
               << ", rtk_velocity=" << (rtk_velocity_topic.empty() ? "disabled" : rtk_velocity_topic)
               << ", wheel_odometry=" << (wheel_odometry_topic.empty() ? "disabled" : wheel_odometry_topic)
               << ", cloud_qos=KEEP_LAST(1)+BEST_EFFORT+VOLATILE"
@@ -332,7 +300,6 @@ void TopicInput::Shutdown() {
     cloud_sub_.reset();
     livox_sub_.reset();
     rtk_fix_sub_.reset();
-    rtk_orientation_sub_.reset();
     rtk_velocity_sub_.reset();
     wheel_odometry_sub_.reset();
     LOG(INFO) << "[Topic接收析构] [05] 销毁输入节点和executor";
@@ -342,8 +309,7 @@ void TopicInput::Shutdown() {
     cloud_cb_ = nullptr;
     livox_cb_ = nullptr;
     rtk_position_cb_ = nullptr;
-    ins_orientation_cb_ = nullptr;
-    ins_velocity_cb_ = nullptr;
+    rtk_velocity_cb_ = nullptr;
     wheel_odometry_cb_ = nullptr;
 
     LOG(INFO) << "[Topic接收] 接收线程已停止"
@@ -351,7 +317,6 @@ void TopicInput::Shutdown() {
               << ", cloud_received=" << cloud_received_
               << ", livox_received=" << livox_received_
               << ", rtk_fix_received=" << rtk_fix_received_
-              << ", rtk_orientation_received=" << rtk_orientation_received_
               << ", rtk_velocity_received=" << rtk_velocity_received_
               << ", wheel_odometry_received=" << wheel_odometry_received_
               << ", lidar_topic_sequence=" << lidar_topic_sequence_;

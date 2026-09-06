@@ -11,6 +11,7 @@ namespace lightning::loc {
 namespace {
 
 constexpr double kTimeEpsilon = 1e-9;
+constexpr double kJacobianEpsilon = 1e-6;
 
 }  // namespace
 
@@ -26,25 +27,28 @@ void EKF::Reset() {
     covariance_.setIdentity();
 }
 
-bool EKF::Initialize(double stamp, double x, double y, double yaw,
-                     const Eigen::Vector2d& velocity_map, double yaw_rate,
+bool EKF::Initialize(double stamp,
+                     const Eigen::Vector3d& position_map,
+                     const Eigen::Vector3d& rpy_map,
+                     const Eigen::Vector3d& velocity_map,
+                     const Eigen::Vector3d& angular_velocity,
                      const Covariance& covariance) {
-    if (!std::isfinite(stamp) || !std::isfinite(x) || !std::isfinite(y) ||
-        !std::isfinite(yaw) || !velocity_map.allFinite() ||
-        !std::isfinite(yaw_rate) || !covariance.allFinite()) {
+    if (!std::isfinite(stamp) || !position_map.allFinite() ||
+        !rpy_map.allFinite() || !velocity_map.allFinite() ||
+        !angular_velocity.allFinite() || !covariance.allFinite()) {
         return false;
     }
 
     state_.stamp = stamp;
-    state_.x = x;
-    state_.y = y;
-    state_.yaw = WrapAngle(yaw);
-    state_.velocity_x_map = velocity_map.x();
-    state_.velocity_y_map = velocity_map.y();
-    state_.yaw_rate = yaw_rate;
+    state_.position_map = position_map;
+    state_.rpy_map = rpy_map.unaryExpr(
+        [](double angle) { return WrapAngle(angle); });
+    state_.velocity_map = velocity_map;
+    state_.angular_velocity = angular_velocity;
     covariance_ = covariance;
     initialized_ = true;
     StabilizeCovariance();
+    EnforceMotionConstraints();
     return true;
 }
 
@@ -69,114 +73,88 @@ bool EKF::PredictTo(double stamp) {
 }
 
 void EKF::PredictStep(double dt) {
-    // Constant velocity in map coordinates and constant yaw rate. This model
-    // is linear except for wrapping yaw after propagation.
-    StateMatrix jacobian = StateMatrix::Identity();
-    jacobian(kX, kVelocityX) = dt;
-    jacobian(kY, kVelocityY) = dt;
-    jacobian(kYaw, kYawRate) = dt;
+    StateMatrix transition = StateMatrix::Identity();
+    transition(kPositionX, kVelocityX) = dt;
+    transition(kPositionY, kVelocityY) = dt;
+    transition(kYaw, kAngularVelocityZ) = dt;
 
-    state_.x += state_.velocity_x_map * dt;
-    state_.y += state_.velocity_y_map * dt;
-    state_.yaw = WrapAngle(state_.yaw + state_.yaw_rate * dt);
+    state_.position_map.x() += state_.velocity_map.x() * dt;
+    state_.position_map.y() += state_.velocity_map.y() * dt;
+    state_.rpy_map.z() = WrapAngle(
+        state_.rpy_map.z() + state_.angular_velocity.z() * dt);
 
-    // Driving noise is [acceleration_x_map, acceleration_y_map,
-    // yaw_acceleration]. The discrete G matrix integrates acceleration into
-    // both pose and velocity for this prediction interval.
-    Eigen::Matrix<double, kStateDim, 3> noise_input =
-        Eigen::Matrix<double, kStateDim, 3>::Zero();
+    // Driving noise:
+    // [a_x_map, a_y_map, yaw_acceleration,
+    //  vertical_position_rate, roll_rate, pitch_rate].
+    Eigen::Matrix<double, kStateDim, 6> noise_input =
+        Eigen::Matrix<double, kStateDim, 6>::Zero();
     const double half_dt_squared = 0.5 * dt * dt;
-    noise_input(kX, 0) = half_dt_squared;
-    noise_input(kY, 1) = half_dt_squared;
-    noise_input(kYaw, 2) = half_dt_squared;
+    noise_input(kPositionX, 0) = half_dt_squared;
     noise_input(kVelocityX, 0) = dt;
+    noise_input(kPositionY, 1) = half_dt_squared;
     noise_input(kVelocityY, 1) = dt;
-    noise_input(kYawRate, 2) = dt;
+    noise_input(kYaw, 2) = half_dt_squared;
+    noise_input(kAngularVelocityZ, 2) = dt;
+    noise_input(kPositionZ, 3) = dt;
+    noise_input(kRoll, 4) = dt;
+    noise_input(kPitch, 5) = dt;
 
-    Eigen::Matrix3d driving_noise = Eigen::Matrix3d::Zero();
+    Eigen::Matrix<double, 6, 6> driving_noise =
+        Eigen::Matrix<double, 6, 6>::Zero();
     driving_noise(0, 0) = options_.process_acceleration_std *
                           options_.process_acceleration_std;
-    driving_noise(1, 1) = options_.process_acceleration_std *
-                          options_.process_acceleration_std;
+    driving_noise(1, 1) = driving_noise(0, 0);
     driving_noise(2, 2) = options_.process_yaw_acceleration_std *
                           options_.process_yaw_acceleration_std;
-    const Covariance process_noise =
-        noise_input * driving_noise * noise_input.transpose();
+    driving_noise(3, 3) = options_.process_vertical_position_rate_std *
+                          options_.process_vertical_position_rate_std;
+    driving_noise(4, 4) = options_.process_roll_pitch_rate_std *
+                          options_.process_roll_pitch_rate_std;
+    driving_noise(5, 5) = driving_noise(4, 4);
 
-    covariance_ = jacobian * covariance_ * jacobian.transpose() +
-                  process_noise;
+    covariance_ = transition * covariance_ * transition.transpose() +
+                  noise_input * driving_noise * noise_input.transpose();
     StabilizeCovariance();
+    EnforceMotionConstraints();
 }
 
 bool EKF::UpdateRtkPosition(
-    double stamp, const Eigen::Vector2d& sensor_position_map,
-    const Eigen::Vector2d& lever_arm_tracking,
-    const Eigen::Matrix2d& covariance, double gate_chi2,
+    double stamp, const Eigen::Vector3d& sensor_position_map,
+    const Eigen::Vector3d& lever_arm_tracking,
+    const Eigen::Matrix3d& covariance, double gate_chi2,
     double* mahalanobis) {
     if (!PredictTo(stamp) || !sensor_position_map.allFinite() ||
         !lever_arm_tracking.allFinite() || !covariance.allFinite()) {
         return false;
     }
 
-    const double cosine = std::cos(state_.yaw);
-    const double sine = std::sin(state_.yaw);
-    Eigen::Matrix2d rotation;
-    rotation << cosine, -sine,
-                sine, cosine;
-    const Eigen::Vector2d position(state_.x, state_.y);
-    const Eigen::Vector2d residual =
-        sensor_position_map - (position + rotation * lever_arm_tracking);
+    const Eigen::Matrix3d rotation = RotationFromRpy(state_.rpy_map);
+    const Eigen::Vector3d tracking_position_observation =
+        sensor_position_map - rotation * lever_arm_tracking;
+    const Eigen::Vector3d residual =
+        tracking_position_observation - state_.position_map;
 
-    Eigen::Matrix<double, 2, kStateDim> jacobian =
-        Eigen::Matrix<double, 2, kStateDim>::Zero();
-    jacobian(0, kX) = 1.0;
-    jacobian(1, kY) = 1.0;
-    jacobian(0, kYaw) =
-        -sine * lever_arm_tracking.x() -
-        cosine * lever_arm_tracking.y();
-    jacobian(1, kYaw) =
-        cosine * lever_arm_tracking.x() -
-        sine * lever_arm_tracking.y();
+    Eigen::Matrix<double, 3, kStateDim> jacobian =
+        Eigen::Matrix<double, 3, kStateDim>::Zero();
+    jacobian.block<3, 3>(0, kPositionX).setIdentity();
 
     return ApplyUpdate(
         residual, jacobian, covariance,
         gate_chi2 > 0.0 ? gate_chi2 : options_.rtk_position_gate_chi2,
-        mahalanobis);
-}
-
-bool EKF::UpdateYaw(double stamp, double yaw, double variance,
-                    double gate_chi2, double* mahalanobis) {
-    if (!PredictTo(stamp) || !std::isfinite(yaw) ||
-        !std::isfinite(variance) || variance <= 0.0) {
-        return false;
-    }
-
-    Eigen::Matrix<double, 1, 1> residual;
-    residual(0) = WrapAngle(yaw - state_.yaw);
-    Eigen::Matrix<double, 1, kStateDim> jacobian =
-        Eigen::Matrix<double, 1, kStateDim>::Zero();
-    jacobian(0, kYaw) = 1.0;
-    Eigen::Matrix<double, 1, 1> noise;
-    noise(0, 0) = variance;
-    return ApplyUpdate(
-        residual, jacobian, noise,
-        gate_chi2 > 0.0 ? gate_chi2 : options_.ins_yaw_gate_chi2,
-        mahalanobis);
+        mahalanobis, false);
 }
 
 bool EKF::UpdateMapVelocity(
-    double stamp, const Eigen::Vector2d& velocity_map,
+    double stamp, const Eigen::Vector2d& velocity_map_xy,
     const Eigen::Matrix2d& covariance, double gate_chi2,
     double* mahalanobis) {
-    if (!PredictTo(stamp) || !velocity_map.allFinite() ||
+    if (!PredictTo(stamp) || !velocity_map_xy.allFinite() ||
         !covariance.allFinite()) {
         return false;
     }
 
-    const Eigen::Vector2d predicted(
-        state_.velocity_x_map, state_.velocity_y_map);
-    const Eigen::Vector2d residual = velocity_map - predicted;
-
+    const Eigen::Vector2d residual =
+        velocity_map_xy - state_.velocity_map.head<2>();
     Eigen::Matrix<double, 2, kStateDim> jacobian =
         Eigen::Matrix<double, 2, kStateDim>::Zero();
     jacobian(0, kVelocityX) = 1.0;
@@ -185,65 +163,44 @@ bool EKF::UpdateMapVelocity(
     return ApplyUpdate(
         residual, jacobian, covariance,
         gate_chi2 > 0.0 ? gate_chi2 : options_.rtk_velocity_gate_chi2,
-        mahalanobis);
+        mahalanobis, false);
 }
 
-bool EKF::UpdateNdtPose(double stamp, const Eigen::Vector3d& pose,
-                        const Eigen::Matrix3d& covariance,
+bool EKF::UpdateNdtPose(double stamp, const SE3& pose_map_tracking,
+                        const Matrix6d& covariance,
                         double gate_chi2, double* mahalanobis) {
-    if (!PredictTo(stamp) || !pose.allFinite() || !covariance.allFinite()) {
+    if (!PredictTo(stamp) || !pose_map_tracking.translation().allFinite() ||
+        !pose_map_tracking.unit_quaternion().coeffs().allFinite() ||
+        !covariance.allFinite()) {
         return false;
     }
 
-    Eigen::Vector3d residual;
-    residual << pose.x() - state_.x,
-                pose.y() - state_.y,
-                WrapAngle(pose.z() - state_.yaw);
-    Eigen::Matrix<double, 3, kStateDim> jacobian =
-        Eigen::Matrix<double, 3, kStateDim>::Zero();
-    jacobian(0, kX) = 1.0;
-    jacobian(1, kY) = 1.0;
-    jacobian(2, kYaw) = 1.0;
+    const Eigen::Vector3d measured_rpy =
+        RpyFromRotation(pose_map_tracking.rotationMatrix());
+    Eigen::Matrix<double, 6, 1> residual;
+    residual.head<3>() =
+        pose_map_tracking.translation() - state_.position_map;
+    for (int axis = 0; axis < 3; ++axis) {
+        residual(3 + axis) =
+            WrapAngle(measured_rpy(axis) - state_.rpy_map(axis));
+    }
+
+    Eigen::Matrix<double, 6, kStateDim> jacobian =
+        Eigen::Matrix<double, 6, kStateDim>::Zero();
+    jacobian.block<3, 3>(0, kPositionX).setIdentity();
+    jacobian.block<3, 3>(3, kRoll).setIdentity();
+
     return ApplyUpdate(
         residual, jacobian, covariance,
         gate_chi2 > 0.0 ? gate_chi2 : options_.ndt_pose_gate_chi2,
-        mahalanobis);
-}
-
-bool EKF::UpdateWheelOdometry(double stamp, double forward_velocity,
-                              double variance,
-                              double gate_chi2, double* mahalanobis) {
-    if (!PredictTo(stamp) || !std::isfinite(forward_velocity) ||
-        !std::isfinite(variance) || variance <= 0.0) {
-        return false;
-    }
-
-    const double cosine = std::cos(state_.yaw);
-    const double sine = std::sin(state_.yaw);
-    const double predicted_forward_velocity =
-        cosine * state_.velocity_x_map +
-        sine * state_.velocity_y_map;
-    Eigen::Matrix<double, 1, 1> residual;
-    residual(0) = forward_velocity - predicted_forward_velocity;
-    Eigen::Matrix<double, 1, kStateDim> jacobian =
-        Eigen::Matrix<double, 1, kStateDim>::Zero();
-    jacobian(0, kYaw) =
-        -sine * state_.velocity_x_map +
-        cosine * state_.velocity_y_map;
-    jacobian(0, kVelocityX) = cosine;
-    jacobian(0, kVelocityY) = sine;
-    Eigen::Matrix<double, 1, 1> covariance;
-    covariance(0, 0) = variance;
-    return ApplyUpdate(
-        residual, jacobian, covariance,
-        gate_chi2 > 0.0 ? gate_chi2 : options_.wheel_gate_chi2,
-        mahalanobis);
+        mahalanobis, true);
 }
 
 bool EKF::ApplyUpdate(const Eigen::VectorXd& residual,
                       const Eigen::MatrixXd& measurement_jacobian,
                       const Eigen::MatrixXd& measurement_covariance,
-                      double gate_chi2, double* mahalanobis) {
+                      double gate_chi2, double* mahalanobis,
+                      bool allow_attitude_update) {
     if (!initialized_ || residual.size() == 0 || !residual.allFinite() ||
         measurement_jacobian.cols() != kStateDim ||
         measurement_jacobian.rows() != residual.size() ||
@@ -285,10 +242,17 @@ bool EKF::ApplyUpdate(const Eigen::VectorXd& residual,
 
     const Eigen::MatrixXd right_hand_side =
         measurement_jacobian * covariance_;
-    const Eigen::MatrixXd gain =
+    Eigen::MatrixXd gain =
         decomposition.solve(right_hand_side).transpose();
     if (decomposition.info() != Eigen::Success || !gain.allFinite()) {
         return false;
+    }
+    if (!allow_attitude_update) {
+        // GNSS position and ENU velocity are not attitude sensors. Even if a
+        // previous pose update created numerical cross-covariance, these
+        // observations must not rotate RPY or alter angular velocity.
+        gain.block(kRoll, 0, 3, gain.cols()).setZero();
+        gain.block(kAngularVelocityX, 0, 3, gain.cols()).setZero();
     }
 
     StateVector vector = ToVector();
@@ -302,24 +266,30 @@ bool EKF::ApplyUpdate(const Eigen::VectorXd& residual,
         joseph_left * covariance_ * joseph_left.transpose() +
         gain * noise * gain.transpose();
     StabilizeCovariance();
+    EnforceMotionConstraints();
     return true;
 }
 
 EKF::StateVector EKF::ToVector() const {
     StateVector vector;
-    vector << state_.x, state_.y, state_.yaw,
-              state_.velocity_x_map, state_.velocity_y_map,
-              state_.yaw_rate;
+    vector.segment<3>(kPositionX) = state_.position_map;
+    vector.segment<3>(kRoll) = state_.rpy_map;
+    vector.segment<3>(kVelocityX) = state_.velocity_map;
+    vector.segment<3>(kAngularVelocityX) = state_.angular_velocity;
     return vector;
 }
 
 void EKF::SetVector(const StateVector& vector) {
-    state_.x = vector(kX);
-    state_.y = vector(kY);
-    state_.yaw = WrapAngle(vector(kYaw));
-    state_.velocity_x_map = vector(kVelocityX);
-    state_.velocity_y_map = vector(kVelocityY);
-    state_.yaw_rate = vector(kYawRate);
+    state_.position_map = vector.segment<3>(kPositionX);
+    state_.rpy_map = vector.segment<3>(kRoll);
+    for (int axis = 0; axis < 3; ++axis) {
+        state_.rpy_map(axis) = WrapAngle(state_.rpy_map(axis));
+    }
+    state_.velocity_map = vector.segment<3>(kVelocityX);
+    state_.angular_velocity = vector.segment<3>(kAngularVelocityX);
+    state_.velocity_map.z() = 0.0;
+    state_.angular_velocity.x() = 0.0;
+    state_.angular_velocity.y() = 0.0;
 }
 
 void EKF::StabilizeCovariance() {
@@ -343,20 +313,83 @@ void EKF::StabilizeCovariance() {
     covariance_ = 0.5 * (covariance_ + covariance_.transpose());
 }
 
-SE3 EKF::Pose() const {
-    const Eigen::Quaterniond orientation(
-        Eigen::AngleAxisd(state_.yaw, Eigen::Vector3d::UnitZ()));
-    return SE3(
-        orientation, Eigen::Vector3d(state_.x, state_.y, 0.0));
+void EKF::EnforceMotionConstraints() {
+    state_.velocity_map.z() = 0.0;
+    state_.angular_velocity.x() = 0.0;
+    state_.angular_velocity.y() = 0.0;
+    constexpr int kConstrainedIndices[] = {
+        kVelocityZ, kAngularVelocityX, kAngularVelocityY};
+    for (const int index : kConstrainedIndices) {
+        covariance_.row(index).setZero();
+        covariance_.col(index).setZero();
+        covariance_(index, index) = options_.min_covariance;
+    }
 }
 
-Eigen::Vector3d EKF::VelocityMap() const {
-    return Eigen::Vector3d(
-        state_.velocity_x_map, state_.velocity_y_map, 0.0);
+SE3 EKF::Pose() const {
+    return SE3(
+        Eigen::Quaterniond(RotationFromRpy(state_.rpy_map)),
+        state_.position_map);
+}
+
+EKF::Matrix6d EKF::PoseCovariance() const {
+    Matrix6d output = Matrix6d::Zero();
+    output.topLeftCorner<3, 3>() =
+        covariance_.block<3, 3>(kPositionX, kPositionX);
+    output.topRightCorner<3, 3>() =
+        covariance_.block<3, 3>(kPositionX, kRoll);
+    output.bottomLeftCorner<3, 3>() =
+        covariance_.block<3, 3>(kRoll, kPositionX);
+    output.bottomRightCorner<3, 3>() =
+        covariance_.block<3, 3>(kRoll, kRoll);
+    return output;
+}
+
+EKF::Matrix6d EKF::TwistCovarianceBody() const {
+    Eigen::Matrix<double, 6, kStateDim> jacobian =
+        Eigen::Matrix<double, 6, kStateDim>::Zero();
+    const Eigen::Matrix3d rotation = RotationFromRpy(state_.rpy_map);
+    jacobian.block<3, 3>(0, kVelocityX) = rotation.transpose();
+    for (int axis = 0; axis < 3; ++axis) {
+        Eigen::Vector3d plus = state_.rpy_map;
+        Eigen::Vector3d minus = state_.rpy_map;
+        plus(axis) += kJacobianEpsilon;
+        minus(axis) -= kJacobianEpsilon;
+        jacobian.block<3, 1>(0, kRoll + axis) =
+            (RotationFromRpy(plus).transpose() * state_.velocity_map -
+             RotationFromRpy(minus).transpose() * state_.velocity_map) /
+            (2.0 * kJacobianEpsilon);
+    }
+    jacobian.block<3, 3>(3, kAngularVelocityX).setIdentity();
+    return jacobian * covariance_ * jacobian.transpose();
 }
 
 double EKF::WrapAngle(double angle) {
     return std::atan2(std::sin(angle), std::cos(angle));
+}
+
+Eigen::Matrix3d EKF::RotationFromRpy(const Eigen::Vector3d& rpy) {
+    return (Eigen::AngleAxisd(rpy.z(), Eigen::Vector3d::UnitZ()) *
+            Eigen::AngleAxisd(rpy.y(), Eigen::Vector3d::UnitY()) *
+            Eigen::AngleAxisd(rpy.x(), Eigen::Vector3d::UnitX()))
+        .toRotationMatrix();
+}
+
+Eigen::Vector3d EKF::RpyFromRotation(const Eigen::Matrix3d& rotation) {
+    const double pitch = std::asin(std::clamp(
+        -rotation(2, 0), -1.0, 1.0));
+    const double cosine_pitch = std::cos(pitch);
+    double roll = 0.0;
+    double yaw = 0.0;
+    if (std::fabs(cosine_pitch) > 1e-6) {
+        roll = std::atan2(rotation(2, 1), rotation(2, 2));
+        yaw = std::atan2(rotation(1, 0), rotation(0, 0));
+    } else {
+        roll = 0.0;
+        yaw = std::atan2(-rotation(0, 1), rotation(1, 1));
+    }
+    return Eigen::Vector3d(
+        WrapAngle(roll), WrapAngle(pitch), WrapAngle(yaw));
 }
 
 }  // namespace lightning::loc

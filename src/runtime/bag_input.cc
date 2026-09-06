@@ -21,8 +21,7 @@ std::string ReadTopic(const YAML::Node& common, const char* name) {
 bool BagInput::Run(const std::string& bag_path, const std::string& yaml_path,
                    ImuCallback imu_cb, CloudCallback cloud_cb, LivoxCallback livox_cb,
                    RtkPositionCallback rtk_position_cb,
-                   InsOrientationCallback ins_orientation_cb,
-                   InsVelocityCallback ins_velocity_cb,
+                   RtkVelocityCallback rtk_velocity_cb,
                    WheelOdometryCallback wheel_odometry_cb,
                    ProgressCallback progress_cb, CancelCallback cancel_requested) {
     if (bag_path.empty()) {
@@ -39,8 +38,6 @@ bool BagInput::Run(const std::string& bag_path, const std::string& yaml_path,
     const std::string cloud_topic = ReadTopic(common, "lidar_topic");
     const std::string livox_topic = ReadTopic(common, "livox_lidar_topic");
     const std::string rtk_fix_topic = ReadTopic(common, "rtk_fix_topic");
-    const std::string rtk_orientation_topic =
-        ReadTopic(common, "rtk_orientation_topic");
     const std::string rtk_velocity_topic =
         ReadTopic(common, "rtk_velocity_topic");
     const std::string wheel_odometry_topic =
@@ -55,8 +52,7 @@ bool BagInput::Run(const std::string& bag_path, const std::string& yaml_path,
         counted_topics.insert(livox_topic);
     }
     if (!rtk_fix_topic.empty() && rtk_position_cb) counted_topics.insert(rtk_fix_topic);
-    if (!rtk_orientation_topic.empty() && ins_orientation_cb) counted_topics.insert(rtk_orientation_topic);
-    if (!rtk_velocity_topic.empty() && ins_velocity_cb) counted_topics.insert(rtk_velocity_topic);
+    if (!rtk_velocity_topic.empty() && rtk_velocity_cb) counted_topics.insert(rtk_velocity_topic);
     if (!wheel_odometry_topic.empty() && wheel_odometry_cb) {
         counted_topics.insert(wheel_odometry_topic);
     }
@@ -112,28 +108,14 @@ bool BagInput::Run(const std::string& bag_path, const std::string& yaml_path,
             });
     }
 
-    if (!rtk_orientation_topic.empty() && ins_orientation_cb) {
-        rosbag.AddTwistHandle(
-            rtk_orientation_topic,
-            [ins_orientation_cb, progress_cb, cancel_requested, &progress](
-                geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg)
-                -> bool {
-                if (cancel_requested && cancel_requested()) return false;
-                ins_orientation_cb(msg);
-                ++progress.processed_frames;
-                if (progress_cb) progress_cb(progress);
-                return true;
-            });
-    }
-
-    if (!rtk_velocity_topic.empty() && ins_velocity_cb) {
+    if (!rtk_velocity_topic.empty() && rtk_velocity_cb) {
         rosbag.AddTwistHandle(
             rtk_velocity_topic,
-            [ins_velocity_cb, progress_cb, cancel_requested, &progress](
+            [rtk_velocity_cb, progress_cb, cancel_requested, &progress](
                 geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg)
                 -> bool {
                 if (cancel_requested && cancel_requested()) return false;
-                ins_velocity_cb(msg);
+                rtk_velocity_cb(msg);
                 ++progress.processed_frames;
                 if (progress_cb) progress_cb(progress);
                 return true;

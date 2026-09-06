@@ -56,7 +56,6 @@ Lightning 不依赖厂家 `msg_out`。使用 `cx16.yaml` 时，在线订阅和�
 /cx/cloud             sensor_msgs/msg/PointCloud2
 /imu_data             sensor_msgs/msg/Imu
 /fdilink/gnss_fix     sensor_msgs/msg/NavSatFix
-/ins/orientation      sensor_msgs/msg/Imu
 /ins/velocity         geometry_msgs/msg/TwistWithCovarianceStamped
 ```
 
@@ -65,41 +64,77 @@ topic 为空或缺失时不订阅，不再设置额外的传感器启用布尔�
 
 ```yaml
 common:
-  rtk_velocity_topic: "/ins/velocity"  # 非空：作为二维速度观测
+  rtk_velocity_topic: "/ins/velocity"  # 非空：更新 map 系水平速度
   wheel_odometry_topic: ""             # 为空：不订阅、不更新轮速观测
 ```
 
 `localization.mode` 保留用于兼容服务和日志，不参与传感器开关判断；是否使用
-某一种观测只由对应 topic 是否为空决定。当前定位滤波器是状态为
-`[x_map, y_map, yaw_map, vx_map, vy_map, yaw_rate]` 的标准二维 EKF。预测使用
-map 系恒速度、恒 yaw-rate 模型；过程噪声、初始化不确定度、各观测的
-fallback 标准差及卡方门限统一放在 `localization.ekf` 中。
+某一种输入只由对应 topic 是否为空决定。当前定位滤波器是 12 维的“三维位姿 +
+平面运动约束”EKF；
+过程噪声、初始化不确定度、各观测的 fallback 标准差及卡方门限统一放在
+`localization.ekf` 中。
 
-RTK 位置、INS 姿态和 INS 速度是三个相互独立的观测，不再组装成复合 RTK 消息。
+RTK 位置和 RTK/INS 速度是两个相互独立的观测，不再组装成复合 RTK 消息。
 每一条观测到来后，EKF 都先预测到对应 `Header.stamp`，再执行该观测
-自己的更新。`Pose2D` 没有时间戳和协方差，不再作为 INS 航向输入。
-`/ins/velocity` 的 ENU 东、北速度先旋转到 map，然后直接更新 `vx_map、vy_map`，
-不再套用车体前向速度模型，也不再使用位置杆臂修正速度。轮速 topic 非空时只把
-`linear.x` 作为 body 系前向速度，通过
-`cos(yaw) * vx_map + sin(yaw) * vy_map` 更新；不会把 `angular.z` 隐式当作陀螺仪。
-`imu_topic` 继续只服务建图、点云去畸变和未来扩展。
+自己的更新。
+厂家 INS 中的 `pitch/roll/courseang` 不再转换、订阅或用于初始化。这些量不被
+当作车体相对 ENU 的绝对姿态，也不能用于求固定的 `map <- ENU` 关系。
+`/ins/velocity` 的 ENU 东、北速度先旋转到 map，然后直接更新水平速度；天向
+速度不进入滤波器。轮速和 IMU topic 的接收链路仍然保留，但定位模块中的
+`ProcessWheelOdometry()` 和 `ProcessImu()` 都是明确的空入口。特别是
+`/imu_data` 的线加速度和角速度均不作为定位观测；建图模块原有的 IMU
+去畸变/LIO 链路不受这个定位策略影响。状态顺序为：
+
+```text
+x = [p_map(3), rpy_map(3), v_map(3), omega(3)]
+```
+
+位置和姿态完整保留 `x/y/z` 与 `roll/pitch/yaw`。速度和角速度也用三维容器
+存储，但每次初始化、预测和更新后都施加硬约束：
+
+```text
+v_map.z = 0
+omega.x = 0
+omega.y = 0
+```
+
+确定性预测模型为：
+
+```text
+x_next = x + vx_map*dt
+y_next = y + vy_map*dt
+z_next = z
+roll_next = roll
+pitch_next = pitch
+yaw_next = yaw + omega_z*dt
+vx_next = vx
+vy_next = vy
+vz_next = 0
+omega_x_next = 0
+omega_y_next = 0
+omega_z_next = omega_z
+```
+
+NDT 更新完整的 map 系三维位置和 `roll/pitch/yaw`；GNSS 使用当前完整三维姿态
+旋转并扣除杆臂后只更新三维位置，不能修改姿态或角速度；RTK/INS ENU 速度也
+不能修改姿态或角速度，只更新 map 系 `vx/vy`。`z`、
+`roll/pitch` 没有对应的速度状态，预测时保持上一值，同时用独立随机游走过程
+噪声允许新的三维位置/姿态观测修正它们。`omega_z` 没有直接传感器观测，只能
+通过连续 NDT yaw 观测形成的 yaw—角速度交叉协方差被间接估计。
 
 在线模式的缓存规则只有两条：
 
 - 在线建图：LiDAR 只保留最新帧，IMU 保留所有帧；
-- 在线定位：LiDAR、IMU、GNSS 位置、INS 姿态、INS 速度和轮速各自只保留
+- 在线定位：LiDAR、IMU、GNSS 位置、RTK/INS 速度和轮速各自只保留
   一个最新值，新消息覆盖尚未消费的同类旧消息。
 
-`cx16.yaml` 中 `localization.map_from_enu` 的 `lat/lon/alt/pitch/roll/yaw`
-描述建图起点；其中角度单位为度，`yaw` 是从真北轴到 map 的 +X 轴逆时针
-旋转的角度。定位启动时用这六个地图参考值和现有
-`lever_arm_tracking` 一次性计算固定的 `map <- UTM/ENU` 关系，不再运行时
-积累轨迹求对齐。这里的 `yaw` 不是设备安装角，而是从真北轴到 map 的 +X 轴
-逆时针旋转的角度。map 的 +X 轴在标准 true ENU 中的 yaw 是 `yaw+90°`；把
-true ENU 坐标值转换到 map 时使用逆变换
-`R_map_true_enu=Rz(-(yaw+90°))`。UTM 位置另行消除参考点的网格收敛角。
-定位模块不再读取或乘入 `lio_sam.extrinsicRPY`。`pitch/roll` 保留为建图起点
-的参考元数据，但不参与当前二维 EKF 的平面坐标旋转。
+`cx16.yaml` 中 `localization.map_from_enu.lat/lon/alt` 是建图起点 GNSS 天线的
+WGS84 参考坐标；`map_from_true_enu_yaw_deg` 是另外标定得到的固定
+`map <- true ENU` 右手系旋转角。
+它不是 `/INS_data` 的 `courseang`，也不能从 `pitch/roll/courseang` 推导出来。
+定位启动时用这一固定地图标定和 `lever_arm_tracking` 建立 `map <- UTM/ENU`
+关系；UTM 位置会在参考点消除网格收敛角，ENU 速度则直接旋转到 map。
+定位模块不读取或乘入 `lio_sam.extrinsicRPY`。
 
 
 ## 在线建图
@@ -127,13 +162,13 @@ ros2 service call /lightning/mapping/finish_mapping lightning_interfaces/srv/Fin
 ## 在线定位
 
 使用 `cx16.yaml` 的融合模式时，`set_map_path` 成功后会立即开始接收定位
-观测。第一组时间接近的 GNSS 位置和 INS 姿态先初始化 EKF，并自动作为
+观测。第一帧有效 GNSS 位置直接初始化 EKF，并自动作为
 第一帧 NDT 的地图内初值；不再要求先调用 `set_location`。`set_location`
 仍可用于人工重定位。纯 `ndt_only` 配置仍然必须先调用 `set_location`。
 
 当 `lidar_topic` 和 `livox_lidar_topic` 都为空时，不创建点云订阅，也不产生
-NDT 观测；但 `set_map_path` 仍会加载地图并创建定位 UI。RTK 位置、INS yaw
-或 NDT 每次更新后，ROS 定位话题和 UI 红色轨迹都使用同一个最终 EKF 状态。
+NDT 观测；但 `set_map_path` 仍会加载地图并创建定位 UI。RTK 位置、RTK/INS
+速度或 NDT 每次更新后，ROS 定位话题和 UI 红色轨迹都使用同一个最终 EKF 状态。
 原始 NDT 位姿在所有模式下都只作为 EKF 的一项观测，不再直接写入 UI 轨迹。
 调试时可同时查看 `/lightning/localization/debug/raw_rtk_path`、
 `/lightning/localization/debug/raw_ndt_path` 和最终
@@ -143,10 +178,9 @@ WGS84/UTM/ENU 到 map 转换的原始 RTK 天线位置轨迹，黄线是激光�
 
 只配置 `rtk_fix_topic` 也可以直接启动在线或离线定位。此时第一帧有效
 `NavSatFix` 直接初始化位置 EKF，后续每帧继续更新位置并输出红色轨迹；绿色
-轨迹始终是未经滤波的 GNSS 天线位置。由于没有航向就无法把天线杆臂旋转到
-map，位置单传感器模式会主动忽略 `lever_arm_tracking`，同时把输出 yaw 保持为
-未观测的 0，并给它较大的初始协方差。只有配置了 `rtk_orientation_topic` 时才
-等待同步的初始航向并启用杆臂补偿。
+轨迹始终是未经滤波的 GNSS 天线位置。没有 LiDAR/NDT 时不存在姿态观测，代码
+会禁用杆臂补偿，避免 GNSS 位置残差通过杆臂雅可比虚构姿态和旋转；这时红线
+表示天线位置。启用 LiDAR/NDT 后完整三维姿态可观，才使用三维杆臂补偿。
 
 ```bash
 ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'online_localization'}"

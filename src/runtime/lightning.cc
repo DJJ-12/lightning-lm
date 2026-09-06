@@ -67,11 +67,8 @@ bool Lightning::Init(rclcpp::Node::SharedPtr node, const std::string& yaml_path)
             [this](const sensor_msgs::msg::NavSatFix::SharedPtr& fix) {
                 AcceptRtkPosition(fix);
             },
-            [this](const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation) {
-                AcceptInsOrientation(orientation);
-            },
             [this](const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity) {
-                AcceptInsVelocity(velocity);
+                AcceptRtkVelocity(velocity);
             },
             [this](const nav_msgs::msg::Odometry::SharedPtr& odometry) {
                 AcceptWheelOdometry(odometry);
@@ -241,55 +238,35 @@ void Lightning::AcceptRtkPosition(
 
 int LocalizationInputPriority(InputType type) {
     switch (type) {
-        case InputType::INS_ORIENTATION:
-            return 0;
         case InputType::RTK_POSITION:
-            return 1;
+            return 0;
         case InputType::IMU:
+            return 1;
+        case InputType::RTK_VELOCITY:
             return 2;
-        case InputType::INS_VELOCITY:
-            return 3;
         case InputType::WHEEL_ODOMETRY:
-            return 4;
+            return 3;
         case InputType::POINT_CLOUD2:
         case InputType::LIVOX:
-            return 5;
+            return 4;
     }
-    return 6;
+    return 5;
 }
 
-void Lightning::AcceptInsOrientation(
-    const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation) {
-    if (!orientation) return;
-    InputMessage input;
-    input.receive_steady_sec = RuntimeSteadySeconds();
-    input.header_stamp = rclcpp::Time(orientation->header.stamp).seconds();
-    input.type = InputType::INS_ORIENTATION;
-    input.ins_orientation = orientation;
-    {
-        std::lock_guard<std::mutex> lock(online_input_mutex_);
-        if (!online_worker_running_ || !online_worker_is_localization_) return;
-        latest_ins_orientation_ = std::move(input);
-        has_latest_ins_orientation_ = true;
-        ++online_ins_orientation_received_;
-    }
-    online_input_ready_.notify_one();
-}
-
-void Lightning::AcceptInsVelocity(
+void Lightning::AcceptRtkVelocity(
     const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity) {
     if (!velocity) return;
     InputMessage input;
     input.receive_steady_sec = RuntimeSteadySeconds();
     input.header_stamp = rclcpp::Time(velocity->header.stamp).seconds();
-    input.type = InputType::INS_VELOCITY;
-    input.ins_velocity = velocity;
+    input.type = InputType::RTK_VELOCITY;
+    input.rtk_velocity = velocity;
     {
         std::lock_guard<std::mutex> lock(online_input_mutex_);
         if (!online_worker_running_ || !online_worker_is_localization_) return;
-        latest_ins_velocity_ = std::move(input);
-        has_latest_ins_velocity_ = true;
-        ++online_ins_velocity_received_;
+        latest_rtk_velocity_ = std::move(input);
+        has_latest_rtk_velocity_ = true;
+        ++online_rtk_velocity_received_;
     }
     online_input_ready_.notify_one();
 }
@@ -357,8 +334,7 @@ std::size_t Lightning::PendingOnlineInputCountLocked() const {
     return pending_mapping_imu_.size() +
            (has_latest_localization_imu_ ? 1U : 0U) +
            (has_latest_rtk_position_ ? 1U : 0U) +
-           (has_latest_ins_orientation_ ? 1U : 0U) +
-           (has_latest_ins_velocity_ ? 1U : 0U) +
+           (has_latest_rtk_velocity_ ? 1U : 0U) +
            (has_latest_wheel_odometry_ ? 1U : 0U) +
            (has_latest_lidar_ ? 1U : 0U);
 }
@@ -371,10 +347,8 @@ void Lightning::ClearPendingOnlineInputLocked() {
     has_latest_localization_imu_ = false;
     latest_rtk_position_ = InputMessage();
     has_latest_rtk_position_ = false;
-    latest_ins_orientation_ = InputMessage();
-    has_latest_ins_orientation_ = false;
-    latest_ins_velocity_ = InputMessage();
-    has_latest_ins_velocity_ = false;
+    latest_rtk_velocity_ = InputMessage();
+    has_latest_rtk_velocity_ = false;
     latest_wheel_odometry_ = InputMessage();
     has_latest_wheel_odometry_ = false;
 }
@@ -388,8 +362,7 @@ void Lightning::StartOnlineWorkerLocked() {
         online_lidar_overwritten_ = 0;
         online_imu_received_ = 0;
         online_rtk_position_received_ = 0;
-        online_ins_orientation_received_ = 0;
-        online_ins_velocity_received_ = 0;
+        online_rtk_velocity_received_ = 0;
         online_wheel_odometry_received_ = 0;
         online_worker_running_ = true;
         online_worker_is_localization_ = !mapping;
@@ -402,7 +375,7 @@ void Lightning::StartOnlineWorkerLocked() {
               << ", LiDAR=latest-only"
               << (mapping
                       ? ", IMU=non-dropping queue"
-                      : ", IMU/RTK-position/INS-orientation/INS-velocity/wheel=independent latest-only slots");
+                      : ", IMU/RTK-position/INS-velocity/wheel=independent latest-only slots");
 }
 
 void Lightning::StopOnlineWorkerLocked(bool drain) {
@@ -479,16 +452,14 @@ void Lightning::OnlineWorkerLoop(bool mapping) {
                        has_latest_lidar_ ||
                        has_latest_localization_imu_ ||
                        has_latest_rtk_position_ ||
-                       has_latest_ins_orientation_ ||
-                       has_latest_ins_velocity_ ||
+                       has_latest_rtk_velocity_ ||
                        has_latest_wheel_odometry_;
             });
             if (!online_worker_running_ &&
                 !has_latest_lidar_ &&
                 !has_latest_localization_imu_ &&
                 !has_latest_rtk_position_ &&
-                !has_latest_ins_orientation_ &&
-                !has_latest_ins_velocity_ &&
+                !has_latest_rtk_velocity_ &&
                 !has_latest_wheel_odometry_) {
                 break;
             }
@@ -503,15 +474,10 @@ void Lightning::OnlineWorkerLoop(bool mapping) {
                 latest_rtk_position_ = InputMessage();
                 has_latest_rtk_position_ = false;
             }
-            if (has_latest_ins_orientation_) {
-                ordered_inputs.push_back(std::move(latest_ins_orientation_));
-                latest_ins_orientation_ = InputMessage();
-                has_latest_ins_orientation_ = false;
-            }
-            if (has_latest_ins_velocity_) {
-                ordered_inputs.push_back(std::move(latest_ins_velocity_));
-                latest_ins_velocity_ = InputMessage();
-                has_latest_ins_velocity_ = false;
+            if (has_latest_rtk_velocity_) {
+                ordered_inputs.push_back(std::move(latest_rtk_velocity_));
+                latest_rtk_velocity_ = InputMessage();
+                has_latest_rtk_velocity_ = false;
             }
             if (has_latest_wheel_odometry_) {
                 ordered_inputs.push_back(std::move(latest_wheel_odometry_));
@@ -582,12 +548,8 @@ loc::LocalizationFrameOutcome Lightning::ProcessLocalizationInput(const InputMes
         localization_system_->ProcessRtkPosition(input.rtk_position);
         return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
     }
-    if (input.type == InputType::INS_ORIENTATION) {
-        localization_system_->ProcessInsOrientation(input.ins_orientation);
-        return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
-    }
-    if (input.type == InputType::INS_VELOCITY) {
-        localization_system_->ProcessInsVelocity(input.ins_velocity);
+    if (input.type == InputType::RTK_VELOCITY) {
+        localization_system_->ProcessRtkVelocity(input.rtk_velocity);
         return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
     }
     if (input.type == InputType::WHEEL_ODOMETRY) {
@@ -756,7 +718,6 @@ void Lightning::StartBagMappingTaskLocked(const std::string& bag_path) {
                 input.livox = cloud;
                 ProcessMappingInput(input);
             },
-            nullptr,
             nullptr,
             nullptr,
             nullptr,
@@ -962,18 +923,11 @@ void Lightning::StartBagLocalizationTaskLocked(const std::string& bag_path) {
                 input.rtk_position = fix;
                 ProcessLocalizationInput(input);
             },
-            [this](const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation) {
-                InputMessage input;
-                input.header_stamp = rclcpp::Time(orientation->header.stamp).seconds();
-                input.type = InputType::INS_ORIENTATION;
-                input.ins_orientation = orientation;
-                ProcessLocalizationInput(input);
-            },
             [this](const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity) {
                 InputMessage input;
                 input.header_stamp = rclcpp::Time(velocity->header.stamp).seconds();
-                input.type = InputType::INS_VELOCITY;
-                input.ins_velocity = velocity;
+                input.type = InputType::RTK_VELOCITY;
+                input.rtk_velocity = velocity;
                 ProcessLocalizationInput(input);
             },
             [this](const nav_msgs::msg::Odometry::SharedPtr& odometry) {

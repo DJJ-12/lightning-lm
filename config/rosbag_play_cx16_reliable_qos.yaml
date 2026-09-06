@@ -16,11 +16,6 @@
   reliability: reliable
   durability: volatile
 
-/ins/orientation:
-  history: keep_all
-  reliability: reliable
-  durability: volatile
-
 /ins/velocity:
   history: keep_all
   reliability: reliable

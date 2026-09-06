@@ -26,9 +26,7 @@ class BagInput {
     using ImuCallback = std::function<void(const sensor_msgs::msg::Imu::SharedPtr&)>;
     using RtkPositionCallback = std::function<void(
         const sensor_msgs::msg::NavSatFix::SharedPtr&)>;
-    using InsOrientationCallback = std::function<void(
-        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr&)>;
-    using InsVelocityCallback = std::function<void(
+    using RtkVelocityCallback = std::function<void(
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr&)>;
     using WheelOdometryCallback = std::function<void(
         const nav_msgs::msg::Odometry::SharedPtr&)>;
@@ -40,8 +38,7 @@ class BagInput {
     bool Run(const std::string& bag_path, const std::string& yaml_path,
              ImuCallback imu_cb, CloudCallback cloud_cb, LivoxCallback livox_cb,
              RtkPositionCallback rtk_position_cb,
-             InsOrientationCallback ins_orientation_cb,
-             InsVelocityCallback ins_velocity_cb,
+             RtkVelocityCallback rtk_velocity_cb,
              WheelOdometryCallback wheel_odometry_cb,
              ProgressCallback progress_cb, CancelCallback cancel_requested);
 };
