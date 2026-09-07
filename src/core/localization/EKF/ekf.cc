@@ -111,14 +111,16 @@ void EKF::PredictStep(double dt) {
     driving_noise(4, 4) = options_.process_roll_pitch_rate_std *
                           options_.process_roll_pitch_rate_std;
     driving_noise(5, 5) = driving_noise(4, 4);
-
+    // P- = A * P * A^T + Q
+    // Q 传播噪声
+    // P- 预测协方差
     covariance_ = transition * covariance_ * transition.transpose() +
                   noise_input * driving_noise * noise_input.transpose();
     StabilizeCovariance();
     EnforceMotionConstraints();
 }
 
-bool EKF::UpdateRtkPosition(
+bool EKF::UpdategpsPosition(
     double stamp, const Eigen::Vector3d& sensor_position_map,
     const Eigen::Vector3d& lever_arm_tracking,
     const Eigen::Matrix3d& covariance, double gate_chi2,
@@ -127,7 +129,7 @@ bool EKF::UpdateRtkPosition(
         !lever_arm_tracking.allFinite() || !covariance.allFinite()) {
         return false;
     }
-
+    // 消除杆臂影响
     const Eigen::Matrix3d rotation = RotationFromRpy(state_.rpy_map);
     const Eigen::Vector3d tracking_position_observation =
         sensor_position_map - rotation * lever_arm_tracking;
@@ -140,7 +142,7 @@ bool EKF::UpdateRtkPosition(
 
     return ApplyUpdate(
         residual, jacobian, covariance,
-        gate_chi2 > 0.0 ? gate_chi2 : options_.rtk_position_gate_chi2,
+        gate_chi2 > 0.0 ? gate_chi2 : options_.gps_position_gate_chi2,
         mahalanobis, false);
 }
 
@@ -162,7 +164,7 @@ bool EKF::UpdateMapVelocity(
 
     return ApplyUpdate(
         residual, jacobian, covariance,
-        gate_chi2 > 0.0 ? gate_chi2 : options_.rtk_velocity_gate_chi2,
+        gate_chi2 > 0.0 ? gate_chi2 : options_.gps_velocity_gate_chi2,
         mahalanobis, false);
 }
 
@@ -174,9 +176,8 @@ bool EKF::UpdateNdtPose(double stamp, const SE3& pose_map_tracking,
         !covariance.allFinite()) {
         return false;
     }
-
-    const Eigen::Vector3d measured_rpy =
-        RpyFromRotation(pose_map_tracking.rotationMatrix());
+    // 把旋转矩阵 \(R\) 转成欧拉角
+    const Eigen::Vector3d measured_rpy = RpyFromRotation(pose_map_tracking.rotationMatrix());
     Eigen::Matrix<double, 6, 1> residual;
     residual.head<3>() =
         pose_map_tracking.translation() - state_.position_map;
@@ -210,40 +211,46 @@ bool EKF::ApplyUpdate(const Eigen::VectorXd& residual,
         !measurement_covariance.allFinite()) {
         return false;
     }
-
+    // R 观测噪声
     Eigen::MatrixXd noise =
         0.5 * (measurement_covariance + measurement_covariance.transpose());
     for (int index = 0; index < noise.rows(); ++index) {
         noise(index, index) =
             std::max(noise(index, index), options_.min_covariance);
     }
-
+    //(P- + H^T*R*H) * δx = H^T*R*r
+    // δx = (P- + H^T*R*H)^-1 * H^T*R*r
+    // δx = P- * H^T *(H * P- * H^T + R)^-1 * r = P- * H^T *S^-1 * r = K*r
+    // K = P- * H^T *S^-1
+    //S= H * P- * H^T + R
     const Eigen::MatrixXd innovation_covariance =
         measurement_jacobian * covariance_ *
             measurement_jacobian.transpose() +
         noise;
+    // S = L * D * L^T   3*3 的矩阵
     Eigen::LDLT<Eigen::MatrixXd> decomposition(innovation_covariance);
     if (decomposition.info() != Eigen::Success ||
         !decomposition.isPositive()) {
         return false;
     }
-
+    // 通过解S * y = r  来求解 y= S^-1 * r
     const Eigen::VectorXd solved_residual = decomposition.solve(residual);
     if (decomposition.info() != Eigen::Success ||
         !solved_residual.allFinite()) {
         return false;
     }
+   // r^T * y = r^T * S^-1 * r
     const double distance = residual.dot(solved_residual);
     if (mahalanobis) *mahalanobis = distance;
     if (!std::isfinite(distance) || distance < 0.0 ||
         (gate_chi2 > 0.0 && distance > gate_chi2)) {
         return false;
     }
-
-    const Eigen::MatrixXd right_hand_side =
-        measurement_jacobian * covariance_;
-    Eigen::MatrixXd gain =
-        decomposition.solve(right_hand_side).transpose();
+    // H * P-
+    const Eigen::MatrixXd right_hand_side = measurement_jacobian * covariance_;
+    // （S * y）^T  = (H * P-)^T= P- * H^T
+    //y^T= P- * H^T * S^-1 = K
+    Eigen::MatrixXd gain = decomposition.solve(right_hand_side).transpose();
     if (decomposition.info() != Eigen::Success || !gain.allFinite()) {
         return false;
     }
@@ -258,10 +265,9 @@ bool EKF::ApplyUpdate(const Eigen::VectorXd& residual,
     StateVector vector = ToVector();
     vector += gain * residual;
     SetVector(vector);
-
+    // P+ = (I - K * H) * P- * H^T + K * R
     const Covariance identity = Covariance::Identity();
-    const Covariance joseph_left =
-        identity - gain * measurement_jacobian;
+    const Covariance joseph_left = identity - gain * measurement_jacobian;
     covariance_ =
         joseph_left * covariance_ * joseph_left.transpose() +
         gain * noise * gain.transpose();

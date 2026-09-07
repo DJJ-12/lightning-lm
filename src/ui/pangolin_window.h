@@ -42,8 +42,8 @@ class PangolinWindow {
     /// 更新kalman滤波器状态
     void UpdateNavState(const NavState& state);
 
-    /// 增加一帧已经转换到map坐标系的原始RTK位置观测
-    void UpdateRtkPosition(const Eigen::Vector2d& position_map);
+    /// 增加一帧已经转换到map坐标系的原始gps位置观测
+    void UpdategpsPosition(const Eigen::Vector2d& position_map);
 
     /// 增加一帧原始NDT位置观测
     void UpdateNdtPosition(const Eigen::Vector2d& position_map);

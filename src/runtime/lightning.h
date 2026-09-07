@@ -37,8 +37,8 @@ enum class InputType {
     IMU,
     POINT_CLOUD2,
     LIVOX,
-    RTK_POSITION,
-    RTK_VELOCITY,
+    gps_POSITION,
+    gps_VELOCITY,
     WHEEL_ODOMETRY
 };
 
@@ -51,8 +51,8 @@ struct InputMessage {
     sensor_msgs::msg::Imu::SharedPtr imu;
     sensor_msgs::msg::PointCloud2::SharedPtr cloud;
     livox_ros_driver2::msg::CustomMsg::SharedPtr livox;
-    sensor_msgs::msg::NavSatFix::SharedPtr rtk_position;
-    geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr rtk_velocity;
+    sensor_msgs::msg::NavSatFix::SharedPtr gps_position;
+    geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr gps_velocity;
     nav_msgs::msg::Odometry::SharedPtr wheel_odometry;
 };
 
@@ -94,8 +94,8 @@ class Lightning {
 
     // Topic callbacks only place data into these lightweight online buffers.
     void AcceptImu(const sensor_msgs::msg::Imu::SharedPtr& imu);
-    void AcceptRtkPosition(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
-    void AcceptRtkVelocity(
+    void AcceptgpsPosition(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
+    void AcceptgpsVelocity(
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity);
     void AcceptWheelOdometry(const nav_msgs::msg::Odometry::SharedPtr& odometry);
     void AcceptCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud,
@@ -149,10 +149,10 @@ class Lightning {
     // Mapping retains every IMU sample. Localization-only observations use
     // one overwriteable slot per sensor so the worker consumes fresh data.
     std::deque<InputMessage> pending_mapping_imu_;
-    InputMessage latest_rtk_position_;
-    bool has_latest_rtk_position_ = false;
-    InputMessage latest_rtk_velocity_;
-    bool has_latest_rtk_velocity_ = false;
+    InputMessage latest_gps_position_;
+    bool has_latest_gps_position_ = false;
+    InputMessage latest_gps_velocity_;
+    bool has_latest_gps_velocity_ = false;
     InputMessage latest_wheel_odometry_;
     bool has_latest_wheel_odometry_ = false;
 
@@ -163,8 +163,8 @@ class Lightning {
     std::uint64_t online_lidar_received_ = 0;
     std::uint64_t online_lidar_overwritten_ = 0;
     std::uint64_t online_imu_received_ = 0;
-    std::uint64_t online_rtk_position_received_ = 0;
-    std::uint64_t online_rtk_velocity_received_ = 0;
+    std::uint64_t online_gps_position_received_ = 0;
+    std::uint64_t online_gps_velocity_received_ = 0;
     std::uint64_t online_wheel_odometry_received_ = 0;
 
     std::unique_ptr<modules::MappingSystem> mapping_system_;

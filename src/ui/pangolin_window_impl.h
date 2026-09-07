@@ -83,7 +83,7 @@ class PangolinWindowImpl {
 
     /// 滤波器状态
     std::deque<NavState> pending_nav_states_;
-    std::deque<Vec3d> pending_rtk_positions_;
+    std::deque<Vec3d> pending_gps_positions_;
     std::deque<Vec3d> pending_ndt_positions_;
     Sophus::SE3d pose_;
     double confidence_;
@@ -156,7 +156,7 @@ class PangolinWindowImpl {
     // trajectory
     std::shared_ptr<ui::UiTrajectory> traj_scans_ = nullptr;           // 建图扫描轨迹
     std::shared_ptr<ui::UiTrajectory> traj_newest_state_ = nullptr;    // 最终定位轨迹（红色）
-    std::shared_ptr<ui::UiTrajectory> traj_rtk_observation_ = nullptr; // 原始RTK观测（绿色）
+    std::shared_ptr<ui::UiTrajectory> traj_gps_observation_ = nullptr; // 原始gps观测（绿色）
     std::shared_ptr<ui::UiTrajectory> traj_ndt_observation_ = nullptr; // 原始NDT观测（黄色）
 
     // 滤波器状态相关 Data logger object

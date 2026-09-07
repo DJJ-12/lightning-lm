@@ -36,8 +36,8 @@ bool TopicInput::Start(const std::string& yaml_path,
                        ImuCallback imu_cb,
                        CloudCallback cloud_cb,
                        LivoxCallback livox_cb,
-                       RtkPositionCallback rtk_position_cb,
-                       RtkVelocityCallback rtk_velocity_cb,
+                       gpsPositionCallback gps_position_cb,
+                       gpsVelocityCallback gps_velocity_cb,
                        WheelOdometryCallback wheel_odometry_cb) {
     if (running_.load()) {
         return true;
@@ -51,8 +51,8 @@ bool TopicInput::Start(const std::string& yaml_path,
     imu_received_ = 0;
     cloud_received_ = 0;
     livox_received_ = 0;
-    rtk_fix_received_ = 0;
-    rtk_velocity_received_ = 0;
+    gps_fix_received_ = 0;
+    gps_velocity_received_ = 0;
     wheel_odometry_received_ = 0;
     lidar_topic_sequence_ = 0;
 
@@ -66,17 +66,17 @@ bool TopicInput::Start(const std::string& yaml_path,
     const std::string imu_topic = ReadTopic(common, "imu_topic");
     const std::string cloud_topic = ReadTopic(common, "lidar_topic");
     const std::string livox_topic = ReadTopic(common, "livox_lidar_topic");
-    const std::string rtk_fix_topic = ReadTopic(common, "rtk_fix_topic");
-    const std::string rtk_velocity_topic =
-        ReadTopic(common, "rtk_velocity_topic");
+    const std::string gps_topic = ReadTopic(common, "gps_topic");
+    const std::string velocity_topic =
+        ReadTopic(common, "velocity_topic");
     const std::string wheel_odometry_topic =
         ReadTopic(common, "wheel_odometry_topic");
 
     imu_cb_ = std::move(imu_cb);
     cloud_cb_ = std::move(cloud_cb);
     livox_cb_ = std::move(livox_cb);
-    rtk_position_cb_ = std::move(rtk_position_cb);
-    rtk_velocity_cb_ = std::move(rtk_velocity_cb);
+    gps_position_cb_ = std::move(gps_position_cb);
+    gps_velocity_cb_ = std::move(gps_velocity_cb);
     wheel_odometry_cb_ = std::move(wheel_odometry_cb);
 
     node_ = std::make_shared<rclcpp::Node>("lightning_topic_input");
@@ -165,10 +165,10 @@ bool TopicInput::Start(const std::string& yaml_path,
     }
 
 
-    if (rtk_position_cb_ && !rtk_fix_topic.empty()) {
-        rtk_fix_sub_ =
+    if (gps_position_cb_ && !gps_topic.empty()) {
+        gps_fix_sub_ =
             node_->create_subscription<sensor_msgs::msg::NavSatFix>(
-                rtk_fix_topic,
+                gps_topic,
                 latest_observation_qos,
                 [this](sensor_msgs::msg::NavSatFix::SharedPtr msg) {
                     std::lock_guard<std::mutex> callback_gate(
@@ -178,23 +178,23 @@ bool TopicInput::Start(const std::string& yaml_path,
                             std::memory_order_acquire)) {
                         return;
                     }
-                    ++rtk_fix_received_;
+                    ++gps_fix_received_;
                     try {
-                        rtk_position_cb_(msg);
+                        gps_position_cb_(msg);
                     } catch (const std::exception& e) {
-                        LOG(ERROR) << "[Topic input][RTK fix] callback exception: "
+                        LOG(ERROR) << "[Topic input][gps fix] callback exception: "
                                    << e.what();
                     } catch (...) {
-                        LOG(ERROR) << "[Topic input][RTK fix] unknown callback exception";
+                        LOG(ERROR) << "[Topic input][gps fix] unknown callback exception";
                     }
                 });
     }
 
-    if (rtk_velocity_cb_ && !rtk_velocity_topic.empty()) {
-        rtk_velocity_sub_ =
+    if (gps_velocity_cb_ && !velocity_topic.empty()) {
+        gps_velocity_sub_ =
             node_->create_subscription<
                 geometry_msgs::msg::TwistWithCovarianceStamped>(
-                rtk_velocity_topic,
+                velocity_topic,
                 latest_observation_qos,
                 [this](geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg) {
                     std::lock_guard<std::mutex> callback_gate(
@@ -204,14 +204,14 @@ bool TopicInput::Start(const std::string& yaml_path,
                             std::memory_order_acquire)) {
                         return;
                     }
-                    ++rtk_velocity_received_;
+                    ++gps_velocity_received_;
                     try {
-                        rtk_velocity_cb_(msg);
+                        gps_velocity_cb_(msg);
                     } catch (const std::exception& e) {
-                        LOG(ERROR) << "[Topic input][RTK velocity] callback exception: "
+                        LOG(ERROR) << "[Topic input][gps velocity] callback exception: "
                                    << e.what();
                     } catch (...) {
-                        LOG(ERROR) << "[Topic input][RTK velocity] unknown callback exception";
+                        LOG(ERROR) << "[Topic input][gps velocity] unknown callback exception";
                     }
                 });
     }
@@ -249,8 +249,8 @@ bool TopicInput::Start(const std::string& yaml_path,
               << ", cloud=" << cloud_topic
               << ", livox=" << livox_topic
               << ", imu=" << imu_topic
-              << ", rtk_fix=" << (rtk_fix_topic.empty() ? "disabled" : rtk_fix_topic)
-              << ", rtk_velocity=" << (rtk_velocity_topic.empty() ? "disabled" : rtk_velocity_topic)
+              << ", gps_fix=" << (gps_topic.empty() ? "disabled" : gps_topic)
+              << ", gps_velocity=" << (velocity_topic.empty() ? "disabled" : velocity_topic)
               << ", wheel_odometry=" << (wheel_odometry_topic.empty() ? "disabled" : wheel_odometry_topic)
               << ", cloud_qos=KEEP_LAST(1)+BEST_EFFORT+VOLATILE"
               << ", imu_qos=KEEP_ALL+BEST_EFFORT+VOLATILE"
@@ -301,8 +301,8 @@ void TopicInput::Shutdown() {
     imu_sub_.reset();
     cloud_sub_.reset();
     livox_sub_.reset();
-    rtk_fix_sub_.reset();
-    rtk_velocity_sub_.reset();
+    gps_fix_sub_.reset();
+    gps_velocity_sub_.reset();
     wheel_odometry_sub_.reset();
     LOG(INFO) << "[Topic接收析构] [05] 销毁输入节点和executor";
     node_.reset();
@@ -310,16 +310,16 @@ void TopicInput::Shutdown() {
     imu_cb_ = nullptr;
     cloud_cb_ = nullptr;
     livox_cb_ = nullptr;
-    rtk_position_cb_ = nullptr;
-    rtk_velocity_cb_ = nullptr;
+    gps_position_cb_ = nullptr;
+    gps_velocity_cb_ = nullptr;
     wheel_odometry_cb_ = nullptr;
 
     LOG(INFO) << "[Topic接收] 接收线程已停止"
               << ", imu_received=" << imu_received_
               << ", cloud_received=" << cloud_received_
               << ", livox_received=" << livox_received_
-              << ", rtk_fix_received=" << rtk_fix_received_
-              << ", rtk_velocity_received=" << rtk_velocity_received_
+              << ", gps_fix_received=" << gps_fix_received_
+              << ", gps_velocity_received=" << gps_velocity_received_
               << ", wheel_odometry_received=" << wheel_odometry_received_
               << ", lidar_topic_sequence=" << lidar_topic_sequence_;
 }

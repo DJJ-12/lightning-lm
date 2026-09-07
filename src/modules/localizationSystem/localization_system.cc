@@ -264,18 +264,18 @@ std::string LocalizationSystem::Normalize(std::string value) {
 
 LocalizationSystem::Mode LocalizationSystem::ModeFromString(const std::string& value) {
     const std::string mode = Normalize(value);
-    if (mode == "ekf" || mode == "ndt_rtk_ekf" ||
-        mode == "ndt_rtk_ins_ekf" || mode == "ndt_rtk") {
+    if (mode == "ekf" || mode == "ndt_gps_ekf" ||
+        mode == "ndt_gps_ins_ekf" || mode == "ndt_gps") {
         return Mode::EKF_FUSION;
     }
-    if (mode == "rtk_only" || mode == "rtk_ins_only") return Mode::RTK_ONLY;
+    if (mode == "gps_only" || mode == "gps_ins_only") return Mode::gps_ONLY;
     if (mode == "auto") return Mode::AUTO;
     return Mode::NDT_ONLY;
 }
 
 std::string LocalizationSystem::ModeToString(Mode mode) {
-    if (mode == Mode::EKF_FUSION) return "ndt_rtk_ins_ekf";
-    if (mode == Mode::RTK_ONLY) return "rtk_ins_only";
+    if (mode == Mode::EKF_FUSION) return "ndt_gps_ins_ekf";
+    if (mode == Mode::gps_ONLY) return "gps_ins_only";
     if (mode == Mode::AUTO) return "auto";
     return "ndt_only";
 }
@@ -295,7 +295,7 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
     const YAML::Node ekf = localization && localization["ekf"]
         ? localization["ekf"]
         : YAML::Node();
-    const YAML::Node rtk_ins = localization && localization["rtk_ins"] ? localization["rtk_ins"] : YAML::Node();
+    const YAML::Node gps_ins = localization && localization["gps_ins"] ? localization["gps_ins"] : YAML::Node();
     const YAML::Node common = yaml["common"];
     mode_ = ModeFromString(localization && localization["mode"] ? localization["mode"].as<std::string>() : "ndt_only");
     if (yaml["system"] && yaml["system"]["pub_tf"]) options_.pub_tf_ = yaml["system"]["pub_tf"].as<bool>();
@@ -312,10 +312,10 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
     lidar_topic_ = ReadTopic(common, "lidar_topic");
     livox_lidar_topic_ = ReadTopic(common, "livox_lidar_topic");
     imu_topic_ = ReadTopic(common, "imu_topic");
-    rtk_fix_topic_ = ReadTopic(common, "rtk_fix_topic");
-    rtk_velocity_topic_ = ReadTopic(common, "rtk_velocity_topic");
+    gps_topic_ = ReadTopic(common, "gps_topic");
+    velocity_topic_ = ReadTopic(common, "velocity_topic");
     wheel_odometry_topic_ = ReadTopic(common, "wheel_odometry_topic");
-    rtk_ins_lever_arm_tracking_ = ReadVector3(rtk_ins && rtk_ins["lever_arm_tracking"] ? rtk_ins["lever_arm_tracking"] : YAML::Node(), Eigen::Vector3d::Zero());
+    gps_ins_lever_arm_tracking_ = ReadVector3(gps_ins && gps_ins["lever_arm_tracking"] ? gps_ins["lever_arm_tracking"] : YAML::Node(), Eigen::Vector3d::Zero());
 
     // The EKF section is intentionally flat: every number has one physical
     // meaning and is consumed in exactly one place.
@@ -336,10 +336,10 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
         filter_options.process_roll_pitch_rate_std);
     filter_options.max_prediction_step = read_ekf(
         "max_prediction_step", filter_options.max_prediction_step);
-    filter_options.rtk_position_gate_chi2 = read_ekf(
-        "rtk_position_gate_chi2", filter_options.rtk_position_gate_chi2);
-    filter_options.rtk_velocity_gate_chi2 = read_ekf(
-        "rtk_velocity_gate_chi2", filter_options.rtk_velocity_gate_chi2);
+    filter_options.gps_position_gate_chi2 = read_ekf(
+        "gps_position_gate_chi2", filter_options.gps_position_gate_chi2);
+    filter_options.gps_velocity_gate_chi2 = read_ekf(
+        "gps_velocity_gate_chi2", filter_options.gps_velocity_gate_chi2);
     filter_options.ndt_pose_gate_chi2 = read_ekf(
         "ndt_pose_gate_chi2", filter_options.ndt_pose_gate_chi2);
 
@@ -352,16 +352,16 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
         "initial_velocity_std", initial_velocity_std_);
     initial_yaw_rate_std_ = read_ekf(
         "initial_yaw_rate_std", initial_yaw_rate_std_);
-    rtk_position_std_x_ = read_ekf(
-        "rtk_position_std_x", rtk_position_std_x_);
-    rtk_position_std_y_ = read_ekf(
-        "rtk_position_std_y", rtk_position_std_y_);
-    rtk_position_std_z_ = read_ekf(
-        "rtk_position_std_z", rtk_position_std_z_);
-    rtk_velocity_std_x_ = read_ekf(
-        "rtk_velocity_std_x", rtk_velocity_std_x_);
-    rtk_velocity_std_y_ = read_ekf(
-        "rtk_velocity_std_y", rtk_velocity_std_y_);
+    gps_position_std_x_ = read_ekf(
+        "gps_position_std_x", gps_position_std_x_);
+    gps_position_std_y_ = read_ekf(
+        "gps_position_std_y", gps_position_std_y_);
+    gps_position_std_z_ = read_ekf(
+        "gps_position_std_z", gps_position_std_z_);
+    gps_velocity_std_x_ = read_ekf(
+        "gps_velocity_std_x", gps_velocity_std_x_);
+    gps_velocity_std_y_ = read_ekf(
+        "gps_velocity_std_y", gps_velocity_std_y_);
     ndt_position_std_x_ = read_ekf(
         "ndt_position_std_x", ndt_position_std_x_);
     ndt_position_std_y_ = read_ekf(
@@ -378,12 +378,12 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
         filter_options.process_roll_pitch_rate_std,
         initial_position_std_, initial_orientation_std_,
         initial_velocity_std_, initial_yaw_rate_std_,
-        rtk_position_std_x_, rtk_position_std_y_, rtk_position_std_z_,
-        rtk_velocity_std_x_, rtk_velocity_std_y_, ndt_position_std_x_,
+        gps_position_std_x_, gps_position_std_y_, gps_position_std_z_,
+        gps_velocity_std_x_, gps_velocity_std_y_, ndt_position_std_x_,
         ndt_position_std_y_, ndt_position_std_z_, ndt_orientation_std_};
     const std::array<double, 3> gates = {
-        filter_options.rtk_position_gate_chi2,
-        filter_options.rtk_velocity_gate_chi2,
+        filter_options.gps_position_gate_chi2,
+        filter_options.gps_velocity_gate_chi2,
         filter_options.ndt_pose_gate_chi2};
     if (!std::isfinite(filter_options.max_prediction_step) ||
         filter_options.max_prediction_step <= 0.0 ||
@@ -401,7 +401,7 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
 
     ekf_.Configure(filter_options);
 
-    if (UsesRtk() || UsesRtkVelocity()) {
+    if (Usesgps() || UsesgpsVelocity()) {
         const YAML::Node map_from_enu =
             localization && localization["map_from_enu"]
                 ? localization["map_from_enu"]
@@ -424,12 +424,12 @@ bool LocalizationSystem::Init(const std::string& yaml_path, rclcpp::Node::Shared
     if (node) SetupPublishers(node);
     LOG(INFO) << "[LOCALIZATION_SYSTEM] mode=" << ModeToString(mode_)
               << ", filter=3d_pose_planar_motion_12_state"
-              << ", rtk_position=" << UsesRtk()
-              << ", rtk_velocity=" << UsesRtkVelocity()
+              << ", gps_position=" << Usesgps()
+              << ", gps_velocity=" << UsesgpsVelocity()
               << ", wheel_input_reserved=" << UsesWheelOdometry()
               << ", imu_input_reserved=" << (!imu_topic_.empty())
               << " (not fused into localization EKF)"
-              << ", rtk_z_std_floor_m=" << rtk_position_std_z_;
+              << ", gps_z_std_floor_m=" << gps_position_std_z_;
     return true;
 }
 
@@ -439,8 +439,8 @@ void LocalizationSystem::SetupPublishers(rclcpp::Node::SharedPtr node) {
     loc_odom_pub_ = node->create_publisher<nav_msgs::msg::Odometry>("/lightning/localization/odom", 10);
     loc_pose_pub_ = node->create_publisher<geometry_msgs::msg::PoseStamped>("/lightning/localization/pose", 10);
     loc_path_pub_ = node->create_publisher<nav_msgs::msg::Path>("/lightning/localization/path", rclcpp::QoS(1).reliable().transient_local());
-    raw_rtk_path_pub_ = node->create_publisher<nav_msgs::msg::Path>(
-        "/lightning/localization/debug/raw_rtk_path",
+    raw_gps_path_pub_ = node->create_publisher<nav_msgs::msg::Path>(
+        "/lightning/localization/debug/raw_gps_path",
         rclcpp::QoS(1).reliable().transient_local());
     raw_ndt_path_pub_ = node->create_publisher<nav_msgs::msg::Path>(
         "/lightning/localization/debug/raw_ndt_path",
@@ -493,15 +493,15 @@ loc::LocalizationFrameOutcome LocalizationSystem::ProcessCloud(const livox_ros_d
     return loc_->ProcessLivoxLidarMsg(cloud, diagnostic);
 }
 
-void LocalizationSystem::ProcessRtkPosition(
+void LocalizationSystem::ProcessgpsPosition(
     const sensor_msgs::msg::NavSatFix::SharedPtr& fix) {
-    if (!UsesRtk() || !fix) return;
+    if (!Usesgps() || !fix) return;
 
     Eigen::Vector3d position_map;
     Eigen::Matrix3d covariance_map;
     if (!PositionToMap(*fix, &position_map, &covariance_map)) {
         LOG_EVERY_N(WARNING, 100)
-            << "[LOCALIZATION_EKF] RTK fix rejected before coordinate conversion"
+            << "[LOCALIZATION_EKF] gps fix rejected before coordinate conversion"
             << ", status=" << static_cast<int>(fix->status.status)
             << ", latitude=" << fix->latitude
             << ", longitude=" << fix->longitude
@@ -524,12 +524,12 @@ void LocalizationSystem::ProcessRtkPosition(
         << ", antenna_position_map=" << position_map.transpose()
         << ", observation_std_map="
         << covariance_map.diagonal().cwiseMax(0.0).cwiseSqrt().transpose()
-        << ", configured_z_std_floor_m=" << rtk_position_std_z_;
+        << ", configured_z_std_floor_m=" << gps_position_std_z_;
     AppendDebugPath(
-        &raw_rtk_path_, raw_rtk_path_pub_, stamp, position_map.head<2>(), 0.0);
+        &raw_gps_path_, raw_gps_path_pub_, stamp, position_map.head<2>(), 0.0);
     // Green UI trajectory: the raw GNSS antenna position after coordinate
     // conversion, before initialization, prediction, gating or EKF update.
-    if (loc_) loc_->UpdateRtkObservationVisualization(position_map.head<2>());
+    if (loc_) loc_->UpdategpsObservationVisualization(position_map.head<2>());
 
     std::lock_guard<std::mutex> lock(filter_mutex_);
     if (!ekf_.Initialized()) {
@@ -545,23 +545,23 @@ void LocalizationSystem::ProcessRtkPosition(
     }
 
     double distance = 0.0;
-    const bool accepted = ekf_.UpdateRtkPosition(
-        stamp, position_map, RtkLeverArmForFilter(),
+    const bool accepted = ekf_.UpdategpsPosition(
+        stamp, position_map, gpsLeverArmForFilter(),
         covariance_map, -1.0, &distance);
     if (accepted) {
-        PublishResult(BuildEkfResult(stamp, "EKF RTK position update", true));
+        PublishResult(BuildEkfResult(stamp, "EKF gps position update", true));
     } else {
         PublishPredictionIfAdvanced(
-            stamp, "EKF prediction; RTK position rejected");
+            stamp, "EKF prediction; gps position rejected");
         LOG_EVERY_N(WARNING, 20)
-            << "[LOCALIZATION_EKF] RTK position rejected, stamp=" << stamp
+            << "[LOCALIZATION_EKF] gps position rejected, stamp=" << stamp
             << ", mahalanobis=" << distance;
     }
 }
 
-void LocalizationSystem::ProcessRtkVelocity(
+void LocalizationSystem::ProcessgpsVelocity(
     const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity) {
-    if (!UsesRtkVelocity() || !velocity) return;
+    if (!UsesgpsVelocity() || !velocity) return;
 
     Eigen::Vector2d velocity_map;
     Eigen::Matrix2d covariance_map;
@@ -581,12 +581,12 @@ void LocalizationSystem::ProcessRtkVelocity(
         stamp, velocity_map, covariance_map, -1.0, &distance);
     if (accepted) {
         PublishResult(BuildEkfResult(
-            stamp, "EKF RTK/INS velocity update", true));
+            stamp, "EKF gps/INS velocity update", true));
     } else {
         PublishPredictionIfAdvanced(
-            stamp, "EKF prediction; RTK/INS velocity rejected");
+            stamp, "EKF prediction; gps/INS velocity rejected");
         LOG_EVERY_N(WARNING, 20)
-            << "[LOCALIZATION_EKF] RTK/INS velocity rejected, stamp=" << stamp
+            << "[LOCALIZATION_EKF] gps/INS velocity rejected, stamp=" << stamp
             << ", mahalanobis=" << distance;
     }
 }
@@ -623,7 +623,7 @@ void LocalizationSystem::HandleNdtResult(const loc::LocalizationResult& result) 
     // original NDT localization architecture: NDT is the final result and its
     // own constant-velocity pose history supplies the next initial guess.
     // There is no reason to route a single observation source through the EKF.
-    if (UsesLidar() && !UsesRtk() && !UsesRtkVelocity()) {
+    if (UsesLidar() && !Usesgps() && !UsesgpsVelocity()) {
         if (result.valid_) PublishResult(result);
         return;
     }
@@ -737,7 +737,7 @@ bool LocalizationSystem::InitializeFixedMapTransform(
         map_from_true_enu_rotation_(1, 0),
         map_from_true_enu_rotation_(0, 0));
 
-    // NavSatFix is projected into UTM grid east/north, whereas RTK/INS velocity
+    // NavSatFix is projected into UTM grid east/north, whereas gps/INS velocity
     // uses true ENU. Remove the fixed grid convergence before applying the
     // independently calibrated map yaw.
     map_from_utm_rotation_ =
@@ -747,7 +747,7 @@ bool LocalizationSystem::InitializeFixedMapTransform(
     // At mapping start the tracking origin is the map origin and its +X axis
     // is the map +X axis. The reference GNSS antenna therefore lies at the
     // configured tracking-frame lever arm in map coordinates.
-    reference_gnss_map_ = rtk_ins_lever_arm_tracking_;
+    reference_gnss_map_ = gps_ins_lever_arm_tracking_;
     map_from_utm_translation_ =
         reference_gnss_map_ -
         map_from_utm_rotation_ * reference_gnss_utm_;
@@ -819,11 +819,11 @@ bool LocalizationSystem::PositionToMap(
     } else {
         covariance_map->setZero();
         (*covariance_map)(0, 0) =
-            rtk_position_std_x_ * rtk_position_std_x_;
+            gps_position_std_x_ * gps_position_std_x_;
         (*covariance_map)(1, 1) =
-            rtk_position_std_y_ * rtk_position_std_y_;
+            gps_position_std_y_ * gps_position_std_y_;
         (*covariance_map)(2, 2) =
-            rtk_position_std_z_ * rtk_position_std_z_;
+            gps_position_std_z_ * gps_position_std_z_;
     }
 
     // GNSS altitude and the LiDAR map's vertical datum/tracking origin can
@@ -834,7 +834,7 @@ bool LocalizationSystem::PositionToMap(
     // to distort horizontal positioning through a vendor cross term.
     const double vertical_variance = std::max(
         (*covariance_map)(2, 2),
-        rtk_position_std_z_ * rtk_position_std_z_);
+        gps_position_std_z_ * gps_position_std_z_);
     covariance_map->row(2).setZero();
     covariance_map->col(2).setZero();
     (*covariance_map)(2, 2) = vertical_variance;
@@ -871,19 +871,19 @@ bool LocalizationSystem::VelocityToMap(
     } else {
         covariance_map->setZero();
         (*covariance_map)(0, 0) =
-            rtk_velocity_std_x_ * rtk_velocity_std_x_;
+            gps_velocity_std_x_ * gps_velocity_std_x_;
         (*covariance_map)(1, 1) =
-            rtk_velocity_std_y_ * rtk_velocity_std_y_;
+            gps_velocity_std_y_ * gps_velocity_std_y_;
     }
     return velocity_map->allFinite() && IsUsableCovariance(*covariance_map);
 }
 
-Eigen::Vector3d LocalizationSystem::RtkLeverArmForFilter() const {
+Eigen::Vector3d LocalizationSystem::gpsLeverArmForFilter() const {
     // The lever-arm equation depends on yaw. NDT is now the only yaw
     // observation, so a GNSS-only run must not let position residuals invent
     // a heading through a non-zero lever arm.
     return UsesLidar()
-        ? rtk_ins_lever_arm_tracking_
+        ? gps_ins_lever_arm_tracking_
         : Eigen::Vector3d::Zero();
 }
 
@@ -897,17 +897,17 @@ void LocalizationSystem::TryInitializeEkf() {
     const double stamp = initial_position_stamp_;
     const Eigen::Vector3d initial_rpy = Eigen::Vector3d::Zero();
     const bool lever_arm_applied = UsesLidar();
-    const Eigen::Vector3d lever_arm = RtkLeverArmForFilter();
+    const Eigen::Vector3d lever_arm = gpsLeverArmForFilter();
     const Eigen::Vector3d tracking_position_map =
         initial_sensor_position_map_ -
         loc::EKF::RotationFromRpy(initial_rpy) * lever_arm;
     loc::EKF::Covariance covariance = InitialEkfCovariance(
         initial_position_std_, kPi, initial_velocity_std_,
         initial_yaw_rate_std_);
-    // RTK initializes x/y, but its altitude is intentionally weak. Give the
+    // gps initializes x/y, but its altitude is intentionally weak. Give the
     // first NDT observation enough prior uncertainty to establish map z.
     covariance(loc::EKF::kPositionZ, loc::EKF::kPositionZ) =
-        rtk_position_std_z_ * rtk_position_std_z_;
+        gps_position_std_z_ * gps_position_std_z_;
     if (ekf_.Initialize(
             stamp, tracking_position_map, initial_rpy,
             Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), covariance)) {
@@ -922,7 +922,7 @@ void LocalizationSystem::TryInitializeEkf() {
                 return;
             }
         }
-        LOG(INFO) << "[LOCALIZATION_EKF] initialized from RTK position"
+        LOG(INFO) << "[LOCALIZATION_EKF] initialized from gps position"
                   << ", stamp=" << stamp
                   << ", position_map=" << tracking_position_map.transpose()
                   << ", rpy_map_deg=0 0 0"
@@ -930,8 +930,8 @@ void LocalizationSystem::TryInitializeEkf() {
         PublishResult(BuildEkfResult(
             stamp,
             lever_arm_applied
-                ? "3-D pose EKF initialized from RTK; attitude awaits NDT"
-                : "3-D pose EKF initialized from RTK antenna position; "
+                ? "3-D pose EKF initialized from gps; attitude awaits NDT"
+                : "3-D pose EKF initialized from gps antenna position; "
                   "lever arm disabled because attitude is unobserved",
             false));
     }
@@ -999,7 +999,7 @@ void LocalizationSystem::PublishResult(const loc::LocalizationResult& input) {
     if (!result.valid_) return;
     // The red trajectory receives exactly the same final localization result
     // as the ROS publishers: raw NDT in LiDAR-only mode, EKF in fusion mode.
-    // Raw RTK and raw NDT observations use independent green/yellow paths.
+    // Raw gps and raw NDT observations use independent green/yellow paths.
     if (loc_) loc_->UpdateVisualization(result);
     AppendPath(result);
     geometry_msgs::msg::TransformStamped transform = result.ToGeoMsg();
@@ -1124,8 +1124,8 @@ void LocalizationSystem::Reset() {
     lidar_topic_.clear();
     livox_lidar_topic_.clear();
     imu_topic_.clear();
-    rtk_fix_topic_.clear();
-    rtk_velocity_topic_.clear();
+    gps_topic_.clear();
+    velocity_topic_.clear();
     wheel_odometry_topic_.clear();
     with_ui_ = false;
     utm_zone_ = 0;
@@ -1136,16 +1136,16 @@ void LocalizationSystem::Reset() {
     map_from_true_enu_rotation_ = Eigen::Matrix3d::Identity();
     reference_gnss_utm_ = Eigen::Vector3d::Zero();
     reference_gnss_map_ = Eigen::Vector3d::Zero();
-    rtk_ins_lever_arm_tracking_ = Eigen::Vector3d::Zero();
+    gps_ins_lever_arm_tracking_ = Eigen::Vector3d::Zero();
     initial_position_std_ = 0.5;
     initial_orientation_std_ = 3.0 * kDegToRad;
     initial_velocity_std_ = 2.0;
     initial_yaw_rate_std_ = 0.5;
-    rtk_position_std_x_ = 0.05;
-    rtk_position_std_y_ = 0.05;
-    rtk_position_std_z_ = 100.0;
-    rtk_velocity_std_x_ = 0.10;
-    rtk_velocity_std_y_ = 0.10;
+    gps_position_std_x_ = 0.05;
+    gps_position_std_y_ = 0.05;
+    gps_position_std_z_ = 100.0;
+    gps_velocity_std_x_ = 0.10;
+    gps_velocity_std_y_ = 0.10;
     ndt_position_std_x_ = 0.10;
     ndt_position_std_y_ = 0.10;
     ndt_position_std_z_ = 0.20;
@@ -1159,7 +1159,7 @@ void LocalizationSystem::Reset() {
     path_ = nav_msgs::msg::Path();
     {
         std::lock_guard<std::mutex> lock(debug_path_mutex_);
-        raw_rtk_path_ = nav_msgs::msg::Path();
+        raw_gps_path_ = nav_msgs::msg::Path();
         raw_ndt_path_ = nav_msgs::msg::Path();
     }
     { std::lock_guard<std::mutex> lock(result_mutex_); latest_result_ = loc::LocalizationResult(); }
@@ -1167,7 +1167,7 @@ void LocalizationSystem::Reset() {
     loc_odom_pub_.reset();
     loc_pose_pub_.reset();
     loc_path_pub_.reset();
-    raw_rtk_path_pub_.reset();
+    raw_gps_path_pub_.reset();
     raw_ndt_path_pub_.reset();
     loc_pose_quality_pub_.reset();
 }

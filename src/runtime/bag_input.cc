@@ -20,8 +20,8 @@ std::string ReadTopic(const YAML::Node& common, const char* name) {
 
 bool BagInput::Run(const std::string& bag_path, const std::string& yaml_path,
                    ImuCallback imu_cb, CloudCallback cloud_cb, LivoxCallback livox_cb,
-                   RtkPositionCallback rtk_position_cb,
-                   RtkVelocityCallback rtk_velocity_cb,
+                   gpsPositionCallback gps_position_cb,
+                   gpsVelocityCallback gps_velocity_cb,
                    WheelOdometryCallback wheel_odometry_cb,
                    ProgressCallback progress_cb, CancelCallback cancel_requested) {
     if (bag_path.empty()) {
@@ -37,9 +37,9 @@ bool BagInput::Run(const std::string& bag_path, const std::string& yaml_path,
     const std::string imu_topic = ReadTopic(common, "imu_topic");
     const std::string cloud_topic = ReadTopic(common, "lidar_topic");
     const std::string livox_topic = ReadTopic(common, "livox_lidar_topic");
-    const std::string rtk_fix_topic = ReadTopic(common, "rtk_fix_topic");
-    const std::string rtk_velocity_topic =
-        ReadTopic(common, "rtk_velocity_topic");
+    const std::string gps_topic = ReadTopic(common, "gps_topic");
+    const std::string velocity_topic =
+        ReadTopic(common, "velocity_topic");
     const std::string wheel_odometry_topic =
         ReadTopic(common, "wheel_odometry_topic");
 
@@ -51,8 +51,8 @@ bool BagInput::Run(const std::string& bag_path, const std::string& yaml_path,
     if (!livox_topic.empty() && livox_cb) {
         counted_topics.insert(livox_topic);
     }
-    if (!rtk_fix_topic.empty() && rtk_position_cb) counted_topics.insert(rtk_fix_topic);
-    if (!rtk_velocity_topic.empty() && rtk_velocity_cb) counted_topics.insert(rtk_velocity_topic);
+    if (!gps_topic.empty() && gps_position_cb) counted_topics.insert(gps_topic);
+    if (!velocity_topic.empty() && gps_velocity_cb) counted_topics.insert(velocity_topic);
     if (!wheel_odometry_topic.empty() && wheel_odometry_cb) {
         counted_topics.insert(wheel_odometry_topic);
     }
@@ -95,27 +95,27 @@ bool BagInput::Run(const std::string& bag_path, const std::string& yaml_path,
             });
     }
 
-    if (!rtk_fix_topic.empty() && rtk_position_cb) {
+    if (!gps_topic.empty() && gps_position_cb) {
         rosbag.AddNavSatFixHandle(
-            rtk_fix_topic,
-            [rtk_position_cb, progress_cb, cancel_requested, &progress](
+            gps_topic,
+            [gps_position_cb, progress_cb, cancel_requested, &progress](
                 sensor_msgs::msg::NavSatFix::SharedPtr msg) -> bool {
                 if (cancel_requested && cancel_requested()) return false;
-                rtk_position_cb(msg);
+                gps_position_cb(msg);
                 ++progress.processed_frames;
                 if (progress_cb) progress_cb(progress);
                 return true;
             });
     }
 
-    if (!rtk_velocity_topic.empty() && rtk_velocity_cb) {
+    if (!velocity_topic.empty() && gps_velocity_cb) {
         rosbag.AddTwistHandle(
-            rtk_velocity_topic,
-            [rtk_velocity_cb, progress_cb, cancel_requested, &progress](
+            velocity_topic,
+            [gps_velocity_cb, progress_cb, cancel_requested, &progress](
                 geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg)
                 -> bool {
                 if (cancel_requested && cancel_requested()) return false;
-                rtk_velocity_cb(msg);
+                gps_velocity_cb(msg);
                 ++progress.processed_frames;
                 if (progress_cb) progress_cb(progress);
                 return true;

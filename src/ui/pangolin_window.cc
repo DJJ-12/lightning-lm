@@ -162,7 +162,7 @@ void PangolinWindow::UpdateNavState(const NavState& state) {
     impl->kf_result_need_update_.store(true);
 }
 
-void PangolinWindow::UpdateRtkPosition(
+void PangolinWindow::UpdategpsPosition(
     const Eigen::Vector2d& position_map) {
     if (!position_map.allFinite()) return;
     std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
@@ -170,7 +170,7 @@ void PangolinWindow::UpdateRtkPosition(
     if (!impl) return;
 
     std::lock_guard<std::mutex> lock(impl->mtx_observation_visualization_);
-    impl->pending_rtk_positions_.emplace_back(
+    impl->pending_gps_positions_.emplace_back(
         position_map.x(), position_map.y(), 0.0);
 }
 

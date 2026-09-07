@@ -33,12 +33,12 @@ bool PangolinWindowImpl::Init() {
     // unset the current context from the main thread
     pangolin::GetBoundWindow()->RemoveCurrent();
 
-    // 定位轨迹由三条独立数据源组成：绿色是原始RTK map观测，
+    // 定位轨迹由三条独立数据源组成：绿色是原始gps map观测，
     // 黄色是原始NDT观测，红色是最终定位结果。纯雷达时红色与黄色重合。
     // 三条线使用相同线宽，避免粗线在轨迹很近时造成重合假象。
     traj_newest_state_.reset(
         new ui::UiTrajectory(Vec3f(1.0, 0.0, 0.0), 3.0f));  // 红色
-    traj_rtk_observation_.reset(
+    traj_gps_observation_.reset(
         new ui::UiTrajectory(Vec3f(0.0, 1.0, 0.0), 3.0f));  // 绿色
     traj_ndt_observation_.reset(
         new ui::UiTrajectory(Vec3f(1.0, 1.0, 0.0), 3.0f));  // 黄色
@@ -65,7 +65,7 @@ void PangolinWindowImpl::Reset(const std::vector<Keyframe::Ptr> &keyframes) {
     current_scan_ui_ = nullptr;
     traj_scans_->Clear();
     traj_newest_state_->Clear();
-    traj_rtk_observation_->Clear();
+    traj_gps_observation_->Clear();
     traj_ndt_observation_->Clear();
     {
         std::lock_guard<std::mutex> state_lock(mtx_nav_state_);
@@ -75,7 +75,7 @@ void PangolinWindowImpl::Reset(const std::vector<Keyframe::Ptr> &keyframes) {
     {
         std::lock_guard<std::mutex> observation_lock(
             mtx_observation_visualization_);
-        pending_rtk_positions_.clear();
+        pending_gps_positions_.clear();
         pending_ndt_positions_.clear();
     }
 
@@ -245,19 +245,19 @@ bool PangolinWindowImpl::UpdateState() {
 }
 
 bool PangolinWindowImpl::UpdateObservationVisualization() {
-    std::deque<Vec3d> rtk_positions;
+    std::deque<Vec3d> gps_positions;
     std::deque<Vec3d> ndt_positions;
     {
         std::lock_guard<std::mutex> lock(mtx_observation_visualization_);
-        rtk_positions.swap(pending_rtk_positions_);
+        gps_positions.swap(pending_gps_positions_);
         ndt_positions.swap(pending_ndt_positions_);
     }
-    if (rtk_positions.empty() && ndt_positions.empty()) {
+    if (gps_positions.empty() && ndt_positions.empty()) {
         return false;
     }
 
-    for (const Vec3d& position : rtk_positions) {
-        traj_rtk_observation_->AddPt(
+    for (const Vec3d& position : gps_positions) {
+        traj_gps_observation_->AddPt(
             SE3(Eigen::Quaterniond::Identity(), position));
     }
     for (const Vec3d& position : ndt_positions) {
@@ -286,7 +286,7 @@ void PangolinWindowImpl::DrawAll() {
     current_scan_ui_->Render();
 
     // Raw observations are drawn first; the final result is drawn last.
-    traj_rtk_observation_->Render();
+    traj_gps_observation_->Render();
     traj_ndt_observation_->Render();
 
     if (draw_backend_traj_) {
@@ -505,7 +505,7 @@ std::string PangolinWindowImpl::GetWindowName() const { return win_name_; }
 
 void PangolinWindowImpl::AllocateBuffer() {
     std::string global_text(
-        "Red: final localization trajectory | Green: raw RTK map observation | "
+        "Red: final localization trajectory | Green: raw gps map observation | "
         "Yellow: raw NDT observation");
     auto &font = pangolin::default_font();
     gltext_label_global_ = font.Text(global_text);

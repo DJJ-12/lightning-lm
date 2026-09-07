@@ -780,10 +780,10 @@ void Localization::UpdateVisualization(const LocalizationResult& result) {
     ui_->UpdateNavState(result.ToNavState());
 }
 
-void Localization::UpdateRtkObservationVisualization(
+void Localization::UpdategpsObservationVisualization(
     const Eigen::Vector2d& position_map) {
     if (!ui_ || !position_map.allFinite()) return;
-    ui_->UpdateRtkPosition(position_map);
+    ui_->UpdategpsPosition(position_map);
 }
 
 void Localization::UpdateNdtObservationVisualization(
