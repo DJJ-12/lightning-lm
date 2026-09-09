@@ -8,6 +8,13 @@ common:
   lidar_topic: "/Bob/velodyne_points"
   livox_lidar_topic: ""
   imu_topic: "/Bob/imu/data"
+
+  gps_topic: "/Bob/fix"
+  # geometry_msgs/msg/TwistWithCovarianceStamped. The message contains ENU
+  # velocity; localization uses east/north and ignores the vertical component.
+  velocity_topic: ""
+  wheel_odometry_topic: ""
+
   base_link_frame: "base_link"
 
   # Shared lidar adapter / range-image geometry.
@@ -95,7 +102,7 @@ lio_sam:
   historyKeyframeFitnessScore: 0.3
 
 localization:
-  mode: "ndt_only"
+  mode: "ndt_gps_ins_ekf"
   output_frame: "map"
 
   quality:
@@ -113,22 +120,54 @@ localization:
     min_rotation_std_deg: 0.5
     max_rotation_std_deg: 30.0
 
+  gps_ins:
+    # Vector from tracking origin to GNSS antenna, expressed in tracking frame.
+    lever_arm_tracking: [0.0, 0.0, 0.0]
+
   ekf:
-    # 3-D pose + planar motion: vz=0 and omega_x=omega_y=0.
+    # Twelve-state 3-D pose + planar-motion model:
+    # [p_map(3), rpy_map(3), v_map(3), omega(3)].
+    # Hard constraints: vz=0, omega_x=0, omega_y=0. IMU and wheel inputs are
+    # not fused into localization.
     process_acceleration_std: 1.0
     process_yaw_acceleration_std: 0.5
     process_vertical_position_rate_std: 1.0
     process_roll_pitch_rate_std: 0.2
     max_prediction_step: 0.05
+
     initial_position_std: 0.5
     initial_orientation_std_deg: 3.0
     initial_velocity_std: 2.0
     initial_yaw_rate_std: 0.5
+
+    # Fallback standard deviations used only when a message has no usable
+    # covariance. Values named *_deg are converted to radians in code.
+    gps_position_std_x: 0.05
+    gps_position_std_y: 0.05
+    gps_position_std_z: 0.10
+    gps_velocity_std_x: 0.10
+    gps_velocity_std_y: 0.10
     ndt_position_std_x: 0.10
     ndt_position_std_y: 0.10
     ndt_position_std_z: 0.20
     ndt_orientation_std_deg: 1.0
+
+    gps_position_gate_chi2: 16.3
+    gps_velocity_gate_chi2: 11.8
     ndt_pose_gate_chi2: 22.5
+
+  map_from_enu:
+    # GNSS antenna position recorded at the map origin.
+    # alt must use the same WGS84 ellipsoid-height convention as NavSatFix.
+    # Independently calibrated, standard right-handed positive yaw that
+    # rotates true-ENU coordinate values into map coordinates. It is NOT
+    # courseang from /INS_data. The current 112.329 value only preserves the
+    # previous effective transform and must be replaced by a real independent
+    # map/ENU calibration if that old value came from courseang.
+    lat: 34.81399159716
+    lon: 113.53639752842
+    alt: 89.744
+    map_from_true_enu_yaw_deg: 112.329
 
 mapping:
   block_map_resolution: 20

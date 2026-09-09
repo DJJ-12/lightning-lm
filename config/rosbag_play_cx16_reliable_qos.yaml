@@ -1,4 +1,4 @@
-# QoS override for replaying CX16 + RTK bags.
+# QoS override for replaying CX16 + gps bags.
 # Usage example:
 # ros2 bag play <bag> --qos-profile-overrides-path config/rosbag_play_cx16_reliable_qos.yaml
 /cx/cloud:
