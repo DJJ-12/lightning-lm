@@ -9,7 +9,9 @@ enum class Mode {
     OFFLINE_MAPPING,
     ONLINE_MAPPING,
     OFFLINE_LOCALIZATION,
-    ONLINE_LOCALIZATION
+    ONLINE_LOCALIZATION,
+    OFFLINE_CALIBRATION,
+    ONLINE_CALIBRATION
 };
 
 Mode ModeFromString(const std::string& mode);
@@ -17,5 +19,6 @@ std::string ModeToString(Mode mode);
 bool IsKnownModeName(const std::string& mode);
 bool IsMappingMode(Mode mode);
 bool IsLocalizationMode(Mode mode);
+bool IsCalibrationMode(Mode mode);
 
 }  // namespace lightning::runtime

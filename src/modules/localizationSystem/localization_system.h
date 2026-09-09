@@ -19,6 +19,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include "common/eigen_types.h"
+#include "core/lightning_math.hpp"
 #include "core/localization/EKF/ekf.h"
 #include "core/localization/localization_diagnostic.h"
 #include "core/localization/localization_result.h"
@@ -37,15 +38,18 @@ class LocalizationSystem {
     explicit LocalizationSystem(LocalizationSystemOptions options = LocalizationSystemOptions());
     ~LocalizationSystem();
 
-    bool Init(const std::string& yaml_path, rclcpp::Node::SharedPtr node = nullptr);
+    bool Init(const std::string& yaml_path,
+              rclcpp::Node::SharedPtr node = nullptr);
     bool SetMapPath(const std::string& map_path);
     bool SetInitialGuess(const SE3& init_pose, bool* initialized_now = nullptr);
     loc::LocalizationFrameOutcome ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud, const loc::LocalizationInputDiagnostic& diagnostic = {});
     loc::LocalizationFrameOutcome ProcessCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud, const loc::LocalizationInputDiagnostic& diagnostic = {});
 
-    // Each standard ROS observation enters the filter independently. No gps
-    // synchronization packet or input history is maintained in this module.
-    void ProcessgpsPosition(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
+    // GPS1 and GPS2 are synchronized as one dual-antenna observation. Their
+    // raw positions update the EKF jointly; no NDT attitude is used to remove
+    // either lever arm.
+    void ProcessGps1(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
+    void ProcessGps2(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
     void ProcessgpsVelocity(
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity);
     void ProcessWheelOdometry(const nav_msgs::msg::Odometry::SharedPtr& odometry);
@@ -59,8 +63,11 @@ class LocalizationSystem {
     bool UsesLidar() const {
         return !lidar_topic_.empty() || !livox_lidar_topic_.empty();
     }
-    bool Usesgps() const { return !gps_topic_.empty(); }
-    bool UsesgpsVelocity() const { return !velocity_topic_.empty(); }
+    bool UsesDualGps() const {
+        return !gps1_topic_.empty() && !gps2_topic_.empty() &&
+               gps1_topic_ != gps2_topic_;
+    }
+    bool UsesGpsVelocity() const { return !velocity_topic_.empty(); }
     bool UsesWheelOdometry() const { return !wheel_odometry_topic_.empty(); }
     // LiDAR needs the map for NDT; the UI also needs it for visualization.
     bool RequiresMap() const { return UsesLidar() || with_ui_; }
@@ -72,6 +79,11 @@ class LocalizationSystem {
    private:
     void SetupPublishers(rclcpp::Node::SharedPtr node);
     void HandleNdtResult(const loc::LocalizationResult& result);
+    void ProcessGps(const sensor_msgs::msg::NavSatFix::SharedPtr& fix,
+                    bool gps1);
+    void HandleDualGpsPair(
+        const sensor_msgs::msg::NavSatFix::SharedPtr& gps1,
+        const sensor_msgs::msg::NavSatFix::SharedPtr& gps2);
     bool InitializeFixedMapTransform(const YAML::Node& map_from_enu);
     bool PositionToMap(const sensor_msgs::msg::NavSatFix& fix,
                        Eigen::Vector3d* position_map,
@@ -80,8 +92,6 @@ class LocalizationSystem {
         const geometry_msgs::msg::TwistWithCovarianceStamped& velocity,
         Eigen::Vector2d* velocity_map,
         Eigen::Matrix2d* covariance_map) const;
-    Eigen::Vector3d gpsLeverArmForFilter() const;
-    void TryInitializeEkf();
     void InitializeEkfFromNdt(const loc::LocalizationResult& ndt);
     bool InitializeManualGuess(double stamp);
     void PublishPredictionIfAdvanced(double stamp, const std::string& message);
@@ -106,7 +116,8 @@ class LocalizationSystem {
     std::string lidar_topic_;
     std::string livox_lidar_topic_;
     std::string imu_topic_;
-    std::string gps_topic_;
+    std::string gps1_topic_;
+    std::string gps2_topic_;
     std::string velocity_topic_;
     std::string wheel_odometry_topic_;
     bool with_ui_ = false;
@@ -118,7 +129,10 @@ class LocalizationSystem {
     mutable std::mutex filter_mutex_;
     loc::EKF ekf_;
 
-    Eigen::Vector3d gps_ins_lever_arm_tracking_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d gps1_lever_arm_tracking_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d gps2_lever_arm_tracking_ = Eigen::Vector3d::Zero();
+    double dual_gps_sync_tolerance_sec_ = 0.05;
+    double dual_gps_baseline_length_tolerance_m_ = 0.15;
     double initial_position_std_ = 0.5;
     double initial_orientation_std_ =
         3.0 * 3.14159265358979323846 / 180.0;
@@ -139,6 +153,12 @@ class LocalizationSystem {
 
     int utm_zone_ = 0;
     bool map_from_enu_ready_ = false;
+    bool direct_map_from_enu_ = false;
+    math::JsbsimWgs84Enu enu_projector_;
+    Eigen::Matrix3d map_from_enu_rotation_ = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d map_from_enu_translation_ = Eigen::Vector3d::Zero();
+    Eigen::Matrix<double, 6, 6> map_from_enu_covariance_ =
+        Eigen::Matrix<double, 6, 6>::Zero();
     Eigen::Matrix3d map_from_utm_rotation_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d map_from_utm_translation_ = Eigen::Vector3d::Zero();
     // gps/INS velocity uses true local ENU axes. UTM positions use grid axes, so
@@ -147,11 +167,11 @@ class LocalizationSystem {
     Eigen::Matrix3d map_from_true_enu_rotation_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d reference_gnss_utm_ = Eigen::Vector3d::Zero();
     Eigen::Vector3d reference_gnss_map_ = Eigen::Vector3d::Zero();
-    // gps-only initialization keeps one latest value per observation type. It
-    // is state, not a pending-message queue.
-    bool has_initial_position_ = false;
-    double initial_position_stamp_ = 0.0;
-    Eigen::Vector3d initial_sensor_position_map_ = Eigen::Vector3d::Zero();
+    // Approximate synchronization needs only one unmatched message per
+    // antenna. The older sample is discarded when the tolerance is exceeded.
+    std::mutex dual_gps_mutex_;
+    sensor_msgs::msg::NavSatFix::SharedPtr pending_gps1_;
+    sensor_msgs::msg::NavSatFix::SharedPtr pending_gps2_;
 
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr loc_odom_pub_;

@@ -24,7 +24,7 @@ struct BagInputProgress {
 class BagInput {
    public:
     using ImuCallback = std::function<void(const sensor_msgs::msg::Imu::SharedPtr&)>;
-    using gpsPositionCallback = std::function<void(
+    using GpsCallback = std::function<void(
         const sensor_msgs::msg::NavSatFix::SharedPtr&)>;
     using gpsVelocityCallback = std::function<void(
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr&)>;
@@ -37,7 +37,8 @@ class BagInput {
 
     bool Run(const std::string& bag_path, const std::string& yaml_path,
              ImuCallback imu_cb, CloudCallback cloud_cb, LivoxCallback livox_cb,
-             gpsPositionCallback gps_position_cb,
+             GpsCallback gps1_cb,
+             GpsCallback gps2_cb,
              gpsVelocityCallback gps_velocity_cb,
              WheelOdometryCallback wheel_odometry_cb,
              ProgressCallback progress_cb, CancelCallback cancel_requested);

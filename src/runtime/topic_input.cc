@@ -36,7 +36,8 @@ bool TopicInput::Start(const std::string& yaml_path,
                        ImuCallback imu_cb,
                        CloudCallback cloud_cb,
                        LivoxCallback livox_cb,
-                       gpsPositionCallback gps_position_cb,
+                       GpsCallback gps1_cb,
+                       GpsCallback gps2_cb,
                        gpsVelocityCallback gps_velocity_cb,
                        WheelOdometryCallback wheel_odometry_cb) {
     if (running_.load()) {
@@ -51,7 +52,8 @@ bool TopicInput::Start(const std::string& yaml_path,
     imu_received_ = 0;
     cloud_received_ = 0;
     livox_received_ = 0;
-    gps_fix_received_ = 0;
+    gps1_received_ = 0;
+    gps2_received_ = 0;
     gps_velocity_received_ = 0;
     wheel_odometry_received_ = 0;
     lidar_topic_sequence_ = 0;
@@ -66,7 +68,19 @@ bool TopicInput::Start(const std::string& yaml_path,
     const std::string imu_topic = ReadTopic(common, "imu_topic");
     const std::string cloud_topic = ReadTopic(common, "lidar_topic");
     const std::string livox_topic = ReadTopic(common, "livox_lidar_topic");
-    const std::string gps_topic = ReadTopic(common, "gps_topic");
+    const std::string gps1_topic = ReadTopic(common, "gps1_topic");
+    const std::string gps2_topic = ReadTopic(common, "gps2_topic");
+    const bool dual_gps_enabled =
+        !gps1_topic.empty() && !gps2_topic.empty() &&
+        gps1_topic != gps2_topic;
+    if (!gps1_topic.empty() && gps1_topic == gps2_topic) {
+        LOG(ERROR) << "[Topic input] gps1_topic and gps2_topic must differ";
+        return false;
+    }
+    if (gps1_topic.empty() != gps2_topic.empty()) {
+        LOG(WARNING) << "[Topic input] dual GPS disabled: both gps1_topic "
+                        "and gps2_topic must be configured";
+    }
     const std::string velocity_topic =
         ReadTopic(common, "velocity_topic");
     const std::string wheel_odometry_topic =
@@ -75,7 +89,8 @@ bool TopicInput::Start(const std::string& yaml_path,
     imu_cb_ = std::move(imu_cb);
     cloud_cb_ = std::move(cloud_cb);
     livox_cb_ = std::move(livox_cb);
-    gps_position_cb_ = std::move(gps_position_cb);
+    gps1_cb_ = std::move(gps1_cb);
+    gps2_cb_ = std::move(gps2_cb);
     gps_velocity_cb_ = std::move(gps_velocity_cb);
     wheel_odometry_cb_ = std::move(wheel_odometry_cb);
 
@@ -165,10 +180,12 @@ bool TopicInput::Start(const std::string& yaml_path,
     }
 
 
-    if (gps_position_cb_ && !gps_topic.empty()) {
-        gps_fix_sub_ =
+    // GPS input has exactly two physical sources. Lightning decides whether
+    // the pair belongs to localization or Map-ENU calibration.
+    if (dual_gps_enabled && gps1_cb_) {
+        gps1_sub_ =
             node_->create_subscription<sensor_msgs::msg::NavSatFix>(
-                gps_topic,
+                gps1_topic,
                 latest_observation_qos,
                 [this](sensor_msgs::msg::NavSatFix::SharedPtr msg) {
                     std::lock_guard<std::mutex> callback_gate(
@@ -178,14 +195,39 @@ bool TopicInput::Start(const std::string& yaml_path,
                             std::memory_order_acquire)) {
                         return;
                     }
-                    ++gps_fix_received_;
+                    ++gps1_received_;
                     try {
-                        gps_position_cb_(msg);
+                        gps1_cb_(msg);
                     } catch (const std::exception& e) {
-                        LOG(ERROR) << "[Topic input][gps fix] callback exception: "
+                        LOG(ERROR) << "[Topic input][GPS1] callback exception: "
                                    << e.what();
                     } catch (...) {
-                        LOG(ERROR) << "[Topic input][gps fix] unknown callback exception";
+                        LOG(ERROR) << "[Topic input][GPS1] unknown callback exception";
+                    }
+                });
+    }
+
+    if (dual_gps_enabled && gps2_cb_) {
+        gps2_sub_ =
+            node_->create_subscription<sensor_msgs::msg::NavSatFix>(
+                gps2_topic,
+                latest_observation_qos,
+                [this](sensor_msgs::msg::NavSatFix::SharedPtr msg) {
+                    std::lock_guard<std::mutex> callback_gate(
+                        callback_gate_mutex_);
+                    if (!input_enabled_.load(std::memory_order_acquire) ||
+                        !localization_input_enabled_.load(
+                            std::memory_order_acquire)) {
+                        return;
+                    }
+                    ++gps2_received_;
+                    try {
+                        gps2_cb_(msg);
+                    } catch (const std::exception& e) {
+                        LOG(ERROR) << "[Topic input][GPS2] callback exception: "
+                                   << e.what();
+                    } catch (...) {
+                        LOG(ERROR) << "[Topic input][GPS2] unknown callback exception";
                     }
                 });
     }
@@ -249,7 +291,8 @@ bool TopicInput::Start(const std::string& yaml_path,
               << ", cloud=" << cloud_topic
               << ", livox=" << livox_topic
               << ", imu=" << imu_topic
-              << ", gps_fix=" << (gps_topic.empty() ? "disabled" : gps_topic)
+              << ", gps1=" << (gps1_topic.empty() ? "disabled" : gps1_topic)
+              << ", gps2=" << (gps2_topic.empty() ? "disabled" : gps2_topic)
               << ", gps_velocity=" << (velocity_topic.empty() ? "disabled" : velocity_topic)
               << ", wheel_odometry=" << (wheel_odometry_topic.empty() ? "disabled" : wheel_odometry_topic)
               << ", cloud_qos=KEEP_LAST(1)+BEST_EFFORT+VOLATILE"
@@ -301,7 +344,8 @@ void TopicInput::Shutdown() {
     imu_sub_.reset();
     cloud_sub_.reset();
     livox_sub_.reset();
-    gps_fix_sub_.reset();
+    gps1_sub_.reset();
+    gps2_sub_.reset();
     gps_velocity_sub_.reset();
     wheel_odometry_sub_.reset();
     LOG(INFO) << "[Topic接收析构] [05] 销毁输入节点和executor";
@@ -310,7 +354,8 @@ void TopicInput::Shutdown() {
     imu_cb_ = nullptr;
     cloud_cb_ = nullptr;
     livox_cb_ = nullptr;
-    gps_position_cb_ = nullptr;
+    gps1_cb_ = nullptr;
+    gps2_cb_ = nullptr;
     gps_velocity_cb_ = nullptr;
     wheel_odometry_cb_ = nullptr;
 
@@ -318,7 +363,8 @@ void TopicInput::Shutdown() {
               << ", imu_received=" << imu_received_
               << ", cloud_received=" << cloud_received_
               << ", livox_received=" << livox_received_
-              << ", gps_fix_received=" << gps_fix_received_
+              << ", gps1_received=" << gps1_received_
+              << ", gps2_received=" << gps2_received_
               << ", gps_velocity_received=" << gps_velocity_received_
               << ", wheel_odometry_received=" << wheel_odometry_received_
               << ", lidar_topic_sequence=" << lidar_topic_sequence_;

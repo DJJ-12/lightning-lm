@@ -24,6 +24,7 @@
 #include "core/localization/localization_diagnostic.h"
 #include "core/localization/localization_result.h"
 #include "modules/localizationSystem/localization_system.h"
+#include "modules/mapEnuCalibration/map_enu_calibrator.h"
 #include "modules/mappingSystem/mapping_system.h"
 #include "modules/mappingSystem/save_map.h"
 #include "runtime/bag_input.h"
@@ -37,7 +38,8 @@ enum class InputType {
     IMU,
     POINT_CLOUD2,
     LIVOX,
-    gps_POSITION,
+    GPS1,
+    GPS2,
     gps_VELOCITY,
     WHEEL_ODOMETRY
 };
@@ -51,7 +53,7 @@ struct InputMessage {
     sensor_msgs::msg::Imu::SharedPtr imu;
     sensor_msgs::msg::PointCloud2::SharedPtr cloud;
     livox_ros_driver2::msg::CustomMsg::SharedPtr livox;
-    sensor_msgs::msg::NavSatFix::SharedPtr gps_position;
+    sensor_msgs::msg::NavSatFix::SharedPtr gps_fix;
     geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr gps_velocity;
     nav_msgs::msg::Odometry::SharedPtr wheel_odometry;
 };
@@ -85,16 +87,23 @@ class Lightning {
     ServiceResult SetLocation(const SE3& init_pose, bool* initialized_now = nullptr);
     loc::LocalizationResult GetLocalizationQuality() const;
 
+    ServiceResult StartMapEnuCalibration(
+        const std::string& map_path, const std::string& bag_path);
+    modules::MapEnuCalibrationStatus GetMapEnuCalibrationStatus() const;
+    ServiceResult FinishMapEnuCalibration(
+        modules::MapEnuCalibrationResult* result);
+
     ServiceResult CancelTask();
 
    private:
     bool CanChangeModeLocked() const;
     bool EnsureLocalizationSystemLocked();
-    bool SetOfflineLocalizationOriginGuessLocked();
+    bool SetMapOriginInitialGuessLocked(const std::string& context);
 
     // Topic callbacks only place data into these lightweight online buffers.
     void AcceptImu(const sensor_msgs::msg::Imu::SharedPtr& imu);
-    void AcceptgpsPosition(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
+    void AcceptGps1(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
+    void AcceptGps2(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
     void AcceptgpsVelocity(
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity);
     void AcceptWheelOdometry(const nav_msgs::msg::Odometry::SharedPtr& odometry);
@@ -106,12 +115,14 @@ class Lightning {
 
     void StartOnlineWorkerLocked();
     void StopOnlineWorkerLocked(bool drain);
-    void OnlineWorkerLoop(bool mapping);
+    void OnlineWorkerLoop(bool mapping, bool calibration);
     std::size_t PendingOnlineInputCountLocked() const;
     void ClearPendingOnlineInputLocked();
 
     void ProcessMappingInput(const InputMessage& input);
     loc::LocalizationFrameOutcome ProcessLocalizationInput(const InputMessage& input);
+    loc::LocalizationFrameOutcome ProcessCalibrationInput(
+        const InputMessage& input);
 
     void ClearMappingSystemLocked();
     void ClearLocalizationSystemLocked();
@@ -120,6 +131,7 @@ class Lightning {
 
     void StartBagMappingTaskLocked(const std::string& bag_path);
     void StartBagLocalizationTaskLocked(const std::string& bag_path);
+    void StartBagCalibrationTaskLocked(const std::string& bag_path);
 
     ServiceResult SaveMappingLocked(const std::string& save_path);
     void PublishMappingOutputsLocked(bool force);
@@ -149,8 +161,10 @@ class Lightning {
     // Mapping retains every IMU sample. Localization-only observations use
     // one overwriteable slot per sensor so the worker consumes fresh data.
     std::deque<InputMessage> pending_mapping_imu_;
-    InputMessage latest_gps_position_;
-    bool has_latest_gps_position_ = false;
+    InputMessage latest_gps1_;
+    bool has_latest_gps1_ = false;
+    InputMessage latest_gps2_;
+    bool has_latest_gps2_ = false;
     InputMessage latest_gps_velocity_;
     bool has_latest_gps_velocity_ = false;
     InputMessage latest_wheel_odometry_;
@@ -158,16 +172,19 @@ class Lightning {
 
     bool online_worker_running_ = false;
     bool online_worker_is_localization_ = false;
+    bool online_worker_is_calibration_ = false;
     std::thread online_worker_;
 
     std::uint64_t online_lidar_received_ = 0;
     std::uint64_t online_lidar_overwritten_ = 0;
     std::uint64_t online_imu_received_ = 0;
-    std::uint64_t online_gps_position_received_ = 0;
+    std::uint64_t online_gps1_received_ = 0;
+    std::uint64_t online_gps2_received_ = 0;
     std::uint64_t online_gps_velocity_received_ = 0;
     std::uint64_t online_wheel_odometry_received_ = 0;
 
     std::unique_ptr<modules::MappingSystem> mapping_system_;
+    modules::MapEnuCalibrator map_enu_calibrator_;
     std::unique_ptr<modules::LocalizationSystem> localization_system_;
     modules::SaveMap save_map_;
     modules::SaveMapOptions save_map_options_;

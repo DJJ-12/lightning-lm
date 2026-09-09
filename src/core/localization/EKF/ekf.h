@@ -55,7 +55,7 @@ class EKF {
         double min_covariance = 1e-10;
         double max_covariance = 1e8;
 
-        double gps_position_gate_chi2 = 16.3;  // 3 DoF
+        double dual_gps_pose_gate_chi2 = 22.5; // 6 antenna-coordinate DoF
         double gps_velocity_gate_chi2 = 11.8;  // 2 DoF
         double ndt_pose_gate_chi2 = 22.5;      // 6 DoF
     };
@@ -92,15 +92,20 @@ class EKF {
     //   omega_z     = constant.
     bool PredictTo(double stamp);
 
-    // Full 3-D GNSS antenna position in map coordinates. The current full RPY
-    // is used only to remove the lever arm before the position update. GNSS
-    // itself never observes or directly updates orientation.
-    bool UpdategpsPosition(double stamp,
-                           const Eigen::Vector3d& sensor_position_map,
-                           const Eigen::Vector3d& lever_arm_tracking,
-                           const Eigen::Matrix3d& covariance,
-                           double gate_chi2 = -1.0,
-                           double* mahalanobis = nullptr);
+    // Two independent antenna positions are one joint observation:
+    //   h(x) = [p + R(rpy) * lever_1, p + R(rpy) * lever_2].
+    // The baseline constrains only the attitude components it can physically
+    // observe; rotation about the baseline is intentionally left unobserved.
+    bool UpdateDualGpsPose(
+        double stamp,
+        const Eigen::Vector3d& gps1_position_map,
+        const Eigen::Vector3d& gps2_position_map,
+        const Eigen::Vector3d& gps1_lever_arm_tracking,
+        const Eigen::Vector3d& gps2_lever_arm_tracking,
+        const Eigen::Matrix3d& gps1_covariance,
+        const Eigen::Matrix3d& gps2_covariance,
+        double gate_chi2 = -1.0,
+        double* mahalanobis = nullptr);
 
     // Only horizontal map velocity is observable in this vehicle model.
     bool UpdateMapVelocity(double stamp,

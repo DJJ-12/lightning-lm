@@ -20,7 +20,8 @@ std::string ReadTopic(const YAML::Node& common, const char* name) {
 
 bool BagInput::Run(const std::string& bag_path, const std::string& yaml_path,
                    ImuCallback imu_cb, CloudCallback cloud_cb, LivoxCallback livox_cb,
-                   gpsPositionCallback gps_position_cb,
+                   GpsCallback gps1_cb,
+                   GpsCallback gps2_cb,
                    gpsVelocityCallback gps_velocity_cb,
                    WheelOdometryCallback wheel_odometry_cb,
                    ProgressCallback progress_cb, CancelCallback cancel_requested) {
@@ -37,7 +38,19 @@ bool BagInput::Run(const std::string& bag_path, const std::string& yaml_path,
     const std::string imu_topic = ReadTopic(common, "imu_topic");
     const std::string cloud_topic = ReadTopic(common, "lidar_topic");
     const std::string livox_topic = ReadTopic(common, "livox_lidar_topic");
-    const std::string gps_topic = ReadTopic(common, "gps_topic");
+    const std::string gps1_topic = ReadTopic(common, "gps1_topic");
+    const std::string gps2_topic = ReadTopic(common, "gps2_topic");
+    const bool dual_gps_enabled =
+        !gps1_topic.empty() && !gps2_topic.empty() &&
+        gps1_topic != gps2_topic;
+    if (!gps1_topic.empty() && gps1_topic == gps2_topic) {
+        LOG(ERROR) << "BagInput failed: gps1_topic and gps2_topic must differ";
+        return false;
+    }
+    if (gps1_topic.empty() != gps2_topic.empty()) {
+        LOG(WARNING) << "BagInput: dual GPS disabled because only one GPS "
+                        "topic is configured";
+    }
     const std::string velocity_topic =
         ReadTopic(common, "velocity_topic");
     const std::string wheel_odometry_topic =
@@ -51,7 +64,12 @@ bool BagInput::Run(const std::string& bag_path, const std::string& yaml_path,
     if (!livox_topic.empty() && livox_cb) {
         counted_topics.insert(livox_topic);
     }
-    if (!gps_topic.empty() && gps_position_cb) counted_topics.insert(gps_topic);
+    if (dual_gps_enabled && gps1_cb) {
+        counted_topics.insert(gps1_topic);
+    }
+    if (dual_gps_enabled && gps2_cb) {
+        counted_topics.insert(gps2_topic);
+    }
     if (!velocity_topic.empty() && gps_velocity_cb) counted_topics.insert(velocity_topic);
     if (!wheel_odometry_topic.empty() && wheel_odometry_cb) {
         counted_topics.insert(wheel_odometry_topic);
@@ -95,13 +113,25 @@ bool BagInput::Run(const std::string& bag_path, const std::string& yaml_path,
             });
     }
 
-    if (!gps_topic.empty() && gps_position_cb) {
+    if (dual_gps_enabled && gps1_cb) {
         rosbag.AddNavSatFixHandle(
-            gps_topic,
-            [gps_position_cb, progress_cb, cancel_requested, &progress](
+            gps1_topic,
+            [gps1_cb, progress_cb, cancel_requested, &progress](
                 sensor_msgs::msg::NavSatFix::SharedPtr msg) -> bool {
                 if (cancel_requested && cancel_requested()) return false;
-                gps_position_cb(msg);
+                gps1_cb(msg);
+                ++progress.processed_frames;
+                if (progress_cb) progress_cb(progress);
+                return true;
+            });
+    }
+    if (dual_gps_enabled && gps2_cb) {
+        rosbag.AddNavSatFixHandle(
+            gps2_topic,
+            [gps2_cb, progress_cb, cancel_requested,
+             &progress](sensor_msgs::msg::NavSatFix::SharedPtr msg) -> bool {
+                if (cancel_requested && cancel_requested()) return false;
+                gps2_cb(msg);
                 ++progress.processed_frames;
                 if (progress_cb) progress_cb(progress);
                 return true;

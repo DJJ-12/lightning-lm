@@ -41,6 +41,12 @@ Mode ModeFromString(const std::string& mode) {
     if (v == "online_localization") {
         return Mode::ONLINE_LOCALIZATION;
     }
+    if (v == "offline_calibration") {
+        return Mode::OFFLINE_CALIBRATION;
+    }
+    if (v == "online_calibration") {
+        return Mode::ONLINE_CALIBRATION;
+    }
     return Mode::IDLE;
 }
 
@@ -56,6 +62,10 @@ std::string ModeToString(Mode mode) {
             return "offline_localization";
         case Mode::ONLINE_LOCALIZATION:
             return "online_localization";
+        case Mode::OFFLINE_CALIBRATION:
+            return "offline_calibration";
+        case Mode::ONLINE_CALIBRATION:
+            return "online_calibration";
         default:
             return "idle";
     }
@@ -69,11 +79,18 @@ bool IsLocalizationMode(Mode mode) {
     return mode == Mode::OFFLINE_LOCALIZATION || mode == Mode::ONLINE_LOCALIZATION;
 }
 
+bool IsCalibrationMode(Mode mode) {
+    return mode == Mode::OFFLINE_CALIBRATION ||
+           mode == Mode::ONLINE_CALIBRATION;
+}
+
 bool IsKnownModeName(const std::string& mode) {
     const std::string v = Normalize(mode);
     return v == "idle" || v == "offline_mapping" ||
            v == "online_mapping" || v == "offline_localization" ||
-           v == "online_localization";
+           v == "online_localization" ||
+           v == "offline_calibration" ||
+           v == "online_calibration";
 }
 
 }  // namespace lightning::runtime

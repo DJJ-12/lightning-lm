@@ -9,7 +9,8 @@ common:
   livox_lidar_topic: ""
   imu_topic: "/Bob/imu/data"
 
-  gps_topic: "/Bob/fix"
+  gps1_topic: "/Bob/fix"
+  gps2_topic: ""
   # geometry_msgs/msg/TwistWithCovarianceStamped. The message contains ENU
   # velocity; localization uses east/north and ignores the vertical component.
   velocity_topic: ""
@@ -121,8 +122,12 @@ localization:
     max_rotation_std_deg: 30.0
 
   gps_ins:
-    # Vector from tracking origin to GNSS antenna, expressed in tracking frame.
+    # Dual GPS is disabled while gps2_topic is empty. These values are kept so
+    # enabling a second antenna has one unambiguous configuration location.
     lever_arm_tracking: [0.0, 0.0, 0.0]
+    gps2_lever_arm_tracking: [0.0, 0.0, 0.0]
+    dual_gps_sync_tolerance_sec: 0.05
+    dual_gps_baseline_length_tolerance_m: 0.15
 
   ekf:
     # Twelve-state 3-D pose + planar-motion model:
@@ -152,7 +157,7 @@ localization:
     ndt_position_std_z: 0.20
     ndt_orientation_std_deg: 1.0
 
-    gps_position_gate_chi2: 16.3
+    dual_gps_pose_gate_chi2: 22.5
     gps_velocity_gate_chi2: 11.8
     ndt_pose_gate_chi2: 22.5
 

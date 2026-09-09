@@ -32,7 +32,7 @@ class TopicInput {
     };
 
     using ImuCallback = std::function<void(const sensor_msgs::msg::Imu::SharedPtr&)>;
-    using gpsPositionCallback = std::function<void(
+    using GpsCallback = std::function<void(
         const sensor_msgs::msg::NavSatFix::SharedPtr&)>;
     using gpsVelocityCallback = std::function<void(
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr&)>;
@@ -50,7 +50,8 @@ class TopicInput {
                ImuCallback imu_cb,
                CloudCallback cloud_cb,
                LivoxCallback livox_cb,
-               gpsPositionCallback gps_position_cb,
+               GpsCallback gps1_cb,
+               GpsCallback gps2_cb,
                gpsVelocityCallback gps_velocity_cb,
                WheelOdometryCallback wheel_odometry_cb);
     void SetEnabled(bool enabled, bool localization = false);
@@ -71,7 +72,8 @@ class TopicInput {
     std::uint64_t imu_received_ = 0;
     std::uint64_t cloud_received_ = 0;
     std::uint64_t livox_received_ = 0;
-    std::uint64_t gps_fix_received_ = 0;
+    std::uint64_t gps1_received_ = 0;
+    std::uint64_t gps2_received_ = 0;
     std::uint64_t gps_velocity_received_ = 0;
     std::uint64_t wheel_odometry_received_ = 0;
     std::uint64_t lidar_topic_sequence_ = 0;
@@ -79,7 +81,8 @@ class TopicInput {
     ImuCallback imu_cb_;
     CloudCallback cloud_cb_;
     LivoxCallback livox_cb_;
-    gpsPositionCallback gps_position_cb_;
+    GpsCallback gps1_cb_;
+    GpsCallback gps2_cb_;
     gpsVelocityCallback gps_velocity_cb_;
     WheelOdometryCallback wheel_odometry_cb_;
 
@@ -90,7 +93,8 @@ class TopicInput {
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_sub_;
-    rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_fix_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps1_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps2_sub_;
     rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr
         gps_velocity_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_odometry_sub_;

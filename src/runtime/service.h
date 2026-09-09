@@ -8,14 +8,17 @@
 #include "lightning_interfaces/srv/finish_localization.hpp"
 #include "lightning_interfaces/srv/finish_mapping.hpp"
 #include "lightning_interfaces/srv/get_localization_quality.hpp"
+#include "lightning_interfaces/srv/get_map_enu_calibration_status.hpp"
 #include "lightning_interfaces/srv/get_map_path.hpp"
 #include "lightning_interfaces/srv/get_offline_mapping_progress.hpp"
 #include "lightning_interfaces/srv/get_status.hpp"
 #include "lightning_interfaces/srv/load_bag.hpp"
+#include "lightning_interfaces/srv/finish_map_enu_calibration.hpp"
 #include "lightning_interfaces/srv/set_location.hpp"
 #include "lightning_interfaces/srv/set_map_path.hpp"
 #include "lightning_interfaces/srv/set_mode.hpp"
 #include "lightning_interfaces/srv/start_mapping.hpp"
+#include "lightning_interfaces/srv/start_map_enu_calibration.hpp"
 
 #include "runtime/lightning.h"
 
@@ -43,6 +46,12 @@ class Service {
     rclcpp::Service<lightning_interfaces::srv::GetMapPath>::SharedPtr get_localization_map_path_srv_;
     rclcpp::Service<lightning_interfaces::srv::SetLocation>::SharedPtr set_location_srv_;
     rclcpp::Service<lightning_interfaces::srv::GetLocalizationQuality>::SharedPtr get_localization_quality_srv_;
+    rclcpp::Service<lightning_interfaces::srv::StartMapEnuCalibration>::SharedPtr
+        start_map_enu_calibration_srv_;
+    rclcpp::Service<lightning_interfaces::srv::GetMapEnuCalibrationStatus>::SharedPtr
+        get_map_enu_calibration_status_srv_;
+    rclcpp::Service<lightning_interfaces::srv::FinishMapEnuCalibration>::SharedPtr
+        finish_map_enu_calibration_srv_;
 };
 
 }  // namespace lightning::runtime
