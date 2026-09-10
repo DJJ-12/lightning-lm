@@ -181,6 +181,7 @@ class MapEnuCalibrator {
 
     enum class InterpolationState { READY, WAIT_FOR_FUTURE, INVALID };
 
+    void ClearSessionDataLocked();
     void AddNdtObservation(const loc::LocalizationResult& ndt);
     void AddGnss(const sensor_msgs::msg::NavSatFix& fix, bool main);
     bool ValidateNdt(const loc::LocalizationResult& ndt,

@@ -115,23 +115,19 @@ class Lightning {
 
     void StartOnlineWorkerLocked();
     void StopOnlineWorkerLocked(bool drain);
-    void OnlineWorkerLoop(bool mapping, bool calibration);
+    void OnlineWorkerLoop(Mode run_mode);
     std::size_t PendingOnlineInputCountLocked() const;
     void ClearPendingOnlineInputLocked();
 
-    void ProcessMappingInput(const InputMessage& input);
-    loc::LocalizationFrameOutcome ProcessLocalizationInput(const InputMessage& input);
-    loc::LocalizationFrameOutcome ProcessCalibrationInput(
-        const InputMessage& input);
+    loc::LocalizationFrameOutcome ProcessInput(
+        const InputMessage& input, Mode run_mode);
 
     void ClearMappingSystemLocked();
     void ClearLocalizationSystemLocked();
     void JoinOfflineThreadLocked();
     void StopAllOnlineWorkersLocked(bool drain);
 
-    void StartBagMappingTaskLocked(const std::string& bag_path);
-    void StartBagLocalizationTaskLocked(const std::string& bag_path);
-    void StartBagCalibrationTaskLocked(const std::string& bag_path);
+    void StartBagTaskLocked(const std::string& bag_path, Mode run_mode);
 
     ServiceResult SaveMappingLocked(const std::string& save_path);
     void PublishMappingOutputsLocked(bool force);
@@ -149,7 +145,7 @@ class Lightning {
     std::unique_ptr<TopicInput> topic_input_;
     std::uint64_t mapping_task_generation_ = 0;
     std::uint64_t localization_task_generation_ = 0;
-    std::atomic<std::uint64_t> offline_localization_sequence_{0};
+    std::atomic<std::uint64_t> offline_lidar_sequence_{0};
 
     // The online LiDAR slot contains at most one unprocessed frame. New LiDAR
     // messages overwrite the previous pending frame while the algorithm works.
@@ -161,6 +157,7 @@ class Lightning {
     // Mapping retains every IMU sample. Localization-only observations use
     // one overwriteable slot per sensor so the worker consumes fresh data.
     std::deque<InputMessage> pending_mapping_imu_;
+    std::deque<InputMessage> pending_calibration_gnss_;
     InputMessage latest_gps1_;
     bool has_latest_gps1_ = false;
     InputMessage latest_gps2_;
@@ -171,8 +168,7 @@ class Lightning {
     bool has_latest_wheel_odometry_ = false;
 
     bool online_worker_running_ = false;
-    bool online_worker_is_localization_ = false;
-    bool online_worker_is_calibration_ = false;
+    Mode online_worker_mode_ = Mode::IDLE;
     std::thread online_worker_;
 
     std::uint64_t online_lidar_received_ = 0;
