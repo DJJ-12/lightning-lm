@@ -79,8 +79,6 @@ class LocalizationSystem {
     bool UsesGpsVelocity() const { return !velocity_topic_.empty(); }
     bool UsesWheelOdometry() const { return !wheel_odometry_topic_.empty(); }
     bool RequiresMap() const { return UsesLidar() || with_ui_; }
-    bool RequiresInitialGuess() const { return UsesLidar(); }
-    bool ReadyWithoutMap() const { return !RequiresMap(); }
 
     static Mode ModeFromString(const std::string& value);
     static std::string ModeToString(Mode mode);
@@ -95,10 +93,10 @@ class LocalizationSystem {
         const sensor_msgs::msg::NavSatFix::SharedPtr& gps1,
         const sensor_msgs::msg::NavSatFix::SharedPtr& gps2);
 
-    // GPS initialization is deliberately part of localization initialization:
-    // first get one reliable map<-body pose from NDT, then keep the vehicle
-    // stationary and average the first N synchronized dual-GPS pairs. Those
-    // pairs determine a fixed yaw-only ENU<-MAP rotation and a 3-D translation.
+    // GPS initialization is the second stage of localization initialization:
+    // 1) NDT relocalizes from the user-provided rough MAP<-BODY seed;
+    // 2) while the vehicle stays still, average the first N synchronized
+    //    dual-GPS pairs and solve one fixed yaw-only ENU<-MAP transform.
     void BeginGpsInitialization(const SE3& initial_map_body_pose);
     bool AddGpsInitializationSample(const Eigen::Vector3d& gps1_enu,
                                     const Eigen::Vector3d& gps2_enu);

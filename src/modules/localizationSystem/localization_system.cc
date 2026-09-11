@@ -476,12 +476,16 @@ bool LocalizationSystem::SetInitialGuess(const SE3& init_pose, bool* initialized
     if (accepted) {
         std::lock_guard<std::mutex> lock(filter_mutex_);
         ekf_.Reset();
-        manual_initial_pose_ = init_pose;
-        manual_initial_guess_pending_ = true;
-        // A new NDT seed starts a new localization initialization.  Do not let
-        // a transform derived from an older seed continue to affect GPS.
+        manual_initial_pose_ = SE3();
+        manual_initial_guess_pending_ = false;
+
+        // A new NDT seed starts a new localization run.  Any GPS transform from
+        // the previous run must be discarded and rebuilt after relocalization.
         gps_initial_map_body_ready_ = false;
+        gps_initial_map_body_pose_ = SE3();
         enu_from_map_ready_ = false;
+        enu_from_map_rotation_.setIdentity();
+        enu_from_map_translation_.setZero();
         enu_projector_ = math::JsbsimWgs84Enu();
         gps_initialization_sample_count_ = 0;
         gps1_initial_enu_sum_.setZero();
@@ -661,21 +665,26 @@ void LocalizationSystem::HandleDualGpsPair(
         (gps2_position_enu - enu_from_map_translation_);
     const Eigen::Vector3d baseline_map =
         gps2_position_map - gps1_position_map;
-    Eigen::Quaterniond approximate_rotation =
-        Eigen::Quaterniond::FromTwoVectors(baseline_body, baseline_map);
-    approximate_rotation.normalize();
-    const Eigen::Matrix3d approximate_rotation_matrix =
-        approximate_rotation.toRotationMatrix();
+
+    // Dual GPS directly gives only the baseline heading.  For the debug path,
+    // use that yaw only; do not invent a full 3-D attitude from one vector.
+    const double body_baseline_yaw =
+        std::atan2(baseline_body.y(), baseline_body.x());
+    const double map_baseline_yaw =
+        std::atan2(baseline_map.y(), baseline_map.x());
+    const double gps_body_yaw_map = loc::EKF::WrapAngle(
+        map_baseline_yaw - body_baseline_yaw);
+    const Eigen::Matrix3d gps_rotation_map_body =
+        Eigen::AngleAxisd(gps_body_yaw_map, Eigen::Vector3d::UnitZ())
+            .toRotationMatrix();
     const Eigen::Vector3d gps_body_position_map = 0.5 *
         ((gps1_position_map -
-          approximate_rotation_matrix * gps1_lever_arm_tracking_) +
+          gps_rotation_map_body * gps1_lever_arm_tracking_) +
          (gps2_position_map -
-          approximate_rotation_matrix * gps2_lever_arm_tracking_));
-    const double approximate_yaw =
-        loc::EKF::RpyFromRotation(approximate_rotation_matrix).z();
+          gps_rotation_map_body * gps2_lever_arm_tracking_));
     AppendDebugPath(
         &raw_gps_path_, raw_gps_path_pub_, stamp,
-        gps_body_position_map.head<2>(), approximate_yaw);
+        gps_body_position_map.head<2>(), gps_body_yaw_map);
     if (loc_) {
         loc_->UpdategpsObservationVisualization(
             gps_body_position_map.head<2>());
@@ -725,7 +734,9 @@ void LocalizationSystem::ProcessgpsVelocity(
 
     std::lock_guard<std::mutex> lock(filter_mutex_);
     if (!ekf_.Initialized()) {
-        if (!manual_initial_guess_pending_ ||
+        // With LiDAR enabled, velocity is never allowed to initialize the EKF
+        // from the user's rough NDT seed.  Wait for reliable NDT relocalization.
+        if (UsesLidar() || !manual_initial_guess_pending_ ||
             !InitializeManualGuess(stamp)) {
             return;
         }
@@ -848,8 +859,11 @@ void LocalizationSystem::InitializeEkfFromNdt(
         BeginGpsInitialization(ndt.pose_);
         LOG(INFO) << "[LOCALIZATION_EKF] NDT relocalization initialized EKF"
                   << ", stamp=" << ndt.timestamp_
-                  << ", position=" << position.transpose()
-                  << "; dual-GPS initialization follows";
+                  << ", position=" << position.transpose();
+        if (UsesDualGps()) {
+            LOG(INFO) << "[LOCALIZATION_EKF][GPS_INIT] NDT pose fixed; "
+                         "dual-GPS ENU<-MAP initialization now starts";
+        }
     }
 }
 
@@ -1077,7 +1091,10 @@ bool LocalizationSystem::VelocityToMap(
 
 bool LocalizationSystem::InitializeManualGuess(double stamp) {
     if (ekf_.Initialized()) return true;
-    if (!manual_initial_guess_pending_ || !std::isfinite(stamp)) return false;
+    if (UsesLidar() || !manual_initial_guess_pending_ ||
+        !std::isfinite(stamp)) {
+        return false;
+    }
     const Eigen::Vector3d position = manual_initial_pose_.translation();
     const Eigen::Vector3d rpy = loc::EKF::RpyFromRotation(
         manual_initial_pose_.rotationMatrix());

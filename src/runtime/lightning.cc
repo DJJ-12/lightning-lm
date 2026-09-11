@@ -139,23 +139,6 @@ bool Lightning::EnsureLocalizationSystemLocked() {
     return true;
 }
 
-bool Lightning::SetMapOriginInitialGuessLocked(
-    const std::string& context) {
-    if (!localization_system_) return false;
-
-    const SE3 map_origin(
-        Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero());
-    if (!localization_system_->SetInitialGuess(map_origin)) {
-        LOG(ERROR) << "[" << context << "] failed to set automatic "
-                      "map-origin initial pose";
-        return false;
-    }
-
-    LOG(INFO) << "[" << context << "] automatic initial pose set to "
-                 "map-frame identity";
-    return true;
-}
-
 ServiceResult Lightning::SetMode(const std::string& mode_text) {
     std::lock_guard<std::mutex> lock(control_mutex_);
     if (!CanChangeModeLocked()) {
@@ -688,31 +671,21 @@ ServiceResult Lightning::LoadBag(const std::string& bag_path) {
         if (!EnsureLocalizationSystemLocked()) {
             return {false, "failed to initialize localization"};
         }
-        if (localization_system_->ReadyWithoutMap()) {
-            if (!SetMapOriginInitialGuessLocked("offline localization")) {
-                task_.Reset(TaskState::READY,
-                            "offline bag loaded; failed to set zero initial pose");
-                return {false, "failed to set automatic offline initial pose"};
-            }
-            task_.Reset(TaskState::RUNNING,
-                        "offline localization running without map");
-            StartBagLocalizationTaskLocked(bag_path);
-            return {true,
-                    "offline localization started without map: " + bag_path};
-        }
-        if (localization_map_path_.empty()) {
-            task_.Reset(TaskState::READY,
-                        "offline bag loaded, waiting for set_map_path");
+
+        // Loading data never invents an initial pose and never starts
+        // localization.  The user must provide the approximate MAP<-BODY pose
+        // through set_location; NDT then performs seed-based relocalization.
+        if (localization_system_->RequiresMap() &&
+            localization_map_path_.empty()) {
+            task_.Reset(
+                TaskState::READY,
+                "offline bag loaded, waiting for set_map_path and set_location");
             return {true, "offline localization bag loaded: " + bag_path};
         }
-        if (!SetMapOriginInitialGuessLocked("offline localization")) {
-            task_.Reset(TaskState::READY,
-                        "offline bag and map loaded; failed to set zero initial pose");
-            return {false, "failed to set automatic offline initial pose"};
-        }
-        task_.Reset(TaskState::RUNNING, "offline localization running");
-        StartBagLocalizationTaskLocked(bag_path);
-        return {true, "offline localization started: " + bag_path};
+
+        task_.Reset(TaskState::READY,
+                    "offline bag loaded, waiting for set_location");
+        return {true, "offline localization bag loaded: " + bag_path};
     }
 
     if (mapping_save_path_.empty()) {
@@ -893,19 +866,14 @@ ServiceResult Lightning::SetMapPath(const std::string& map_path) {
     }
 
     if (mode_ == Mode::OFFLINE_LOCALIZATION && !offline_bag_path_.empty()) {
-        if (!SetMapOriginInitialGuessLocked("offline localization")) {
-            task_.Reset(TaskState::READY,
-                        "offline bag and map loaded; failed to set zero initial pose");
-            return {false, "failed to set automatic offline initial pose"};
-        }
-        task_.Reset(TaskState::RUNNING,
-                    "offline localization running");
-        StartBagLocalizationTaskLocked(offline_bag_path_);
-        return {true, "localization map loaded; offline localization started"};
+        task_.Reset(TaskState::READY,
+                    "offline bag and map loaded, waiting for set_location");
+        return {true,
+                "localization map loaded; waiting for initial pose"};
     }
 
     task_.Reset(TaskState::READY,
-                "localization map loaded, waiting for offline bag");
+                "localization map loaded, waiting for offline bag and set_location");
     return {true, "localization map loaded: " + map_path};
 }
 

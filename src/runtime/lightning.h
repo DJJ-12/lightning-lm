@@ -92,7 +92,6 @@ class Lightning {
    private:
     bool CanChangeModeLocked() const;
     bool EnsureLocalizationSystemLocked();
-    bool SetMapOriginInitialGuessLocked(const std::string& context);
 
     // Topic callbacks only place data into these lightweight online buffers.
     void AcceptImu(const sensor_msgs::msg::Imu::SharedPtr& imu);
