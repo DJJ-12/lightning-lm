@@ -92,18 +92,24 @@ class EKF {
     //   omega_z     = constant.
     bool PredictTo(double stamp);
 
-    // Two independent antenna positions are one joint observation:
-    //   h(x) = [p + R(rpy) * lever_1, p + R(rpy) * lever_2].
-    // The baseline constrains only the attitude components it can physically
-    // observe; rotation about the baseline is intentionally left unobserved.
-    bool UpdateDualGpsPose(
+    // Two antenna positions are fused directly in ENU.  The fixed ENU<-MAP
+    // transform is initialized once after NDT relocalization, so the EKF state
+    // itself remains expressed in MAP:
+    //   h_i(x) = R_enu_map * (p_map + R_map_body(rpy) * lever_i)
+    //            + t_enu_map.
+    // A single dual-antenna baseline still leaves rotation about that baseline
+    // unobservable; the EKF naturally gets only the attitude information that
+    // is present in the two antenna coordinates.
+    bool UpdateDualGpsPoseEnu(
         double stamp,
-        const Eigen::Vector3d& gps1_position_map,
-        const Eigen::Vector3d& gps2_position_map,
+        const Eigen::Vector3d& gps1_position_enu,
+        const Eigen::Vector3d& gps2_position_enu,
         const Eigen::Vector3d& gps1_lever_arm_tracking,
         const Eigen::Vector3d& gps2_lever_arm_tracking,
-        const Eigen::Matrix3d& gps1_covariance,
-        const Eigen::Matrix3d& gps2_covariance,
+        const Eigen::Matrix3d& gps1_covariance_enu,
+        const Eigen::Matrix3d& gps2_covariance_enu,
+        const Eigen::Matrix3d& rotation_enu_map,
+        const Eigen::Vector3d& translation_enu_map,
         double gate_chi2 = -1.0,
         double* mahalanobis = nullptr);
 
@@ -133,6 +139,9 @@ class EKF {
 
    private:
     void PredictStep(double dt);
+    static Eigen::Matrix3d ComputeLeverArmJacobian(
+        const Eigen::Vector3d& lever_arm,
+        const Eigen::Vector3d& rpy);
     bool ApplyUpdate(const Eigen::VectorXd& residual,
                      const Eigen::MatrixXd& measurement_jacobian,
                      const Eigen::MatrixXd& measurement_covariance,

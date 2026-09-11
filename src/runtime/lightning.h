@@ -24,7 +24,6 @@
 #include "core/localization/localization_diagnostic.h"
 #include "core/localization/localization_result.h"
 #include "modules/localizationSystem/localization_system.h"
-#include "modules/mapEnuCalibration/map_enu_calibrator.h"
 #include "modules/mappingSystem/mapping_system.h"
 #include "modules/mappingSystem/save_map.h"
 #include "runtime/bag_input.h"
@@ -87,11 +86,6 @@ class Lightning {
     ServiceResult SetLocation(const SE3& init_pose, bool* initialized_now = nullptr);
     loc::LocalizationResult GetLocalizationQuality() const;
 
-    ServiceResult StartMapEnuCalibration(
-        const std::string& map_path, const std::string& bag_path);
-    modules::MapEnuCalibrationStatus GetMapEnuCalibrationStatus() const;
-    ServiceResult FinishMapEnuCalibration(
-        modules::MapEnuCalibrationResult* result);
 
     ServiceResult CancelTask();
 
@@ -115,19 +109,20 @@ class Lightning {
 
     void StartOnlineWorkerLocked();
     void StopOnlineWorkerLocked(bool drain);
-    void OnlineWorkerLoop(Mode run_mode);
+    void OnlineWorkerLoop(bool mapping);
     std::size_t PendingOnlineInputCountLocked() const;
     void ClearPendingOnlineInputLocked();
 
-    loc::LocalizationFrameOutcome ProcessInput(
-        const InputMessage& input, Mode run_mode);
+    void ProcessMappingInput(const InputMessage& input);
+    loc::LocalizationFrameOutcome ProcessLocalizationInput(const InputMessage& input);
 
     void ClearMappingSystemLocked();
     void ClearLocalizationSystemLocked();
     void JoinOfflineThreadLocked();
     void StopAllOnlineWorkersLocked(bool drain);
 
-    void StartBagTaskLocked(const std::string& bag_path, Mode run_mode);
+    void StartBagMappingTaskLocked(const std::string& bag_path);
+    void StartBagLocalizationTaskLocked(const std::string& bag_path);
 
     ServiceResult SaveMappingLocked(const std::string& save_path);
     void PublishMappingOutputsLocked(bool force);
@@ -145,7 +140,7 @@ class Lightning {
     std::unique_ptr<TopicInput> topic_input_;
     std::uint64_t mapping_task_generation_ = 0;
     std::uint64_t localization_task_generation_ = 0;
-    std::atomic<std::uint64_t> offline_lidar_sequence_{0};
+    std::atomic<std::uint64_t> offline_localization_sequence_{0};
 
     // The online LiDAR slot contains at most one unprocessed frame. New LiDAR
     // messages overwrite the previous pending frame while the algorithm works.
@@ -157,7 +152,6 @@ class Lightning {
     // Mapping retains every IMU sample. Localization-only observations use
     // one overwriteable slot per sensor so the worker consumes fresh data.
     std::deque<InputMessage> pending_mapping_imu_;
-    std::deque<InputMessage> pending_calibration_gnss_;
     InputMessage latest_gps1_;
     bool has_latest_gps1_ = false;
     InputMessage latest_gps2_;
@@ -168,7 +162,7 @@ class Lightning {
     bool has_latest_wheel_odometry_ = false;
 
     bool online_worker_running_ = false;
-    Mode online_worker_mode_ = Mode::IDLE;
+    bool online_worker_is_localization_ = false;
     std::thread online_worker_;
 
     std::uint64_t online_lidar_received_ = 0;
@@ -180,7 +174,6 @@ class Lightning {
     std::uint64_t online_wheel_odometry_received_ = 0;
 
     std::unique_ptr<modules::MappingSystem> mapping_system_;
-    modules::MapEnuCalibrator map_enu_calibrator_;
     std::unique_ptr<modules::LocalizationSystem> localization_system_;
     modules::SaveMap save_map_;
     modules::SaveMapOptions save_map_options_;

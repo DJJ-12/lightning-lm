@@ -52,8 +52,6 @@ add_library(${PROJECT_NAME}.libs SHARED
         modules/mappingSystem/mapping_system.cc
         modules/mappingSystem/save_map.cc
         modules/localizationSystem/localization_system.cc
-        modules/mapEnuCalibration/map_enu_calibrator.cc
-        modules/mapEnuCalibration/map_enu_calibrator_solver.cc
 )
 
 ament_target_dependencies(

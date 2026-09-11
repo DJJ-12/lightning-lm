@@ -2,7 +2,6 @@
 
 #include <Eigen/Geometry>
 #include <algorithm>
-#include <geometry_msgs/msg/transform.hpp>
 #include <utility>
 
 namespace lightning::runtime {
@@ -18,20 +17,6 @@ SE3 PoseFromRequest(const lightning_interfaces::srv::SetLocation::Request& reque
     return SE3(q, t);
 }
 
-void SetTransform(const Eigen::Matrix3d& rotation,
-                  const Eigen::Vector3d& translation,
-                  geometry_msgs::msg::Transform* transform) {
-    if (!transform) return;
-    transform->translation.x = translation.x();
-    transform->translation.y = translation.y();
-    transform->translation.z = translation.z();
-    Eigen::Quaterniond quaternion(rotation);
-    quaternion.normalize();
-    transform->rotation.x = quaternion.x();
-    transform->rotation.y = quaternion.y();
-    transform->rotation.z = quaternion.z();
-    transform->rotation.w = quaternion.w();
-}
 }  // namespace
 
 bool Service::Init(rclcpp::Node::SharedPtr node, std::shared_ptr<Lightning> lightning) {
@@ -210,96 +195,6 @@ bool Service::Init(rclcpp::Node::SharedPtr node, std::shared_ptr<Lightning> ligh
             response->iterations = static_cast<uint32_t>(std::max(0, result.iterations_));
             response->message = result.valid_ ? result.message_ : "no localization result yet";
         });
-
-    start_map_enu_calibration_srv_ =
-        node_->create_service<
-            lightning_interfaces::srv::StartMapEnuCalibration>(
-            "/lightning/calibration/start_map_enu_calibration",
-            [this](
-                const lightning_interfaces::srv::StartMapEnuCalibration::Request::SharedPtr request,
-                lightning_interfaces::srv::StartMapEnuCalibration::Response::SharedPtr response) {
-                const auto result = lightning_->StartMapEnuCalibration(
-                    request->map_path, request->bag_path);
-                response->success = result.success;
-                response->message = result.message;
-            });
-
-    get_map_enu_calibration_status_srv_ =
-        node_->create_service<
-            lightning_interfaces::srv::GetMapEnuCalibrationStatus>(
-            "/lightning/calibration/get_map_enu_calibration_status",
-            [this](
-                const lightning_interfaces::srv::GetMapEnuCalibrationStatus::Request::SharedPtr,
-                lightning_interfaces::srv::GetMapEnuCalibrationStatus::Response::SharedPtr response) {
-                const auto status =
-                    lightning_->GetMapEnuCalibrationStatus();
-                response->success = status.configured;
-                response->active = status.active;
-                response->solved = status.solved;
-                response->phase = status.phase;
-                response->gps1_received = status.gps1_received;
-                response->gps1_valid = status.gps1_valid;
-                response->gps2_received = status.gps2_received;
-                response->gps2_valid = status.gps2_valid;
-                response->ndt_received = status.ndt_received;
-                response->ndt_valid = status.ndt_valid;
-                response->accepted_samples = status.accepted_samples;
-                response->pending_ndt_samples = status.pending_ndt_samples;
-                response->rejected_time_sync = status.rejected_time_sync;
-                response->rejected_baseline = status.rejected_baseline;
-                response->rejected_sampling = status.rejected_sampling;
-                response->attitude_coverage_deg =
-                    status.attitude_coverage_deg;
-                response->baseline_rms_m = status.baseline_rms_m;
-                response->rotation_condition_number =
-                    status.rotation_condition_number;
-                response->rotation_rms_deg = status.rotation_rms_deg;
-                response->translation_rms_m = status.translation_rms_m;
-                response->max_residual_m = status.max_residual_m;
-                response->message = status.message;
-            });
-
-    finish_map_enu_calibration_srv_ =
-        node_->create_service<
-            lightning_interfaces::srv::FinishMapEnuCalibration>(
-            "/lightning/calibration/finish_map_enu_calibration",
-            [this](
-                const lightning_interfaces::srv::FinishMapEnuCalibration::Request::SharedPtr,
-                lightning_interfaces::srv::FinishMapEnuCalibration::Response::SharedPtr response) {
-                modules::MapEnuCalibrationResult calibration;
-                const auto result =
-                    lightning_->FinishMapEnuCalibration(&calibration);
-                response->success = result.success;
-                response->sample_count = calibration.sample_count;
-                response->enu_origin_latitude =
-                    calibration.enu_origin_lla.x();
-                response->enu_origin_longitude =
-                    calibration.enu_origin_lla.y();
-                response->enu_origin_altitude =
-                    calibration.enu_origin_lla.z();
-                SetTransform(
-                    calibration.enu_from_map_rotation,
-                    calibration.enu_from_map_translation,
-                    &response->enu_from_map);
-                SetTransform(
-                    calibration.map_from_enu_rotation,
-                    calibration.map_from_enu_translation,
-                    &response->map_from_enu);
-                for (int row = 0; row < 6; ++row) {
-                    for (int column = 0; column < 6; ++column) {
-                        response->calibration_covariance[row * 6 + column] =
-                            calibration.map_from_enu_covariance(row, column);
-                    }
-                }
-                response->rotation_rms_deg =
-                    calibration.rotation_rms_deg;
-                response->translation_rms_m =
-                    calibration.translation_rms_m;
-                response->max_residual_m = calibration.max_residual_m;
-                response->condition_number =
-                    calibration.rotation_condition_number;
-                response->message = result.message;
-            });
 
     return true;
 }

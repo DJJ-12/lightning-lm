@@ -185,53 +185,77 @@ Eigen::Matrix<double,3,3> EKF::ComputeLeverArmJacobian(
     return J;
 }
 
-bool EKF::UpdateDualGpsPose( double stamp,
-    const Eigen::Vector3d& gps1_position_map,
-    const Eigen::Vector3d& gps2_position_map,
+bool EKF::UpdateDualGpsPoseEnu(
+    double stamp,
+    const Eigen::Vector3d& gps1_position_enu,
+    const Eigen::Vector3d& gps2_position_enu,
     const Eigen::Vector3d& gps1_lever_arm_tracking,
     const Eigen::Vector3d& gps2_lever_arm_tracking,
-    const Eigen::Matrix3d& gps1_covariance,
-    const Eigen::Matrix3d& gps2_covariance,
+    const Eigen::Matrix3d& gps1_covariance_enu,
+    const Eigen::Matrix3d& gps2_covariance_enu,
+    const Eigen::Matrix3d& rotation_enu_map,
+    const Eigen::Vector3d& translation_enu_map,
     double gate_chi2,
-    double* mahalanobis)
-{
-
+    double* mahalanobis) {
     if (!PredictTo(stamp) ||
-        !gps1_position_map.allFinite() ||
-        !gps2_position_map.allFinite() ||
+        !gps1_position_enu.allFinite() ||
+        !gps2_position_enu.allFinite() ||
         !gps1_lever_arm_tracking.allFinite() ||
         !gps2_lever_arm_tracking.allFinite() ||
-        !gps1_covariance.allFinite() ||
-        !gps2_covariance.allFinite())
-    {
+        !gps1_covariance_enu.allFinite() ||
+        !gps2_covariance_enu.allFinite() ||
+        !rotation_enu_map.allFinite() ||
+        !translation_enu_map.allFinite()) {
         return false;
     }
-    const Eigen::Matrix3d rotation = RotationFromRpy(state_.rpy_map);
 
-    Eigen::Matrix<double,6,1> residual;
-    // GPS1 residual
-    residual.segment<3>(0) = gps1_position_map - ( state_.position_map + rotation*gps1_lever_arm_tracking);
-    // GPS2 residual
+    // The EKF state is MAP<-BODY.  GPS measures each antenna in ENU, so the
+    // prediction is formed in exactly the same ENU frame as the observation:
+    //   p_enu = R_enu_map * (p_map + R_map_body * lever) + t_enu_map.
+    const Eigen::Matrix3d rotation_map_body =
+        RotationFromRpy(state_.rpy_map);
+    const Eigen::Vector3d gps1_predicted_enu =
+        rotation_enu_map *
+            (state_.position_map +
+             rotation_map_body * gps1_lever_arm_tracking) +
+        translation_enu_map;
+    const Eigen::Vector3d gps2_predicted_enu =
+        rotation_enu_map *
+            (state_.position_map +
+             rotation_map_body * gps2_lever_arm_tracking) +
+        translation_enu_map;
 
-    residual.segment<3>(3) = gps2_position_map - (state_.position_map + rotation*gps2_lever_arm_tracking);
+    Eigen::Matrix<double, 6, 1> residual;
+    residual.segment<3>(0) = gps1_position_enu - gps1_predicted_enu;
+    residual.segment<3>(3) = gps2_position_enu - gps2_predicted_enu;
 
-    Eigen::Matrix<double,6,kStateDim> jacobian = Eigen::Matrix<double,6,kStateDim>::Zero();
-    jacobian.block<3,3>( 0, kPositionX).setIdentity();
-    jacobian.block<3,3>( 3, kPositionX).setIdentity();
+    Eigen::Matrix<double, 6, kStateDim> jacobian =
+        Eigen::Matrix<double, 6, kStateDim>::Zero();
 
-    const Eigen::Matrix<double,3,3> J1 = ComputeLeverArmJacobian( gps1_lever_arm_tracking, state_.rpy_map);
-    const Eigen::Matrix<double,3,3> J2 = ComputeLeverArmJacobian( gps2_lever_arm_tracking, state_.rpy_map);
+    // d h / d p_map = R_enu_map.
+    jacobian.block<3, 3>(0, kPositionX) = rotation_enu_map;
+    jacobian.block<3, 3>(3, kPositionX) = rotation_enu_map;
 
-    jacobian.block<3,3>( 0, kRoll) = J1;
-    jacobian.block<3,3>( 3, kRoll) = J2;
+    // d h / d rpy = R_enu_map * d(R_map_body * lever)/d(rpy).
+    const Eigen::Matrix3d gps1_attitude_jacobian =
+        ComputeLeverArmJacobian(gps1_lever_arm_tracking, state_.rpy_map);
+    const Eigen::Matrix3d gps2_attitude_jacobian =
+        ComputeLeverArmJacobian(gps2_lever_arm_tracking, state_.rpy_map);
+    jacobian.block<3, 3>(0, kRoll) =
+        rotation_enu_map * gps1_attitude_jacobian;
+    jacobian.block<3, 3>(3, kRoll) =
+        rotation_enu_map * gps2_attitude_jacobian;
 
-    Eigen::Matrix<double,6,6> covariance = Eigen::Matrix<double,6,6>::Zero();
-    covariance.block<3,3>(0,0) = gps1_covariance;
-    covariance.block<3,3>(3,3) = gps2_covariance;
+    Eigen::Matrix<double, 6, 6> covariance =
+        Eigen::Matrix<double, 6, 6>::Zero();
+    covariance.block<3, 3>(0, 0) = gps1_covariance_enu;
+    covariance.block<3, 3>(3, 3) = gps2_covariance_enu;
 
-    return ApplyUpdate( residual, jacobian, covariance, gate_chi2 > 0.0 ? gate_chi2 : options_.dual_gps_pose_gate_chi2, mahalanobis, true);
-
-}   
+    return ApplyUpdate(
+        residual, jacobian, covariance,
+        gate_chi2 > 0.0 ? gate_chi2 : options_.dual_gps_pose_gate_chi2,
+        mahalanobis, true);
+}
 
 bool EKF::UpdateMapVelocity(
     double stamp, const Eigen::Vector2d& velocity_map_xy,

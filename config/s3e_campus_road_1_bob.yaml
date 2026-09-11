@@ -128,6 +128,7 @@ localization:
     gps2_lever_arm_tracking: [0.0, 0.0, 0.0]
     dual_gps_sync_tolerance_sec: 0.05
     dual_gps_baseline_length_tolerance_m: 0.15
+    gps_initialization_sample_count: 10
 
   ekf:
     # Twelve-state 3-D pose + planar-motion model:
@@ -161,18 +162,6 @@ localization:
     gps_velocity_gate_chi2: 11.8
     ndt_pose_gate_chi2: 22.5
 
-  map_from_enu:
-    # GNSS antenna position recorded at the map origin.
-    # alt must use the same WGS84 ellipsoid-height convention as NavSatFix.
-    # Independently calibrated, standard right-handed positive yaw that
-    # rotates true-ENU coordinate values into map coordinates. It is NOT
-    # courseang from /INS_data. The current 112.329 value only preserves the
-    # previous effective transform and must be replaced by a real independent
-    # map/ENU calibration if that old value came from courseang.
-    lat: 34.81399159716
-    lon: 113.53639752842
-    alt: 89.744
-    map_from_true_enu_yaw_deg: 112.329
 
 mapping:
   block_map_resolution: 20

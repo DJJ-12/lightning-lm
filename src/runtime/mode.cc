@@ -25,35 +25,16 @@ std::string Normalize(std::string value) {
 }  // namespace
 
 Mode ModeFromString(const std::string& mode) {
-    const std::string v = Normalize(mode);
-    if (v == "idle") {
-        return Mode::IDLE;
-    }
-    if (v == "offline_mapping") {
-        return Mode::OFFLINE_MAPPING;
-    }
-    if (v == "online_mapping") {
-        return Mode::ONLINE_MAPPING;
-    }
-    if (v == "offline_localization") {
-        return Mode::OFFLINE_LOCALIZATION;
-    }
-    if (v == "online_localization") {
-        return Mode::ONLINE_LOCALIZATION;
-    }
-    if (v == "offline_calibration") {
-        return Mode::OFFLINE_CALIBRATION;
-    }
-    if (v == "online_calibration") {
-        return Mode::ONLINE_CALIBRATION;
-    }
+    const std::string value = Normalize(mode);
+    if (value == "offline_mapping") return Mode::OFFLINE_MAPPING;
+    if (value == "online_mapping") return Mode::ONLINE_MAPPING;
+    if (value == "offline_localization") return Mode::OFFLINE_LOCALIZATION;
+    if (value == "online_localization") return Mode::ONLINE_LOCALIZATION;
     return Mode::IDLE;
 }
 
 std::string ModeToString(Mode mode) {
     switch (mode) {
-        case Mode::IDLE:
-            return "idle";
         case Mode::OFFLINE_MAPPING:
             return "offline_mapping";
         case Mode::ONLINE_MAPPING:
@@ -62,13 +43,17 @@ std::string ModeToString(Mode mode) {
             return "offline_localization";
         case Mode::ONLINE_LOCALIZATION:
             return "online_localization";
-        case Mode::OFFLINE_CALIBRATION:
-            return "offline_calibration";
-        case Mode::ONLINE_CALIBRATION:
-            return "online_calibration";
+        case Mode::IDLE:
         default:
             return "idle";
     }
+}
+
+bool IsKnownModeName(const std::string& mode) {
+    const std::string value = Normalize(mode);
+    return value == "idle" || value == "offline_mapping" ||
+           value == "online_mapping" || value == "offline_localization" ||
+           value == "online_localization";
 }
 
 bool IsMappingMode(Mode mode) {
@@ -76,21 +61,8 @@ bool IsMappingMode(Mode mode) {
 }
 
 bool IsLocalizationMode(Mode mode) {
-    return mode == Mode::OFFLINE_LOCALIZATION || mode == Mode::ONLINE_LOCALIZATION;
-}
-
-bool IsCalibrationMode(Mode mode) {
-    return mode == Mode::OFFLINE_CALIBRATION ||
-           mode == Mode::ONLINE_CALIBRATION;
-}
-
-bool IsKnownModeName(const std::string& mode) {
-    const std::string v = Normalize(mode);
-    return v == "idle" || v == "offline_mapping" ||
-           v == "online_mapping" || v == "offline_localization" ||
-           v == "online_localization" ||
-           v == "offline_calibration" ||
-           v == "online_calibration";
+    return mode == Mode::OFFLINE_LOCALIZATION ||
+           mode == Mode::ONLINE_LOCALIZATION;
 }
 
 }  // namespace lightning::runtime
