@@ -96,6 +96,9 @@ class LocalizationSystem {
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation);
     void HandleGpsPosition(
         const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
+    void HandleGpsOrientation(
+        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr&
+            orientation);
 
     // GPS initialization is the second stage of localization initialization:
     // 1) NDT relocalizes from the user-provided rough MAP<-BODY seed;
@@ -180,6 +183,12 @@ class LocalizationSystem {
     double gps_position_std_x_ = 0.05;
     double gps_position_std_y_ = 0.05;
     double gps_position_std_z_ = 100.0;
+    double gps_orientation_std_roll_ =
+        0.2 * 3.14159265358979323846 / 180.0;
+    double gps_orientation_std_pitch_ =
+        0.2 * 3.14159265358979323846 / 180.0;
+    double gps_orientation_std_yaw_ =
+        0.5 * 3.14159265358979323846 / 180.0;
     double gps_velocity_std_x_ = 0.10;
     double gps_velocity_std_y_ = 0.10;
     double ndt_position_std_x_ = 0.10;

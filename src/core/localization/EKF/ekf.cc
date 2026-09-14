@@ -234,6 +234,36 @@ bool EKF::UpdateGpsPoseEnu(
         mahalanobis, true);
 }
 
+bool EKF::UpdateMapOrientation(
+    double stamp,
+    const Eigen::Vector3d& measured_rpy_map_body,
+    const Eigen::Matrix3d& covariance_map_body,
+    double gate_chi2,
+    double* mahalanobis) {
+    if (!PredictTo(stamp) || !measured_rpy_map_body.allFinite() ||
+        !covariance_map_body.allFinite()) {
+        return false;
+    }
+
+    // Both sides are MAP<-BODY Euler angles.  Keep each angular innovation on
+    // the shortest branch across the +/-pi boundary.
+    Eigen::Vector3d residual;
+    for (int axis = 0; axis < 3; ++axis) {
+        residual(axis) = WrapAngle(
+            measured_rpy_map_body(axis) - state_.rpy_map(axis));
+    }
+
+    Eigen::Matrix<double, 3, kStateDim> jacobian =
+        Eigen::Matrix<double, 3, kStateDim>::Zero();
+    jacobian.block<3, 3>(0, kRoll).setIdentity();
+
+    return ApplyUpdate(
+        residual, jacobian, covariance_map_body,
+        gate_chi2 > 0.0 ? gate_chi2
+                        : options_.gps_orientation_gate_chi2,
+        mahalanobis, true);
+}
+
 bool EKF::UpdateMapVelocity(
     double stamp, const Eigen::Vector2d& velocity_map_xy,
     const Eigen::Matrix2d& covariance, double gate_chi2,

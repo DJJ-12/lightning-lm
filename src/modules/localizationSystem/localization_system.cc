@@ -33,6 +33,19 @@ std::string ReadTopic(const YAML::Node& common, const char* name) {
         : std::string();
 }
 
+Eigen::Vector3d OrientationMessageToEnuRpy(
+    const geometry_msgs::msg::TwistWithCovarianceStamped& orientation) {
+    // The temporary DataTransfer bag stores the vendor convention unchanged:
+    // angular.x/y are roll/pitch and angular.z is course, all in radians.
+    // Course is zero at north and increases clockwise.  Right-handed ENU yaw
+    // is zero at east and increases counter-clockwise.
+    return Eigen::Vector3d(
+        orientation.twist.twist.angular.x,
+        orientation.twist.twist.angular.y,
+        loc::EKF::WrapAngle(
+            0.5 * kPi - orientation.twist.twist.angular.z));
+}
+
 loc::EKF::Covariance InitialEkfCovariance(
     double position_std, double orientation_std, double velocity_std,
     double yaw_rate_std) {
@@ -344,6 +357,9 @@ bool LocalizationSystem::Init(const std::string& yaml_path,
     filter_options.gps_position_gate_chi2 = read_ekf(
         "gps_position_gate_chi2",
         filter_options.gps_position_gate_chi2);
+    filter_options.gps_orientation_gate_chi2 = read_ekf(
+        "gps_orientation_gate_chi2",
+        filter_options.gps_orientation_gate_chi2);
     filter_options.gps_velocity_gate_chi2 = read_ekf(
         "gps_velocity_gate_chi2", filter_options.gps_velocity_gate_chi2);
     filter_options.ndt_pose_gate_chi2 = read_ekf(
@@ -364,6 +380,15 @@ bool LocalizationSystem::Init(const std::string& yaml_path,
         "gps_position_std_y", gps_position_std_y_);
     gps_position_std_z_ = read_ekf(
         "gps_position_std_z", gps_position_std_z_);
+    gps_orientation_std_roll_ = read_ekf(
+        "gps_orientation_std_floor_roll_deg",
+        gps_orientation_std_roll_ / kDegToRad) * kDegToRad;
+    gps_orientation_std_pitch_ = read_ekf(
+        "gps_orientation_std_floor_pitch_deg",
+        gps_orientation_std_pitch_ / kDegToRad) * kDegToRad;
+    gps_orientation_std_yaw_ = read_ekf(
+        "gps_orientation_std_floor_yaw_deg",
+        gps_orientation_std_yaw_ / kDegToRad) * kDegToRad;
     gps_velocity_std_x_ = read_ekf(
         "gps_velocity_std_x", gps_velocity_std_x_);
     gps_velocity_std_y_ = read_ekf(
@@ -377,7 +402,7 @@ bool LocalizationSystem::Init(const std::string& yaml_path,
     ndt_orientation_std_ = read_ekf(
         "ndt_orientation_std_deg",
         ndt_orientation_std_ / kDegToRad) * kDegToRad;
-    const std::array<double, 17> standard_deviations = {
+    const std::array<double, 20> standard_deviations = {
         filter_options.process_acceleration_std,
         filter_options.process_yaw_acceleration_std,
         filter_options.process_vertical_position_rate_std,
@@ -385,10 +410,13 @@ bool LocalizationSystem::Init(const std::string& yaml_path,
         initial_position_std_, initial_orientation_std_,
         initial_velocity_std_, initial_yaw_rate_std_,
         gps_position_std_x_, gps_position_std_y_, gps_position_std_z_,
+        gps_orientation_std_roll_, gps_orientation_std_pitch_,
+        gps_orientation_std_yaw_,
         gps_velocity_std_x_, gps_velocity_std_y_, ndt_position_std_x_,
         ndt_position_std_y_, ndt_position_std_z_, ndt_orientation_std_};
-    const std::array<double, 3> gates = {
+    const std::array<double, 4> gates = {
         filter_options.gps_position_gate_chi2,
+        filter_options.gps_orientation_gate_chi2,
         filter_options.gps_velocity_gate_chi2,
         filter_options.ndt_pose_gate_chi2};
     if (!std::isfinite(filter_options.max_prediction_step) ||
@@ -435,7 +463,7 @@ bool LocalizationSystem::Init(const std::string& yaml_path,
     LOG(INFO) << "[LOCALIZATION_SYSTEM] mode=" << ModeToString(mode_)
               << ", filter=3d_pose_planar_motion_12_state"
               << ", gps_position=" << UsesGpsPosition()
-              << ", gps_orientation_initialization="
+              << ", gps_orientation="
               << UsesGpsOrientation()
               << ", gps_initialization_sync_tolerance_sec="
               << gps_initialization_sync_tolerance_sec_
@@ -449,7 +477,13 @@ bool LocalizationSystem::Init(const std::string& yaml_path,
               << ", wheel_input_reserved=" << UsesWheelOdometry()
               << ", imu_input_reserved=" << (!imu_topic_.empty())
               << " (not fused into localization EKF)"
-              << ", gps_z_std_floor_m=" << gps_position_std_z_;
+              << ", gps_z_std_floor_m=" << gps_position_std_z_
+              << ", gps_orientation_std_floor_deg="
+              << (Eigen::Vector3d(
+                      gps_orientation_std_roll_,
+                      gps_orientation_std_pitch_,
+                      gps_orientation_std_yaw_) /
+                  kDegToRad).transpose();
     return true;
 }
 
@@ -551,8 +585,9 @@ void LocalizationSystem::ProcessGps(
     const double stamp = rclcpp::Time(fix->header.stamp).seconds();
     if (!std::isfinite(stamp)) return;
 
-    // INS orientation is required only while initializing the fixed ENU<-MAP
-    // transform. Runtime GNSS updates are deliberately independent of it.
+    // INS orientation is required while initializing the fixed ENU<-MAP
+    // transform. Runtime GNSS position and INS orientation updates are
+    // deliberately independent of one another.
     if (!enu_from_map_ready_) {
         if (!UsesGpsPose()) return;
         {
@@ -568,15 +603,21 @@ void LocalizationSystem::ProcessGps(
 
 void LocalizationSystem::ProcessGpsOrientation(
     const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation) {
-    if (!UsesGpsPose() || !orientation || enu_from_map_ready_) return;
+    if (!UsesGpsOrientation() || !orientation) return;
     const double stamp = rclcpp::Time(orientation->header.stamp).seconds();
     if (!std::isfinite(stamp)) return;
 
-    {
-        std::lock_guard<std::mutex> lock(gps_initialization_mutex_);
-        pending_gps_orientation_ = orientation;
+    if (!enu_from_map_ready_) {
+        if (!UsesGpsPosition()) return;
+        {
+            std::lock_guard<std::mutex> lock(gps_initialization_mutex_);
+            pending_gps_orientation_ = orientation;
+        }
+        TryHandleGpsInitialization();
+        return;
     }
-    TryHandleGpsInitialization();
+
+    HandleGpsOrientation(orientation);
 }
 
 void LocalizationSystem::TryHandleGpsInitialization() {
@@ -680,12 +721,12 @@ void LocalizationSystem::HandleGpsInitializationPair(
         return;
     }
 
-    // DataTransfer stores roll, pitch and yaw (radians) in angular.x/y/z.
-    // This is R_ENU_GPS and is used only to initialize ENU<-MAP.
-    const Eigen::Vector3d gps_rpy_enu(
-        orientation->twist.twist.angular.x,
-        orientation->twist.twist.angular.y,
-        orientation->twist.twist.angular.z);
+    // Convert the vendor north-zero, clockwise-positive course to standard
+    // right-handed ENU yaw before constructing R_ENU_GPS. This synchronized
+    // copy initializes ENU<-MAP; later messages use the exact same conversion
+    // before independently updating the EKF.
+    const Eigen::Vector3d gps_rpy_enu =
+        OrientationMessageToEnuRpy(*orientation);
     if (!gps_rpy_enu.allFinite()) {
         LOG_EVERY_N(WARNING, 100)
             << "[LOCALIZATION_EKF][GPS_INIT] non-finite INS orientation";
@@ -757,6 +798,122 @@ void LocalizationSystem::HandleGpsPosition(
         LOG_EVERY_N(WARNING, 20)
             << "[LOCALIZATION_EKF][GPS] position observation rejected"
             << ", stamp=" << stamp
+            << ", mahalanobis=" << distance;
+    }
+}
+
+void LocalizationSystem::HandleGpsOrientation(
+    const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr&
+        orientation) {
+    if (!orientation || !enu_from_map_ready_) return;
+
+    const double stamp = rclcpp::Time(orientation->header.stamp).seconds();
+    const Eigen::Vector3d measured_rpy_enu_gps =
+        OrientationMessageToEnuRpy(*orientation);
+    if (!std::isfinite(stamp) || !measured_rpy_enu_gps.allFinite()) {
+        LOG_EVERY_N(WARNING, 100)
+            << "[LOCALIZATION_EKF][INS_ORIENTATION] invalid observation";
+        return;
+    }
+
+    // Convert the observation into the exact coordinate convention used by
+    // the EKF state before calling the filter:
+    //   R_M_B(meas) = R_E_M^T * R_E_G(meas) * R_B_G^T.
+    // R_E_M and R_B_G are fixed, known rotations.  After this conversion the
+    // measurement is MAP<-BODY RPY, so the EKF observation Jacobian is I3.
+    const Eigen::Matrix3d measured_rotation_enu_gps =
+        loc::EKF::RotationFromRpy(measured_rpy_enu_gps);
+    const Eigen::Matrix3d measured_rotation_map_body =
+        enu_from_map_rotation_.transpose() *
+        measured_rotation_enu_gps *
+        gps_rotation_tracking_gps_.transpose();
+    const Eigen::Vector3d measured_rpy_map_body =
+        loc::EKF::RpyFromRotation(measured_rotation_map_body);
+    if (!measured_rpy_map_body.allFinite()) {
+        LOG_EVERY_N(WARNING, 100)
+            << "[LOCALIZATION_EKF][INS_ORIENTATION] failed to convert "
+               "ENU<-GPS observation to MAP<-BODY";
+        return;
+    }
+
+    Eigen::Matrix3d covariance_map_body;
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            covariance_map_body(row, column) =
+                orientation->twist.covariance[(row + 3) * 6 + column + 3];
+        }
+    }
+
+    // yaw_enu = pi/2 - course has derivative -1 with respect to course.
+    // Transform the complete covariance too, so any future roll/course or
+    // pitch/course cross-covariance keeps the correct sign. The current bag
+    // converter writes only the diagonal, for which the values are unchanged.
+    Eigen::Matrix3d course_to_enu_yaw = Eigen::Matrix3d::Identity();
+    course_to_enu_yaw(2, 2) = -1.0;
+    covariance_map_body =
+        course_to_enu_yaw * covariance_map_body * course_to_enu_yaw;
+
+    // The temporary orientation message supplies diagonal roll/pitch/course
+    // variances.  Treat those variances as the uncertainty of the converted
+    // MAP<-BODY Euler observation; the known frame transforms themselves add
+    // no uncertainty.  This keeps the observation model explicit and avoids
+    // putting frame-conversion derivatives inside the EKF.
+
+    const Eigen::Vector3d std_floor(
+        gps_orientation_std_roll_,
+        gps_orientation_std_pitch_,
+        gps_orientation_std_yaw_);
+    if (!IsUsableCovariance(covariance_map_body)) {
+        covariance_map_body =
+            std_floor.array().square().matrix().asDiagonal();
+    } else {
+        covariance_map_body = 0.5 *
+            (covariance_map_body + covariance_map_body.transpose());
+        for (int axis = 0; axis < 3; ++axis) {
+            covariance_map_body(axis, axis) = std::max(
+                covariance_map_body(axis, axis),
+                std_floor(axis) * std_floor(axis));
+        }
+    }
+    if (!IsUsableCovariance(covariance_map_body)) {
+        LOG_EVERY_N(WARNING, 100)
+            << "[LOCALIZATION_EKF][INS_ORIENTATION] unusable covariance";
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(filter_mutex_);
+    if (!ekf_.Initialized()) return;
+
+    double distance = 0.0;
+    const bool accepted = ekf_.UpdateMapOrientation(
+        stamp, measured_rpy_map_body, covariance_map_body,
+        -1.0, &distance);
+    if (accepted) {
+        PublishResult(BuildEkfResult(
+            stamp, "EKF INS MAP<-BODY orientation update", true));
+        LOG_EVERY_N(INFO, 50)
+            << "[LOCALIZATION_EKF][INS_ORIENTATION] observation accepted"
+            << ", stamp=" << stamp
+            << ", vendor_course_deg="
+            << orientation->twist.twist.angular.z / kDegToRad
+            << ", measured_rpy_enu_gps_deg="
+            << (measured_rpy_enu_gps / kDegToRad).transpose()
+            << ", measured_rpy_map_body_deg="
+            << (measured_rpy_map_body / kDegToRad).transpose()
+            << ", mahalanobis=" << distance;
+    } else {
+        PublishPredictionIfAdvanced(
+            stamp,
+            "EKF prediction; INS MAP<-BODY orientation observation rejected");
+        LOG_EVERY_N(WARNING, 20)
+            << "[LOCALIZATION_EKF][INS_ORIENTATION] observation rejected"
+            << ", stamp=" << stamp
+            << ", vendor_course_deg="
+            << orientation->twist.twist.angular.z / kDegToRad
+            << ", measured_rpy_enu_gps_deg="
+            << (measured_rpy_enu_gps / kDegToRad).transpose()
+            << ", measured_rpy_map_body_deg="
+            << (measured_rpy_map_body / kDegToRad).transpose()
             << ", mahalanobis=" << distance;
     }
 }
@@ -1349,6 +1506,9 @@ void LocalizationSystem::Reset() {
     gps_position_std_x_ = 0.05;
     gps_position_std_y_ = 0.05;
     gps_position_std_z_ = 100.0;
+    gps_orientation_std_roll_ = 0.2 * kDegToRad;
+    gps_orientation_std_pitch_ = 0.2 * kDegToRad;
+    gps_orientation_std_yaw_ = 0.5 * kDegToRad;
     gps_velocity_std_x_ = 0.10;
     gps_velocity_std_y_ = 0.10;
     ndt_position_std_x_ = 0.10;

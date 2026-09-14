@@ -7,9 +7,12 @@ common:
 
   imu_topic: "/imu_data"
 
-
   gps_topic: "/fdilink/gnss_fix"
+  # angular.x/y are roll/pitch; angular.z is vendor course. All are radians.
+  # Course is north-zero and clockwise-positive; Lightning converts it to ENU yaw.
   orientation_topic: "/ins/orientation"
+  #gps_topic: "/fdilink/gnss_fix"
+  #orientation_topic: "/ins/orientation"
 
   velocity_topic: ""
   wheel_odometry_topic: ""
@@ -111,7 +114,7 @@ localization:
     gps_output_lever_arm_gps: [0.0, 0.0, 0.0]
     # T_tracking_gps: [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg].
     # It maps GPS-device coordinates into the tracking/body frame.
-    gps_extrinsic_tracking_gps: [0.0, 0.0, 0.0, 0.0, 0.0, -64.914170131819]
+    gps_extrinsic_tracking_gps: [0.0, 0.0, 0.0, 0.0, 0.0, 20.085828760]
     gps_initialization_sync_tolerance_sec: 0.05
 
     gps_initialization_sample_count: 10
@@ -133,11 +136,15 @@ localization:
     initial_velocity_std: 2.0
     initial_yaw_rate_std: 0.5
 
-    # Fallback standard deviations used only when a message has no usable
-    # covariance. Values named *_deg are converted to radians in code.
+    # Fallback standard deviations used when a message has no usable
+    # covariance. GPS z and INS orientation values also act as lower bounds.
+    # Values named *_deg are converted to radians in code.
     gps_position_std_x: 0.05
     gps_position_std_y: 0.05
     gps_position_std_z: 0.10
+    gps_orientation_std_floor_roll_deg: 0.2
+    gps_orientation_std_floor_pitch_deg: 0.2
+    gps_orientation_std_floor_yaw_deg: 0.5
     gps_velocity_std_x: 0.10
     gps_velocity_std_y: 0.10
     ndt_position_std_x: 0.10
@@ -146,6 +153,7 @@ localization:
     ndt_orientation_std_deg: 1.0
 
     gps_position_gate_chi2: 16.3
+    gps_orientation_gate_chi2: 16.3
     gps_velocity_gate_chi2: 11.8
     ndt_pose_gate_chi2: 22.5
 

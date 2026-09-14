@@ -87,8 +87,14 @@ ros2 service call /lightning/cancel_task lightning_interfaces/srv/CancelTask "{}
 
 定位使用一个 `sensor_msgs/msg/NavSatFix` 位置 topic 和一个
 `geometry_msgs/msg/TwistWithCovarianceStamped` 姿态 topic。姿态消息借用
-`twist.angular.x/y/z` 保存 GPS 设备坐标系在 ENU 中的 roll、pitch、yaw，单位
-均为 rad；它不是角速度观测，也不会在运行阶段直接更新 EKF 姿态。
+`twist.angular.x/y/z` 保存厂家 GPS 设备的 roll、pitch、course，单位均为 rad；
+它不是角速度观测。`course` 仍保持厂家“北向为 0、顺时针为正”的定义，Lightning
+在初始化和每帧姿态更新的公共入口把它转换成“东向为 0、逆时针为正”的标准右手
+ENU yaw：
+
+```text
+yaw_enu = wrap(pi / 2 - courseang)
+```
 
 第一帧有效 GPS 建立局部 ENU 数值原点。首个可靠 NDT 位姿（无雷达时为服务
 设置的初始位姿）建立初始 `MAP<-BODY`。车辆保持静止时，程序近似同步前 N 组
@@ -119,13 +125,29 @@ localization:
     gps_initialization_sample_count: 10
 ```
 
-初始化完成后，姿态消息退出融合链。每帧 GPS 位置不再等待姿态或 NDT，直接以
-三维 ENU 输出点观测进入 EKF：
+初始化完成后，GPS 位置和 INS 姿态按照各自时间戳分别进入 EKF，二者不再互相
+等待。每帧 GPS 位置直接以三维 ENU 输出点观测进入 EKF：
 
 ```text
 h(x) = R_E_M * (p_M_B + R_M_B(rpy) * l_B_A) + t_E_M
 r    = p_E_A(measured) - h(x)
 ```
+
+每帧 INS 姿态先在 `LocalizationSystem` 中转换成与 EKF 姿态状态完全相同的
+`MAP<-BODY` 欧拉角：
+
+```text
+R_E_G(measured) = RpyToRotation(roll, pitch, yaw_enu)
+R_M_B(measured) = R_E_M^T * R_E_G(measured) * R_B_G^T
+z_rpy           = RotationToRpy(R_M_B(measured))
+r_rpy           = wrap(z_rpy - state.rpy_map)
+```
+
+坐标变换不放进 EKF。进入 EKF 时观测量和状态量都已经是 `MAP<-BODY` RPY，
+因此观测函数就是 `h(x)=state.rpy_map`，观测雅可比的姿态块严格为 3x3 单位阵，
+不再使用数值微分。姿态观测不使用杆臂位置雅可比，也不与 GPS 位置拼成一帧
+虚假的六维 pose。三维姿态消息协方差用于该观测，并由配置中的
+`gps_orientation_std_floor_*_deg` 提供最小标准差。
 
 EKF 保留原来的预测、LDLT、马氏距离门控、增益和 Joseph 协方差更新。非零杆臂
 通过观测雅可比与 RPY 产生耦合；杆臂为零时，GPS 只约束位置。NDT 仍以自身位姿

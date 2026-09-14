@@ -56,6 +56,7 @@ class EKF {
         double max_covariance = 1e8;
 
         double gps_position_gate_chi2 = 16.3;  // 3 antenna-coordinate DoF
+        double gps_orientation_gate_chi2 = 16.3;  // 3 Euler-angle DoF
         double gps_velocity_gate_chi2 = 11.8;  // 2 DoF
         double ndt_pose_gate_chi2 = 22.5;      // 6 DoF
     };
@@ -97,8 +98,9 @@ class EKF {
     // samples after NDT relocalization. The EKF state remains expressed in MAP:
     //   h(x) = R_enu_map * (p_map + R_map_body(rpy) * lever_body_output)
     //          + t_enu_map.
-    // A non-zero lever arm makes the position observation sensitive to RPY;
-    // it does not turn the INS orientation message into a runtime observation.
+    // A non-zero lever arm makes this position observation sensitive to RPY.
+    // Runtime INS orientation is handled independently below and never uses
+    // this lever-arm Jacobian.
     bool UpdateGpsPoseEnu(
         double stamp,
         const Eigen::Vector3d& gps_position_enu,
@@ -106,6 +108,18 @@ class EKF {
         const Eigen::Matrix3d& gps_covariance_enu,
         const Eigen::Matrix3d& rotation_enu_map,
         const Eigen::Vector3d& translation_enu_map,
+        double gate_chi2 = -1.0,
+        double* mahalanobis = nullptr);
+
+    // LocalizationSystem has already converted the INS observation from
+    // ENU<-GPS into MAP<-BODY roll/pitch/yaw.  The measurement and the EKF
+    // attitude state therefore have exactly the same physical meaning:
+    //   h(x) = [roll_map_body, pitch_map_body, yaw_map_body].
+    // Consequently the attitude block of H is the 3x3 identity matrix.
+    bool UpdateMapOrientation(
+        double stamp,
+        const Eigen::Vector3d& measured_rpy_map_body,
+        const Eigen::Matrix3d& covariance_map_body,
         double gate_chi2 = -1.0,
         double* mahalanobis = nullptr);
 
