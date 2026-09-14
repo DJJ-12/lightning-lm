@@ -185,25 +185,19 @@ Eigen::Matrix<double,3,3> EKF::ComputeLeverArmJacobian(
     return J;
 }
 
-bool EKF::UpdateDualGpsPoseEnu(
+bool EKF::UpdateGpsPoseEnu(
     double stamp,
-    const Eigen::Vector3d& gps1_position_enu,
-    const Eigen::Vector3d& gps2_position_enu,
-    const Eigen::Vector3d& gps1_lever_arm_tracking,
-    const Eigen::Vector3d& gps2_lever_arm_tracking,
-    const Eigen::Matrix3d& gps1_covariance_enu,
-    const Eigen::Matrix3d& gps2_covariance_enu,
+    const Eigen::Vector3d& gps_position_enu,
+    const Eigen::Vector3d& output_lever_arm_tracking,
+    const Eigen::Matrix3d& gps_covariance_enu,
     const Eigen::Matrix3d& rotation_enu_map,
     const Eigen::Vector3d& translation_enu_map,
     double gate_chi2,
     double* mahalanobis) {
     if (!PredictTo(stamp) ||
-        !gps1_position_enu.allFinite() ||
-        !gps2_position_enu.allFinite() ||
-        !gps1_lever_arm_tracking.allFinite() ||
-        !gps2_lever_arm_tracking.allFinite() ||
-        !gps1_covariance_enu.allFinite() ||
-        !gps2_covariance_enu.allFinite() ||
+        !gps_position_enu.allFinite() ||
+        !output_lever_arm_tracking.allFinite() ||
+        !gps_covariance_enu.allFinite() ||
         !rotation_enu_map.allFinite() ||
         !translation_enu_map.allFinite()) {
         return false;
@@ -214,46 +208,29 @@ bool EKF::UpdateDualGpsPoseEnu(
     //   p_enu = R_enu_map * (p_map + R_map_body * lever) + t_enu_map.
     const Eigen::Matrix3d rotation_map_body =
         RotationFromRpy(state_.rpy_map);
-    const Eigen::Vector3d gps1_predicted_enu =
+    const Eigen::Vector3d gps_predicted_enu =
         rotation_enu_map *
             (state_.position_map +
-             rotation_map_body * gps1_lever_arm_tracking) +
-        translation_enu_map;
-    const Eigen::Vector3d gps2_predicted_enu =
-        rotation_enu_map *
-            (state_.position_map +
-             rotation_map_body * gps2_lever_arm_tracking) +
+             rotation_map_body * output_lever_arm_tracking) +
         translation_enu_map;
 
-    Eigen::Matrix<double, 6, 1> residual;
-    residual.segment<3>(0) = gps1_position_enu - gps1_predicted_enu;
-    residual.segment<3>(3) = gps2_position_enu - gps2_predicted_enu;
-
-    Eigen::Matrix<double, 6, kStateDim> jacobian =
-        Eigen::Matrix<double, 6, kStateDim>::Zero();
+    const Eigen::Vector3d residual =
+        gps_position_enu - gps_predicted_enu;
+    Eigen::Matrix<double, 3, kStateDim> jacobian =
+        Eigen::Matrix<double, 3, kStateDim>::Zero();
 
     // d h / d p_map = R_enu_map.
     jacobian.block<3, 3>(0, kPositionX) = rotation_enu_map;
-    jacobian.block<3, 3>(3, kPositionX) = rotation_enu_map;
 
     // d h / d rpy = R_enu_map * d(R_map_body * lever)/d(rpy).
-    const Eigen::Matrix3d gps1_attitude_jacobian =
-        ComputeLeverArmJacobian(gps1_lever_arm_tracking, state_.rpy_map);
-    const Eigen::Matrix3d gps2_attitude_jacobian =
-        ComputeLeverArmJacobian(gps2_lever_arm_tracking, state_.rpy_map);
+    const Eigen::Matrix3d attitude_jacobian =
+        ComputeLeverArmJacobian(output_lever_arm_tracking, state_.rpy_map);
     jacobian.block<3, 3>(0, kRoll) =
-        rotation_enu_map * gps1_attitude_jacobian;
-    jacobian.block<3, 3>(3, kRoll) =
-        rotation_enu_map * gps2_attitude_jacobian;
-
-    Eigen::Matrix<double, 6, 6> covariance =
-        Eigen::Matrix<double, 6, 6>::Zero();
-    covariance.block<3, 3>(0, 0) = gps1_covariance_enu;
-    covariance.block<3, 3>(3, 3) = gps2_covariance_enu;
+        rotation_enu_map * attitude_jacobian;
 
     return ApplyUpdate(
-        residual, jacobian, covariance,
-        gate_chi2 > 0.0 ? gate_chi2 : options_.dual_gps_pose_gate_chi2,
+        residual, jacobian, gps_covariance_enu,
+        gate_chi2 > 0.0 ? gate_chi2 : options_.gps_position_gate_chi2,
         mahalanobis, true);
 }
 
@@ -368,8 +345,8 @@ bool EKF::ApplyUpdate(const Eigen::VectorXd& residual,
     if (!allow_attitude_update) {
         // Map-frame velocity is not an attitude observation. Even if a pose
         // update created cross-covariance, a velocity-only measurement must
-        // not rotate RPY or alter angular velocity. Dual GPS passes true here
-        // because its physical baseline does observe two rotation axes.
+        // not rotate RPY or alter angular velocity. NDT and lever-arm-aware GPS
+        // position updates pass true because their Jacobians can observe RPY.
         gain.block(kRoll, 0, 3, gain.cols()).setZero();
         gain.block(kAngularVelocityX, 0, 3, gain.cols()).setZero();
     }

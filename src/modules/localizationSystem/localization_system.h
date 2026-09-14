@@ -5,6 +5,7 @@
 #include <mutex>
 #include <string>
 
+#include <Eigen/Geometry>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/twist_with_covariance_stamped.hpp>
@@ -56,8 +57,9 @@ class LocalizationSystem {
         const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud,
         const loc::LocalizationInputDiagnostic& diagnostic = {});
 
-    void ProcessGps1(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
-    void ProcessGps2(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
+    void ProcessGps(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
+    void ProcessGpsOrientation(
+        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation);
     void ProcessgpsVelocity(
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity);
     void ProcessWheelOdometry(
@@ -72,9 +74,10 @@ class LocalizationSystem {
     bool UsesLidar() const {
         return !lidar_topic_.empty() || !livox_lidar_topic_.empty();
     }
-    bool UsesDualGps() const {
-        return !gps1_topic_.empty() && !gps2_topic_.empty() &&
-               gps1_topic_ != gps2_topic_;
+    bool UsesGpsPosition() const { return !gps_topic_.empty(); }
+    bool UsesGpsOrientation() const { return !orientation_topic_.empty(); }
+    bool UsesGpsPose() const {
+        return UsesGpsPosition() && UsesGpsOrientation();
     }
     bool UsesGpsVelocity() const { return !velocity_topic_.empty(); }
     bool UsesWheelOdometry() const { return !wheel_odometry_topic_.empty(); }
@@ -87,19 +90,22 @@ class LocalizationSystem {
     void SetupPublishers(rclcpp::Node::SharedPtr node);
     void HandleNdtResult(const loc::LocalizationResult& result);
 
-    void ProcessGps(const sensor_msgs::msg::NavSatFix::SharedPtr& fix,
-                    bool gps1);
-    void HandleDualGpsPair(
-        const sensor_msgs::msg::NavSatFix::SharedPtr& gps1,
-        const sensor_msgs::msg::NavSatFix::SharedPtr& gps2);
+    void TryHandleGpsInitialization();
+    void HandleGpsInitializationPair(
+        const sensor_msgs::msg::NavSatFix::SharedPtr& fix,
+        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation);
+    void HandleGpsPosition(
+        const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
 
     // GPS initialization is the second stage of localization initialization:
     // 1) NDT relocalizes from the user-provided rough MAP<-BODY seed;
-    // 2) while the vehicle stays still, average the first N synchronized
-    //    dual-GPS pairs and solve one fixed yaw-only ENU<-MAP transform.
+    // 2) while the vehicle stays still, average the first N synchronized GPS
+    //    positions and INS orientations and solve one fixed 3-D ENU<-MAP
+    //    transform. After that, GPS position updates no longer wait for INS.
     void BeginGpsInitialization(const SE3& initial_map_body_pose);
-    bool AddGpsInitializationSample(const Eigen::Vector3d& gps1_enu,
-                                    const Eigen::Vector3d& gps2_enu);
+    bool AddGpsInitializationSample(
+        const Eigen::Vector3d& gps_output_position_enu,
+        const Eigen::Matrix3d& rotation_enu_gps);
     bool FinishGpsInitialization();
 
     bool GnssToEnu(const sensor_msgs::msg::NavSatFix& fix,
@@ -140,8 +146,8 @@ class LocalizationSystem {
     std::string lidar_topic_;
     std::string livox_lidar_topic_;
     std::string imu_topic_;
-    std::string gps1_topic_;
-    std::string gps2_topic_;
+    std::string gps_topic_;
+    std::string orientation_topic_;
     std::string velocity_topic_;
     std::string wheel_odometry_topic_;
 
@@ -154,10 +160,16 @@ class LocalizationSystem {
     mutable std::mutex filter_mutex_;
     loc::EKF ekf_;
 
-    Eigen::Vector3d gps1_lever_arm_tracking_ = Eigen::Vector3d::Zero();
-    Eigen::Vector3d gps2_lever_arm_tracking_ = Eigen::Vector3d::Zero();
-    double dual_gps_sync_tolerance_sec_ = 0.05;
-    double dual_gps_baseline_length_tolerance_m_ = 0.15;
+    // Static GPS geometry:
+    //   p_B_A = t_B_G + R_B_G * p_G_A
+    // where A is the NavSatFix output point, G is the GPS device frame and B
+    // is the localization tracking/body frame.
+    Eigen::Vector3d gps_output_lever_arm_gps_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d gps_translation_tracking_gps_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d gps_rotation_tracking_gps_rpy_ = Eigen::Vector3d::Zero();
+    Eigen::Matrix3d gps_rotation_tracking_gps_ = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d gps_output_lever_arm_tracking_ = Eigen::Vector3d::Zero();
+    double gps_initialization_sync_tolerance_sec_ = 0.05;
     int gps_initialization_sample_count_required_ = 10;
 
     double initial_position_std_ = 0.5;
@@ -177,22 +189,29 @@ class LocalizationSystem {
         1.0 * 3.14159265358979323846 / 180.0;
 
     // Fixed transform initialized once per localization run from the first
-    // reliable NDT pose + first N stationary dual-GPS pairs:
+    // reliable NDT pose + first N stationary GPS/orientation pairs:
     //   p_enu = R_enu_map * p_map + t_enu_map.
     bool gps_initial_map_body_ready_ = false;
     SE3 gps_initial_map_body_pose_;
     int gps_initialization_sample_count_ = 0;
-    Eigen::Vector3d gps1_initial_enu_sum_ = Eigen::Vector3d::Zero();
-    Eigen::Vector3d gps2_initial_enu_sum_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d gps_initial_body_position_enu_sum_ =
+        Eigen::Vector3d::Zero();
+    Eigen::Vector4d gps_initial_body_quaternion_sum_ =
+        Eigen::Vector4d::Zero();
+    Eigen::Quaterniond gps_initial_body_reference_quaternion_ =
+        Eigen::Quaterniond::Identity();
+    bool gps_initial_body_reference_quaternion_ready_ = false;
     math::JsbsimWgs84Enu enu_projector_;
     bool enu_from_map_ready_ = false;
     Eigen::Matrix3d enu_from_map_rotation_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d enu_from_map_translation_ = Eigen::Vector3d::Zero();
 
-    // Approximate synchronization keeps one unmatched message per antenna.
-    std::mutex dual_gps_mutex_;
-    sensor_msgs::msg::NavSatFix::SharedPtr pending_gps1_;
-    sensor_msgs::msg::NavSatFix::SharedPtr pending_gps2_;
+    // Approximate synchronization is initialization-only and keeps one latest
+    // unmatched GPS position and one latest INS orientation message.
+    std::mutex gps_initialization_mutex_;
+    sensor_msgs::msg::NavSatFix::SharedPtr pending_gps_;
+    geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr
+        pending_gps_orientation_;
 
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr loc_odom_pub_;

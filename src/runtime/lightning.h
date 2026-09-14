@@ -37,8 +37,8 @@ enum class InputType {
     IMU,
     POINT_CLOUD2,
     LIVOX,
-    GPS1,
-    GPS2,
+    GPS_POSITION,
+    GPS_ORIENTATION,
     gps_VELOCITY,
     WHEEL_ODOMETRY
 };
@@ -53,6 +53,7 @@ struct InputMessage {
     sensor_msgs::msg::PointCloud2::SharedPtr cloud;
     livox_ros_driver2::msg::CustomMsg::SharedPtr livox;
     sensor_msgs::msg::NavSatFix::SharedPtr gps_fix;
+    geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr gps_orientation;
     geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr gps_velocity;
     nav_msgs::msg::Odometry::SharedPtr wheel_odometry;
 };
@@ -95,8 +96,9 @@ class Lightning {
 
     // Topic callbacks only place data into these lightweight online buffers.
     void AcceptImu(const sensor_msgs::msg::Imu::SharedPtr& imu);
-    void AcceptGps1(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
-    void AcceptGps2(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
+    void AcceptGps(const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
+    void AcceptGpsOrientation(
+        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation);
     void AcceptgpsVelocity(
         const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity);
     void AcceptWheelOdometry(const nav_msgs::msg::Odometry::SharedPtr& odometry);
@@ -151,10 +153,10 @@ class Lightning {
     // Mapping retains every IMU sample. Localization-only observations use
     // one overwriteable slot per sensor so the worker consumes fresh data.
     std::deque<InputMessage> pending_mapping_imu_;
-    InputMessage latest_gps1_;
-    bool has_latest_gps1_ = false;
-    InputMessage latest_gps2_;
-    bool has_latest_gps2_ = false;
+    InputMessage latest_gps_;
+    bool has_latest_gps_ = false;
+    InputMessage latest_gps_orientation_;
+    bool has_latest_gps_orientation_ = false;
     InputMessage latest_gps_velocity_;
     bool has_latest_gps_velocity_ = false;
     InputMessage latest_wheel_odometry_;
@@ -167,8 +169,8 @@ class Lightning {
     std::uint64_t online_lidar_received_ = 0;
     std::uint64_t online_lidar_overwritten_ = 0;
     std::uint64_t online_imu_received_ = 0;
-    std::uint64_t online_gps1_received_ = 0;
-    std::uint64_t online_gps2_received_ = 0;
+    std::uint64_t online_gps_received_ = 0;
+    std::uint64_t online_gps_orientation_received_ = 0;
     std::uint64_t online_gps_velocity_received_ = 0;
     std::uint64_t online_wheel_odometry_received_ = 0;
 

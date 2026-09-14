@@ -65,10 +65,10 @@ bool Lightning::Init(rclcpp::Node::SharedPtr node, const std::string& yaml_path)
                 AcceptLivox(cloud, receive_info);
             },
             [this](const sensor_msgs::msg::NavSatFix::SharedPtr& fix) {
-                AcceptGps1(fix);
+                AcceptGps(fix);
             },
-            [this](const sensor_msgs::msg::NavSatFix::SharedPtr& fix) {
-                AcceptGps2(fix);
+            [this](const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation) {
+                AcceptGpsOrientation(orientation);
             },
             [this](const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity) {
                 AcceptgpsVelocity(velocity);
@@ -208,47 +208,47 @@ void Lightning::AcceptImu(const sensor_msgs::msg::Imu::SharedPtr& imu) {
 }
 
 
-void Lightning::AcceptGps1(
+void Lightning::AcceptGps(
     const sensor_msgs::msg::NavSatFix::SharedPtr& fix) {
     if (!fix) return;
     InputMessage input;
     input.receive_steady_sec = RuntimeSteadySeconds();
     input.header_stamp = rclcpp::Time(fix->header.stamp).seconds();
-    input.type = InputType::GPS1;
+    input.type = InputType::GPS_POSITION;
     input.gps_fix = fix;
     {
         std::lock_guard<std::mutex> lock(online_input_mutex_);
         if (!online_worker_running_ || !online_worker_is_localization_) return;
-        latest_gps1_ = std::move(input);
-        has_latest_gps1_ = true;
-        ++online_gps1_received_;
+        latest_gps_ = std::move(input);
+        has_latest_gps_ = true;
+        ++online_gps_received_;
     }
     online_input_ready_.notify_one();
 }
 
-void Lightning::AcceptGps2(
-    const sensor_msgs::msg::NavSatFix::SharedPtr& fix) {
-    if (!fix) return;
+void Lightning::AcceptGpsOrientation(
+    const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation) {
+    if (!orientation) return;
     InputMessage input;
     input.receive_steady_sec = RuntimeSteadySeconds();
-    input.header_stamp = rclcpp::Time(fix->header.stamp).seconds();
-    input.type = InputType::GPS2;
-    input.gps_fix = fix;
+    input.header_stamp = rclcpp::Time(orientation->header.stamp).seconds();
+    input.type = InputType::GPS_ORIENTATION;
+    input.gps_orientation = orientation;
     {
         std::lock_guard<std::mutex> lock(online_input_mutex_);
         if (!online_worker_running_ || !online_worker_is_localization_) return;
-        latest_gps2_ = std::move(input);
-        has_latest_gps2_ = true;
-        ++online_gps2_received_;
+        latest_gps_orientation_ = std::move(input);
+        has_latest_gps_orientation_ = true;
+        ++online_gps_orientation_received_;
     }
     online_input_ready_.notify_one();
 }
 
 int LocalizationInputPriority(InputType type) {
     switch (type) {
-        case InputType::GPS1:
+        case InputType::GPS_POSITION:
             return 0;
-        case InputType::GPS2:
+        case InputType::GPS_ORIENTATION:
             return 1;
         case InputType::IMU:
             return 2;
@@ -346,8 +346,8 @@ void Lightning::OverwriteLatestLidar(InputMessage frame) {
 
 std::size_t Lightning::PendingOnlineInputCountLocked() const {
     return pending_mapping_imu_.size() +
-           (has_latest_gps1_ ? 1U : 0U) +
-           (has_latest_gps2_ ? 1U : 0U) +
+           (has_latest_gps_ ? 1U : 0U) +
+           (has_latest_gps_orientation_ ? 1U : 0U) +
            (has_latest_gps_velocity_ ? 1U : 0U) +
            (has_latest_wheel_odometry_ ? 1U : 0U) +
            (has_latest_lidar_ ? 1U : 0U);
@@ -357,10 +357,10 @@ void Lightning::ClearPendingOnlineInputLocked() {
     latest_lidar_ = InputMessage();
     has_latest_lidar_ = false;
     pending_mapping_imu_.clear();
-    latest_gps1_ = InputMessage();
-    has_latest_gps1_ = false;
-    latest_gps2_ = InputMessage();
-    has_latest_gps2_ = false;
+    latest_gps_ = InputMessage();
+    has_latest_gps_ = false;
+    latest_gps_orientation_ = InputMessage();
+    has_latest_gps_orientation_ = false;
     latest_gps_velocity_ = InputMessage();
     has_latest_gps_velocity_ = false;
     latest_wheel_odometry_ = InputMessage();
@@ -375,8 +375,8 @@ void Lightning::StartOnlineWorkerLocked() {
         online_lidar_received_ = 0;
         online_lidar_overwritten_ = 0;
         online_imu_received_ = 0;
-        online_gps1_received_ = 0;
-        online_gps2_received_ = 0;
+        online_gps_received_ = 0;
+        online_gps_orientation_received_ = 0;
         online_gps_velocity_received_ = 0;
         online_wheel_odometry_received_ = 0;
         online_worker_running_ = true;
@@ -392,7 +392,7 @@ void Lightning::StartOnlineWorkerLocked() {
               << ", LiDAR=latest-only"
               << (mapping
                       ? ", IMU=non-dropping queue"
-                      : ", GPS1/GPS2/INS-velocity/wheel=independent latest-only slots");
+                      : ", GPS/orientation/INS-velocity/wheel=independent latest-only slots");
 }
 
 void Lightning::StopOnlineWorkerLocked(bool drain) {
@@ -467,29 +467,29 @@ void Lightning::OnlineWorkerLoop(bool mapping) {
             online_input_ready_.wait(lock, [this]() {
                 return !online_worker_running_ ||
                        has_latest_lidar_ ||
-                       has_latest_gps1_ ||
-                       has_latest_gps2_ ||
+                       has_latest_gps_ ||
+                       has_latest_gps_orientation_ ||
                        has_latest_gps_velocity_ ||
                        has_latest_wheel_odometry_;
             });
             if (!online_worker_running_ &&
                 !has_latest_lidar_ &&
-                !has_latest_gps1_ &&
-                !has_latest_gps2_ &&
+                !has_latest_gps_ &&
+                !has_latest_gps_orientation_ &&
                 !has_latest_gps_velocity_ &&
                 !has_latest_wheel_odometry_) {
                 break;
             }
 
-            if (has_latest_gps1_) {
-                ordered_inputs.push_back(std::move(latest_gps1_));
-                latest_gps1_ = InputMessage();
-                has_latest_gps1_ = false;
+            if (has_latest_gps_) {
+                ordered_inputs.push_back(std::move(latest_gps_));
+                latest_gps_ = InputMessage();
+                has_latest_gps_ = false;
             }
-            if (has_latest_gps2_) {
-                ordered_inputs.push_back(std::move(latest_gps2_));
-                latest_gps2_ = InputMessage();
-                has_latest_gps2_ = false;
+            if (has_latest_gps_orientation_) {
+                ordered_inputs.push_back(std::move(latest_gps_orientation_));
+                latest_gps_orientation_ = InputMessage();
+                has_latest_gps_orientation_ = false;
             }
             if (has_latest_gps_velocity_) {
                 ordered_inputs.push_back(std::move(latest_gps_velocity_));
@@ -561,12 +561,12 @@ loc::LocalizationFrameOutcome Lightning::ProcessLocalizationInput(const InputMes
         localization_system_->ProcessImu(input.imu);
         return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
     }
-    if (input.type == InputType::GPS1) {
-        localization_system_->ProcessGps1(input.gps_fix);
+    if (input.type == InputType::GPS_POSITION) {
+        localization_system_->ProcessGps(input.gps_fix);
         return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
     }
-    if (input.type == InputType::GPS2) {
-        localization_system_->ProcessGps2(input.gps_fix);
+    if (input.type == InputType::GPS_ORIENTATION) {
+        localization_system_->ProcessGpsOrientation(input.gps_orientation);
         return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
     }
     if (input.type == InputType::gps_VELOCITY) {
@@ -930,16 +930,16 @@ void Lightning::StartBagLocalizationTaskLocked(const std::string& bag_path) {
                 InputMessage input;
                 input.header_stamp =
                     rclcpp::Time(fix->header.stamp).seconds();
-                input.type = InputType::GPS1;
+                input.type = InputType::GPS_POSITION;
                 input.gps_fix = fix;
                 ProcessLocalizationInput(input);
             },
-            [this](const sensor_msgs::msg::NavSatFix::SharedPtr& fix) {
+            [this](const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation) {
                 InputMessage input;
                 input.header_stamp =
-                    rclcpp::Time(fix->header.stamp).seconds();
-                input.type = InputType::GPS2;
-                input.gps_fix = fix;
+                    rclcpp::Time(orientation->header.stamp).seconds();
+                input.type = InputType::GPS_ORIENTATION;
+                input.gps_orientation = orientation;
                 ProcessLocalizationInput(input);
             },
             [this](const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& velocity) {

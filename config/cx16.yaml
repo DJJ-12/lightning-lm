@@ -4,18 +4,13 @@
 common:
   lidar_topic: "/cx/cloud"
   livox_lidar_topic: ""
-  # sensor_msgs/msg/Imu. Mapping may use it for the existing deskew/LIO path;
-  # the 3-D-pose/planar-motion localization EKF does not fuse either its
-  # linear acceleration or angular velocity. Empty means disabled globally.
+
   imu_topic: ""
 
-  # Two sensor_msgs/msg/NavSatFix inputs. Localization synchronizes them
-  # into one dual-antenna pose observation.
-  # Either empty topic disables the complete dual-GPS observation.
-  gps1_topic: "/fdilink/gnss_fix"
-  gps2_topic: ""
-  # geometry_msgs/msg/TwistWithCovarianceStamped. The message contains ENU
-  # velocity; localization uses east/north and ignores the vertical component.
+
+  gps_topic: "/fdilink/gnss_fix"
+  orientation_topic: "/ins/orientation"
+
   velocity_topic: ""
   wheel_odometry_topic: ""
 
@@ -115,15 +110,14 @@ localization:
     max_rotation_std_deg: 30.0
 
   gps_ins:
-    # Vectors from the tracking origin to GPS1/GPS2, expressed in the tracking
-    # frame.
-    lever_arm_tracking: [0.0, 0.0, 0.0]
-    gps2_lever_arm_tracking: [0.0, 0.0, 0.0]
-    dual_gps_sync_tolerance_sec: 0.05
-    dual_gps_baseline_length_tolerance_m: 0.15
-    # After the first reliable NDT relocalization, keep the vehicle stationary.
-    # The first N synchronized dual-GPS pairs initialize the fixed ENU<-MAP
-    # yaw and translation used by the localization EKF.
+    # Static GPS geometry. T_tracking_gps maps GPS-device coordinates into the
+    # tracking/body frame. The 90-degree mounting relationship is data, not a
+    # hard-coded algorithm branch. All RPY values below are radians.
+    gps_output_lever_arm_gps: [0.0, 0.0, 0.0]
+    gps_translation_tracking_gps: [0.0, 0.0, 0.0]
+    gps_rotation_tracking_gps_rpy: [0.0, 0.0, 1.5707963267948966]
+    gps_initialization_sync_tolerance_sec: 0.05
+
     gps_initialization_sample_count: 10
 
 
@@ -155,7 +149,7 @@ localization:
     ndt_position_std_z: 0.20
     ndt_orientation_std_deg: 1.0
 
-    dual_gps_pose_gate_chi2: 22.5
+    gps_position_gate_chi2: 16.3
     gps_velocity_gate_chi2: 11.8
     ndt_pose_gate_chi2: 22.5
 

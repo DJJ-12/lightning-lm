@@ -55,7 +55,7 @@ class EKF {
         double min_covariance = 1e-10;
         double max_covariance = 1e8;
 
-        double dual_gps_pose_gate_chi2 = 22.5; // 6 antenna-coordinate DoF
+        double gps_position_gate_chi2 = 16.3;  // 3 antenna-coordinate DoF
         double gps_velocity_gate_chi2 = 11.8;  // 2 DoF
         double ndt_pose_gate_chi2 = 22.5;      // 6 DoF
     };
@@ -92,22 +92,18 @@ class EKF {
     //   omega_z     = constant.
     bool PredictTo(double stamp);
 
-    // Two antenna positions are fused directly in ENU.  The fixed ENU<-MAP
-    // transform is initialized once after NDT relocalization, so the EKF state
-    // itself remains expressed in MAP:
-    //   h_i(x) = R_enu_map * (p_map + R_map_body(rpy) * lever_i)
-    //            + t_enu_map.
-    // A single dual-antenna baseline still leaves rotation about that baseline
-    // unobservable; the EKF naturally gets only the attitude information that
-    // is present in the two antenna coordinates.
-    bool UpdateDualGpsPoseEnu(
+    // A single GNSS output point is fused directly in ENU. The fixed ENU<-MAP
+    // transform is initialized once from synchronized GNSS + INS orientation
+    // samples after NDT relocalization. The EKF state remains expressed in MAP:
+    //   h(x) = R_enu_map * (p_map + R_map_body(rpy) * lever_body_output)
+    //          + t_enu_map.
+    // A non-zero lever arm makes the position observation sensitive to RPY;
+    // it does not turn the INS orientation message into a runtime observation.
+    bool UpdateGpsPoseEnu(
         double stamp,
-        const Eigen::Vector3d& gps1_position_enu,
-        const Eigen::Vector3d& gps2_position_enu,
-        const Eigen::Vector3d& gps1_lever_arm_tracking,
-        const Eigen::Vector3d& gps2_lever_arm_tracking,
-        const Eigen::Matrix3d& gps1_covariance_enu,
-        const Eigen::Matrix3d& gps2_covariance_enu,
+        const Eigen::Vector3d& gps_position_enu,
+        const Eigen::Vector3d& output_lever_arm_tracking,
+        const Eigen::Matrix3d& gps_covariance_enu,
         const Eigen::Matrix3d& rotation_enu_map,
         const Eigen::Vector3d& translation_enu_map,
         double gate_chi2 = -1.0,
