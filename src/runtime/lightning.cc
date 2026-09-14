@@ -139,6 +139,28 @@ bool Lightning::EnsureLocalizationSystemLocked() {
     return true;
 }
 
+bool Lightning::SetOfflineLocalizationOriginGuessLocked() {
+    if (mode_ != Mode::OFFLINE_LOCALIZATION || !localization_system_) {
+        return false;
+    }
+
+    // The offline localization bag is the same bag that created the map, so
+    // its first LiDAR frame is MAP<-BODY = identity by construction.  This is
+    // deliberately an offline-only default; online localization still waits
+    // for the user-provided approximate pose through set_location.
+    const SE3 map_origin(
+        Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero());
+    if (!localization_system_->SetInitialGuess(map_origin)) {
+        LOG(ERROR) << "[offline localization] failed to set automatic "
+                      "map-origin initial pose";
+        return false;
+    }
+
+    LOG(INFO) << "[offline localization] automatic initial pose set to "
+                 "MAP<-BODY identity";
+    return true;
+}
+
 ServiceResult Lightning::SetMode(const std::string& mode_text) {
     std::lock_guard<std::mutex> lock(control_mutex_);
     if (!CanChangeModeLocked()) {
@@ -163,7 +185,8 @@ ServiceResult Lightning::SetMode(const std::string& mode_text) {
     mode_ = new_mode;
 
     // Selecting a mode never starts a worker. Online localization keeps the
-    // set_map_path -> set_location sequence.
+    // set_map_path -> set_location sequence; offline localization starts only
+    // after both its bag and map have been supplied.
     task_.Reset(TaskState::IDLE, ModeToString(mode_) + " mode selected");
     return {true, "mode set to " + ModeToString(mode_)};
 }
@@ -672,20 +695,26 @@ ServiceResult Lightning::LoadBag(const std::string& bag_path) {
             return {false, "failed to initialize localization"};
         }
 
-        // Loading data never invents an initial pose and never starts
-        // localization.  The user must provide the approximate MAP<-BODY pose
-        // through set_location; NDT then performs seed-based relocalization.
+        // The two offline prerequisites may be supplied in either order. Once
+        // both are ready, use the map origin as the NDT seed and start reading
+        // the bag immediately. No set_location call is needed offline.
         if (localization_system_->RequiresMap() &&
             localization_map_path_.empty()) {
             task_.Reset(
                 TaskState::READY,
-                "offline bag loaded, waiting for set_map_path and set_location");
+                "offline bag loaded, waiting for set_map_path");
             return {true, "offline localization bag loaded: " + bag_path};
         }
 
-        task_.Reset(TaskState::READY,
-                    "offline bag loaded, waiting for set_location");
-        return {true, "offline localization bag loaded: " + bag_path};
+        if (!SetOfflineLocalizationOriginGuessLocked()) {
+            task_.Reset(
+                TaskState::READY,
+                "offline bag and map loaded; failed to set zero initial pose");
+            return {false, "failed to set automatic offline initial pose"};
+        }
+        task_.Reset(TaskState::RUNNING, "offline localization running");
+        StartBagLocalizationTaskLocked(bag_path);
+        return {true, "offline localization started: " + bag_path};
     }
 
     if (mapping_save_path_.empty()) {
@@ -857,8 +886,8 @@ ServiceResult Lightning::SetMapPath(const std::string& map_path) {
     localization_map_path_ = map_path;
 
     // Loading a map must not start online localization or invent its initial
-    // pose. Preserve the original service contract: set_location is the only
-    // operation that starts the online localization worker.
+    // pose. set_location remains the only operation that starts the online
+    // localization worker.
     if (mode_ == Mode::ONLINE_LOCALIZATION) {
         task_.Reset(TaskState::READY,
                     "online localization map loaded, waiting for set_location");
@@ -866,14 +895,20 @@ ServiceResult Lightning::SetMapPath(const std::string& map_path) {
     }
 
     if (mode_ == Mode::OFFLINE_LOCALIZATION && !offline_bag_path_.empty()) {
-        task_.Reset(TaskState::READY,
-                    "offline bag and map loaded, waiting for set_location");
+        if (!SetOfflineLocalizationOriginGuessLocked()) {
+            task_.Reset(
+                TaskState::READY,
+                "offline bag and map loaded; failed to set zero initial pose");
+            return {false, "failed to set automatic offline initial pose"};
+        }
+        task_.Reset(TaskState::RUNNING, "offline localization running");
+        StartBagLocalizationTaskLocked(offline_bag_path_);
         return {true,
-                "localization map loaded; waiting for initial pose"};
+                "localization map loaded; offline localization started"};
     }
 
     task_.Reset(TaskState::READY,
-                "localization map loaded, waiting for offline bag and set_location");
+                "localization map loaded, waiting for offline bag");
     return {true, "localization map loaded: " + map_path};
 }
 

@@ -115,7 +115,7 @@ localization:
     # hard-coded algorithm branch. All RPY values below are radians.
     gps_output_lever_arm_gps: [0.0, 0.0, 0.0]
     gps_translation_tracking_gps: [0.0, 0.0, 0.0]
-    gps_rotation_tracking_gps_rpy: [0.0, 0.0, 1.5707963267948966]
+    gps_rotation_tracking_gps_rpy: [0.0, 0.0, -1.132966]
     gps_initialization_sync_tolerance_sec: 0.05
 
     gps_initialization_sample_count: 10
