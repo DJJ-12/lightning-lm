@@ -14,6 +14,7 @@
 #include <cmath>
 #include <numeric>
 #include <limits>
+#include <vector>
 
 #include <builtin_interfaces/msg/time.hpp>
 #include <rclcpp/time.hpp>
@@ -161,6 +162,22 @@ T rad2deg(const T& radians) {
 template <typename T>
 T deg2rad(const T& degrees) {
     return degrees * M_PI / 180.0;
+}
+
+// Human-readable rigid transform used by YAML configuration:
+//   [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg]
+// Rotation follows the same convention as RpyToRotM2():
+//   R = Rz(yaw) * Ry(pitch) * Rx(roll).
+inline SE3 XyzRpyDegreesToSE3(const std::vector<double>& xyz_rpy_deg) {
+    CHECK_EQ(xyz_rpy_deg.size(), 6U);
+    const double roll = deg2rad(xyz_rpy_deg[3]);
+    const double pitch = deg2rad(xyz_rpy_deg[4]);
+    const double yaw = deg2rad(xyz_rpy_deg[5]);
+    Quatd rotation(RpyToRotM2(roll, pitch, yaw));
+    rotation.normalize();
+    return SE3(
+        rotation,
+        Vec3d(xyz_rpy_deg[0], xyz_rpy_deg[1], xyz_rpy_deg[2]));
 }
 
 /**

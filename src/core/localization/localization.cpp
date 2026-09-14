@@ -19,6 +19,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/lightning_math.hpp"
 #include "ui/pangolin_window.h"
 
 namespace lightning::loc {
@@ -64,34 +65,27 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
         base_link_frame_ = yaml_node["common"]["base_link_frame"].as<std::string>();
     }
 
-    std::vector<double> base_lidar_t{0.0, 0.0, 0.0};
-    std::vector<double> base_lidar_R{1.0, 0.0, 0.0,
-                                     0.0, 1.0, 0.0,
-                                     0.0, 0.0, 1.0};
-    if (yaml_node["extrinsicBaseLidarTrans"]) {
-        base_lidar_t = yaml_node["extrinsicBaseLidarTrans"].as<std::vector<double>>();
-    } else if (yaml_node["common"] && yaml_node["common"]["extrinsicBaseLidarTrans"]) {
-        base_lidar_t = yaml_node["common"]["extrinsicBaseLidarTrans"].as<std::vector<double>>();
+    std::vector<double> base_lidar_xyz_rpy_deg{
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    if (yaml_node["extrinsicBaseLidar"]) {
+        base_lidar_xyz_rpy_deg =
+            yaml_node["extrinsicBaseLidar"].as<std::vector<double>>();
+    } else if (yaml_node["common"] &&
+               yaml_node["common"]["extrinsicBaseLidar"]) {
+        base_lidar_xyz_rpy_deg =
+            yaml_node["common"]["extrinsicBaseLidar"]
+                .as<std::vector<double>>();
     }
-    if (yaml_node["extrinsicBaseLidarRot"]) {
-        base_lidar_R = yaml_node["extrinsicBaseLidarRot"].as<std::vector<double>>();
-    } else if (yaml_node["common"] && yaml_node["common"]["extrinsicBaseLidarRot"]) {
-        base_lidar_R = yaml_node["common"]["extrinsicBaseLidarRot"].as<std::vector<double>>();
-    }
-    CHECK_EQ(base_lidar_t.size(), 3);
-    CHECK_EQ(base_lidar_R.size(), 9);
-
-    Mat3d R_base_lidar;
-    R_base_lidar << base_lidar_R[0], base_lidar_R[1], base_lidar_R[2],
-        base_lidar_R[3], base_lidar_R[4], base_lidar_R[5],
-        base_lidar_R[6], base_lidar_R[7], base_lidar_R[8];
-    Quatd q_base_lidar(R_base_lidar);
-    q_base_lidar.normalize();
+    CHECK_EQ(base_lidar_xyz_rpy_deg.size(), 6U);
     options_.T_base_lidar_ =
-        SE3(q_base_lidar, Vec3d(base_lidar_t[0], base_lidar_t[1], base_lidar_t[2]));
+        math::XyzRpyDegreesToSE3(base_lidar_xyz_rpy_deg);
     T_base_lidar_matrix_f_ = options_.T_base_lidar_.matrix().cast<float>();
     LOG(INFO) << "[BASE_LIDAR] T_base_lidar trans="
-              << options_.T_base_lidar_.translation().transpose();
+              << options_.T_base_lidar_.translation().transpose()
+              << ", rpy_deg="
+              << Vec3d(base_lidar_xyz_rpy_deg[3],
+                       base_lidar_xyz_rpy_deg[4],
+                       base_lidar_xyz_rpy_deg[5]).transpose();
 
     if (yaml_node["localization"] && yaml_node["localization"]["quality"]) {
         const auto quality = yaml_node["localization"]["quality"];

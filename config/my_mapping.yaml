@@ -29,11 +29,8 @@ common:
   surroundingKeyframeDensity: 2.0
   surroundingKeyframeSearchRadius: 50.0
 
-
-  extrinsicBaseLidarTrans: [4.230, -0.745, 0.0]
-  extrinsicBaseLidarRot: [0.0, -1.0, 0.0,
-                           1.0,  0.0, 0.0,
-                           0.0,  0.0, 1.0]
+  # T_base_lidar: [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg].
+  extrinsicBaseLidar: [4.230, -0.745, 0.0, 0.0, 0.0, 90.0]
 
 system:
   with_ui: true

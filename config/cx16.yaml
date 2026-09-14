@@ -5,7 +5,7 @@ common:
   lidar_topic: "/cx/cloud"
   livox_lidar_topic: ""
 
-  imu_topic: ""
+  imu_topic: "/imu_data"
 
 
   gps_topic: "/fdilink/gnss_fix"
@@ -34,12 +34,9 @@ common:
   surroundingKeyframeDensity: 2.0
   surroundingKeyframeSearchRadius: 50.0
 
-  # T_base_lidar: p_base = R_base_lidar * p_lidar + t_base_lidar.
-  # Recalibrate these two values when the CX16 is not coincident with tracking frame.
-  extrinsicBaseLidarTrans: [0.0, 0.0, 0.2]
-  extrinsicBaseLidarRot: [1.0, 0.0, 0.0,
-                          0.0, 1.0, 0.0,
-                          0.0, 0.0, 1.0]
+  # T_base_lidar: [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg].
+  # p_base = Rz(yaw) * Ry(pitch) * Rx(roll) * p_lidar + translation.
+  extrinsicBaseLidar: [0.0, 0.0, 0.2, 0.0, 0.0, 0.0]
 
 system:
   with_ui: true
@@ -110,12 +107,11 @@ localization:
     max_rotation_std_deg: 30.0
 
   gps_ins:
-    # Static GPS geometry. T_tracking_gps maps GPS-device coordinates into the
-    # tracking/body frame. The 90-degree mounting relationship is data, not a
-    # hard-coded algorithm branch. All RPY values below are radians.
+    # GPS-device origin G to NavSatFix output point A, expressed in G (meters).
     gps_output_lever_arm_gps: [0.0, 0.0, 0.0]
-    gps_translation_tracking_gps: [0.0, 0.0, 0.0]
-    gps_rotation_tracking_gps_rpy: [0.0, 0.0, -1.132966]
+    # T_tracking_gps: [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg].
+    # It maps GPS-device coordinates into the tracking/body frame.
+    gps_extrinsic_tracking_gps: [0.0, 0.0, 0.0, 0.0, 0.0, -64.914170131819]
     gps_initialization_sync_tolerance_sec: 0.05
 
     gps_initialization_sample_count: 10

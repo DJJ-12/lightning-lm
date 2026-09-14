@@ -44,11 +44,9 @@ common:
 
   # Bob LiDAR-to-IMU/base extrinsic derived from the official calibration:
   # T_imu_lidar = T_imu_camera * inverse(T_lidar_camera).
-  # Translation is the LiDAR origin expressed in the IMU/base frame.
-  extrinsicBaseLidarTrans: [0.013931101421, -0.046448576743, 0.090321586435]
-  extrinsicBaseLidarRot: [ 0.999836003512,  0.017380188739, -0.005089103557,
-                           -0.017434631710,  0.999789063154, -0.010856022117,
-                            0.004899351171,  0.010942961843,  0.999928116809]
+  # Format: [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg].
+  extrinsicBaseLidar: [0.013931101421, -0.046448576743, 0.090321586435,
+                       0.627005571497, -0.280713266928, -0.998993417226]
 
 system:
   with_ui: true
@@ -125,8 +123,8 @@ localization:
     # GPS fusion remains disabled while orientation_topic is empty; NDT works
     # independently. These identity values document the GPS-frame geometry.
     gps_output_lever_arm_gps: [0.0, 0.0, 0.0]
-    gps_translation_tracking_gps: [0.0, 0.0, 0.0]
-    gps_rotation_tracking_gps_rpy: [0.0, 0.0, 0.0]
+    # [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg].
+    gps_extrinsic_tracking_gps: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     gps_initialization_sync_tolerance_sec: 0.05
     gps_initialization_sample_count: 10
 

@@ -283,16 +283,27 @@ bool LocalizationSystem::Init(const std::string& yaml_path,
             ? gps_ins["gps_output_lever_arm_gps"]
             : YAML::Node(),
         Eigen::Vector3d::Zero());
-    gps_translation_tracking_gps_ = ReadVector3(
-        gps_ins && gps_ins["gps_translation_tracking_gps"]
-            ? gps_ins["gps_translation_tracking_gps"]
-            : YAML::Node(),
-        Eigen::Vector3d::Zero());
-    gps_rotation_tracking_gps_rpy_ = ReadVector3(
-        gps_ins && gps_ins["gps_rotation_tracking_gps_rpy"]
-            ? gps_ins["gps_rotation_tracking_gps_rpy"]
-            : YAML::Node(),
-        Eigen::Vector3d::Zero());
+    std::vector<double> gps_extrinsic_tracking_gps{
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    if (gps_ins && gps_ins["gps_extrinsic_tracking_gps"]) {
+        gps_extrinsic_tracking_gps =
+            gps_ins["gps_extrinsic_tracking_gps"]
+                .as<std::vector<double>>();
+    }
+    if (gps_extrinsic_tracking_gps.size() != 6U) {
+        LOG(ERROR) << "[LOCALIZATION_EKF] "
+                      "gps_extrinsic_tracking_gps must contain "
+                      "[tx, ty, tz, roll_deg, pitch_deg, yaw_deg]";
+        return false;
+    }
+    gps_translation_tracking_gps_ = Eigen::Vector3d(
+        gps_extrinsic_tracking_gps[0],
+        gps_extrinsic_tracking_gps[1],
+        gps_extrinsic_tracking_gps[2]);
+    gps_rotation_tracking_gps_rpy_ = kDegToRad * Eigen::Vector3d(
+        gps_extrinsic_tracking_gps[3],
+        gps_extrinsic_tracking_gps[4],
+        gps_extrinsic_tracking_gps[5]);
     gps_rotation_tracking_gps_ =
         loc::EKF::RotationFromRpy(gps_rotation_tracking_gps_rpy_);
     gps_output_lever_arm_tracking_ =
@@ -432,6 +443,8 @@ bool LocalizationSystem::Init(const std::string& yaml_path,
               << gps_initialization_sample_count_required_
               << ", gps_output_lever_arm_tracking="
               << gps_output_lever_arm_tracking_.transpose()
+              << ", gps_extrinsic_tracking_gps_rpy_deg="
+              << (gps_rotation_tracking_gps_rpy_ / kDegToRad).transpose()
               << ", gps_velocity=" << UsesGpsVelocity()
               << ", wheel_input_reserved=" << UsesWheelOdometry()
               << ", imu_input_reserved=" << (!imu_topic_.empty())

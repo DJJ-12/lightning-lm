@@ -10,6 +10,18 @@ ros2 run lightning run_lightning --config /home/mt/workspace/src/lightning-lm/co
 ros2 run lightning run_lightning --config /home/mt/workspace/src/lightning-lm/config/s3e_campus_road_1_bob.yaml
 ```
 
+所有刚体外参统一采用下面的人工可读格式，平移单位是米，姿态角单位是度：
+
+```yaml
+# [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg]
+common:
+  extrinsicBaseLidar: [0.0, 0.0, 0.2, 0.0, 0.0, 0.0]
+```
+
+程序读取后会自动把角度转换为弧度，并按照
+`R = Rz(yaw) * Ry(pitch) * Rx(roll)` 生成旋转矩阵。参数文件不再接收
+`extrinsicBaseLidarTrans` 和 `extrinsicBaseLidarRot`。
+
 
 
 ## 在线建图
@@ -27,8 +39,8 @@ ros2 service call /lightning/mapping/get_map_path lightning_interfaces/srv/GetMa
 
 ```bash
 ros2 service call /lightning/set_mode lightning_interfaces/srv/SetMode "{mode: 'offline_mapping'}"
-ros2 service call /lightning/mapping/start_mapping lightning_interfaces/srv/StartMapping "{save_path: '/home/mt/maps/S3E_Campus_Road_1_map'}"
-ros2 service call /lightning/mapping/load_bag lightning_interfaces/srv/LoadBag "{bag_path: '/home/mt/dataset/S3E_Campus_Road_1'}"
+ros2 service call /lightning/mapping/start_mapping lightning_interfaces/srv/StartMapping "{save_path: '/home/mt/maps/test_map'}"
+ros2 service call /lightning/mapping/load_bag lightning_interfaces/srv/LoadBag "{bag_path: '/home/mt/dataset/20260905-02_standard'}"
 ros2 service call /lightning/mapping/get_offline_mapping_progress lightning_interfaces/srv/GetOfflineMappingProgress "{}"
 ros2 service call /lightning/mapping/finish_mapping lightning_interfaces/srv/FinishMapping "{save_map: true}"
 ```
@@ -50,6 +62,10 @@ ros2 service call /lightning/localization/finish_localization lightning_interfac
 ```
 
 ## 离线定位
+
+离线定位使用建图原始 bag 时，第一帧 `MAP<-BODY` 固定为单位位姿。`load_bag`
+和 `set_map_path` 可以按任意顺序调用；第二个条件就绪后程序会自动设置零位姿并
+启动 bag，不需要调用 `set_location`。在线定位仍必须显式调用 `set_location`。
 
 
 ```bash
@@ -97,8 +113,8 @@ common:
 localization:
   gps_ins:
     gps_output_lever_arm_gps: [0.0, 0.0, 0.0]
-    gps_translation_tracking_gps: [0.0, 0.0, 0.0]
-    gps_rotation_tracking_gps_rpy: [0.0, 0.0, 1.5707963267948966]
+    # [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg]
+    gps_extrinsic_tracking_gps: [0.0, 0.0, 0.0, 0.0, 0.0, 90.0]
     gps_initialization_sync_tolerance_sec: 0.05
     gps_initialization_sample_count: 10
 ```

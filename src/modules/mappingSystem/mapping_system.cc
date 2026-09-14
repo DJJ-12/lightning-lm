@@ -12,6 +12,7 @@
 #include <pcl/filters/filter.h>
 #include <pcl_conversions/pcl_conversions.h>
 
+#include "core/lightning_math.hpp"
 #include "core/lio_sam/lio_sam_mapping.h"
 #include "ui/pangolin_window.h"
 #include "wrapper/ros_utils.h"
@@ -99,28 +100,21 @@ bool MappingSystem::Init(const std::string& yaml_path, const MappingSystemOption
         base_link_frame_ = yaml["common"]["base_link_frame"].as<std::string>();
     }
 
-    std::vector<double> base_lidar_t{0.0, 0.0, 0.0};
-    std::vector<double> base_lidar_R{1.0, 0.0, 0.0,
-                                     0.0, 1.0, 0.0,
-                                     0.0, 0.0, 1.0};
-    if (yaml["common"] && yaml["common"]["extrinsicBaseLidarTrans"]) {
-        base_lidar_t = yaml["common"]["extrinsicBaseLidarTrans"].as<std::vector<double>>();
+    std::vector<double> base_lidar_xyz_rpy_deg{
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    if (yaml["common"] && yaml["common"]["extrinsicBaseLidar"]) {
+        base_lidar_xyz_rpy_deg =
+            yaml["common"]["extrinsicBaseLidar"]
+                .as<std::vector<double>>();
     }
-    if (yaml["common"] && yaml["common"]["extrinsicBaseLidarRot"]) {
-        base_lidar_R = yaml["common"]["extrinsicBaseLidarRot"].as<std::vector<double>>();
-    }
-    CHECK_EQ(base_lidar_t.size(), 3);
-    CHECK_EQ(base_lidar_R.size(), 9);
-
-    Mat3d R_base_lidar;
-    R_base_lidar << base_lidar_R[0], base_lidar_R[1], base_lidar_R[2],
-        base_lidar_R[3], base_lidar_R[4], base_lidar_R[5],
-        base_lidar_R[6], base_lidar_R[7], base_lidar_R[8];
-    Quatd q_base_lidar(R_base_lidar);
-    q_base_lidar.normalize();
-    T_base_lidar_ = SE3(q_base_lidar, Vec3d(base_lidar_t[0], base_lidar_t[1], base_lidar_t[2]));
+    CHECK_EQ(base_lidar_xyz_rpy_deg.size(), 6U);
+    T_base_lidar_ = math::XyzRpyDegreesToSE3(base_lidar_xyz_rpy_deg);
     LOG(INFO) << "[Mapping][BASE_LIDAR] T_base_lidar trans="
-              << T_base_lidar_.translation().transpose();
+              << T_base_lidar_.translation().transpose()
+              << ", rpy_deg="
+              << Vec3d(base_lidar_xyz_rpy_deg[3],
+                       base_lidar_xyz_rpy_deg[4],
+                       base_lidar_xyz_rpy_deg[5]).transpose();
 
     LioSamMapping::Options lio_options;
     lio_options.mapping_mode_ = options_.online_input
