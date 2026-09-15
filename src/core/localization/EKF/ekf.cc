@@ -188,7 +188,7 @@ Eigen::Matrix<double,3,3> EKF::ComputeLeverArmJacobian(
 bool EKF::UpdateGpsPoseEnu(
     double stamp,
     const Eigen::Vector3d& gps_position_enu,
-    const Eigen::Vector3d& output_lever_arm_tracking,
+    const Eigen::Vector3d& antenna_position_body,
     const Eigen::Matrix3d& gps_covariance_enu,
     const Eigen::Matrix3d& rotation_enu_map,
     const Eigen::Vector3d& translation_enu_map,
@@ -196,22 +196,24 @@ bool EKF::UpdateGpsPoseEnu(
     double* mahalanobis) {
     if (!PredictTo(stamp) ||
         !gps_position_enu.allFinite() ||
-        !output_lever_arm_tracking.allFinite() ||
+        !antenna_position_body.allFinite() ||
         !gps_covariance_enu.allFinite() ||
         !rotation_enu_map.allFinite() ||
         !translation_enu_map.allFinite()) {
         return false;
     }
 
-    // The EKF state is MAP<-BODY.  GPS measures each antenna in ENU, so the
-    // prediction is formed in exactly the same ENU frame as the observation:
-    //   p_enu = R_enu_map * (p_map + R_map_body * lever) + t_enu_map.
+    // NavSatFix measures antenna point A in ENU. antenna_position_body is
+    // p_B_A: that same physical point expressed in body coordinates.
+    // Therefore the predicted observation is the antenna, not the body or GPS
+    // device origin:
+    //   p_E_A = R_E_M * (p_M_B + R_M_B * p_B_A) + t_E_M.
     const Eigen::Matrix3d rotation_map_body =
         RotationFromRpy(state_.rpy_map);
     const Eigen::Vector3d gps_predicted_enu =
         rotation_enu_map *
             (state_.position_map +
-             rotation_map_body * output_lever_arm_tracking) +
+             rotation_map_body * antenna_position_body) +
         translation_enu_map;
 
     const Eigen::Vector3d residual =
@@ -224,7 +226,7 @@ bool EKF::UpdateGpsPoseEnu(
 
     // d h / d rpy = R_enu_map * d(R_map_body * lever)/d(rpy).
     const Eigen::Matrix3d attitude_jacobian =
-        ComputeLeverArmJacobian(output_lever_arm_tracking, state_.rpy_map);
+        ComputeLeverArmJacobian(antenna_position_body, state_.rpy_map);
     jacobian.block<3, 3>(0, kRoll) =
         rotation_enu_map * attitude_jacobian;
 
@@ -286,19 +288,20 @@ bool EKF::UpdateMapVelocity(
         mahalanobis, false);
 }
 
-bool EKF::UpdateNdtPose(double stamp, const SE3& pose_map_tracking,
+bool EKF::UpdateNdtPose(double stamp, const SE3& pose_map_body,
                         const Matrix6d& covariance,
                         double gate_chi2, double* mahalanobis) {
-    if (!PredictTo(stamp) || !pose_map_tracking.translation().allFinite() ||
-        !pose_map_tracking.unit_quaternion().coeffs().allFinite() ||
+    if (!PredictTo(stamp) || !pose_map_body.translation().allFinite() ||
+        !pose_map_body.unit_quaternion().coeffs().allFinite() ||
         !covariance.allFinite()) {
         return false;
     }
     // 把旋转矩阵 \(R\) 转成欧拉角
-    const Eigen::Vector3d measured_rpy = RpyFromRotation(pose_map_tracking.rotationMatrix());
+    const Eigen::Vector3d measured_rpy =
+        RpyFromRotation(pose_map_body.rotationMatrix());
     Eigen::Matrix<double, 6, 1> residual;
     residual.head<3>() =
-        pose_map_tracking.translation() - state_.position_map;
+        pose_map_body.translation() - state_.position_map;
     for (int axis = 0; axis < 3; ++axis) {
         residual(3 + axis) =
             WrapAngle(measured_rpy(axis) - state_.rpy_map(axis));

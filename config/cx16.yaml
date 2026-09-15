@@ -54,7 +54,7 @@ lio_sam:
 
   imuGravity: 9.80511
   imuRPYWeight: 0.0
-  # IMU and tracking axes use the same convention. These parameters belong to
+  # IMU and body axes use the same convention. These parameters belong to
   # mapping/deskew only; localization does not use them for gps/INS conversion.
   extrinsicRot: [1.0, 0.0, 0.0,
                  0.0, 1.0, 0.0,
@@ -110,11 +110,12 @@ localization:
     max_rotation_std_deg: 30.0
 
   gps_ins:
-    # GPS-device origin G to NavSatFix output point A, expressed in G (meters).
+    # p_G_A [m]: antenna point A in the GPS-device frame G. A is exactly the
+    # point whose latitude/longitude/altitude is published by /fdilink/gnss_fix.
     gps_output_lever_arm_gps: [0.0, 0.0, 0.0]
-    # T_tracking_gps: [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg].
-    # It maps GPS-device coordinates into the tracking/body frame.
-    gps_extrinsic_tracking_gps: [0.0, 0.0, 0.0, 0.0, 0.0, 20.085828760]
+    # T_body_gps: [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg].
+    # It maps GPS-device coordinates into the body frame.
+    gps_extrinsic_body_gps: [0.0, 0.0, 0.0, 0.0, 0.0, 20.085828760]
     gps_initialization_sync_tolerance_sec: 0.05
 
     gps_initialization_sample_count: 10

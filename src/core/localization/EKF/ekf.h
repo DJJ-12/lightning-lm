@@ -96,15 +96,18 @@ class EKF {
     // A single GNSS output point is fused directly in ENU. The fixed ENU<-MAP
     // transform is initialized once from synchronized GNSS + INS orientation
     // samples after NDT relocalization. The EKF state remains expressed in MAP:
-    //   h(x) = R_enu_map * (p_map + R_map_body(rpy) * lever_body_output)
+    // Let A be the antenna point reported by NavSatFix.  LocalizationSystem
+    // converts its GPS-frame coordinate p_G_A into the body-frame
+    // coordinate p_B_A before calling this function:
+    //   h(x) = R_enu_map * (p_map + R_map_body(rpy) * p_B_A)
     //          + t_enu_map.
-    // A non-zero lever arm makes this position observation sensitive to RPY.
+    // A non-zero antenna position makes this observation sensitive to RPY.
     // Runtime INS orientation is handled independently below and never uses
     // this lever-arm Jacobian.
     bool UpdateGpsPoseEnu(
         double stamp,
         const Eigen::Vector3d& gps_position_enu,
-        const Eigen::Vector3d& output_lever_arm_tracking,
+        const Eigen::Vector3d& antenna_position_body,
         const Eigen::Matrix3d& gps_covariance_enu,
         const Eigen::Matrix3d& rotation_enu_map,
         const Eigen::Vector3d& translation_enu_map,
@@ -130,9 +133,9 @@ class EKF {
                            double gate_chi2 = -1.0,
                            double* mahalanobis = nullptr);
 
-    // NDT observes full map<-tracking position and roll/pitch/yaw.
+    // NDT observes full map<-body position and roll/pitch/yaw.
     bool UpdateNdtPose(double stamp,
-                       const SE3& pose_map_tracking,
+                       const SE3& pose_map_body,
                        const Matrix6d& covariance,
                        double gate_chi2 = -1.0,
                        double* mahalanobis = nullptr);

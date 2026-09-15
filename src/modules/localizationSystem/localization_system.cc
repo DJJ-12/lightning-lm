@@ -291,37 +291,40 @@ bool LocalizationSystem::Init(const std::string& yaml_path,
     orientation_topic_ = ReadTopic(common, "orientation_topic");
     velocity_topic_ = ReadTopic(common, "velocity_topic");
     wheel_odometry_topic_ = ReadTopic(common, "wheel_odometry_topic");
-    gps_output_lever_arm_gps_ = ReadVector3(
+    gps_antenna_position_gps_ = ReadVector3(
         gps_ins && gps_ins["gps_output_lever_arm_gps"]
             ? gps_ins["gps_output_lever_arm_gps"]
             : YAML::Node(),
         Eigen::Vector3d::Zero());
-    std::vector<double> gps_extrinsic_tracking_gps{
+    std::vector<double> gps_extrinsic_body_gps{
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-    if (gps_ins && gps_ins["gps_extrinsic_tracking_gps"]) {
-        gps_extrinsic_tracking_gps =
-            gps_ins["gps_extrinsic_tracking_gps"]
+    if (gps_ins && gps_ins["gps_extrinsic_body_gps"]) {
+        gps_extrinsic_body_gps =
+            gps_ins["gps_extrinsic_body_gps"]
                 .as<std::vector<double>>();
     }
-    if (gps_extrinsic_tracking_gps.size() != 6U) {
+    if (gps_extrinsic_body_gps.size() != 6U) {
         LOG(ERROR) << "[LOCALIZATION_EKF] "
-                      "gps_extrinsic_tracking_gps must contain "
+                      "gps_extrinsic_body_gps must contain "
                       "[tx, ty, tz, roll_deg, pitch_deg, yaw_deg]";
         return false;
     }
-    gps_translation_tracking_gps_ = Eigen::Vector3d(
-        gps_extrinsic_tracking_gps[0],
-        gps_extrinsic_tracking_gps[1],
-        gps_extrinsic_tracking_gps[2]);
-    gps_rotation_tracking_gps_rpy_ = kDegToRad * Eigen::Vector3d(
-        gps_extrinsic_tracking_gps[3],
-        gps_extrinsic_tracking_gps[4],
-        gps_extrinsic_tracking_gps[5]);
-    gps_rotation_tracking_gps_ =
-        loc::EKF::RotationFromRpy(gps_rotation_tracking_gps_rpy_);
-    gps_output_lever_arm_tracking_ =
-        gps_translation_tracking_gps_ +
-        gps_rotation_tracking_gps_ * gps_output_lever_arm_gps_;
+    gps_translation_body_gps_ = Eigen::Vector3d(
+        gps_extrinsic_body_gps[0],
+        gps_extrinsic_body_gps[1],
+        gps_extrinsic_body_gps[2]);
+    gps_rotation_body_gps_rpy_ = kDegToRad * Eigen::Vector3d(
+        gps_extrinsic_body_gps[3],
+        gps_extrinsic_body_gps[4],
+        gps_extrinsic_body_gps[5]);
+    gps_rotation_body_gps_ =
+        loc::EKF::RotationFromRpy(gps_rotation_body_gps_rpy_);
+    // The configured lever arm is p_G_A: antenna point A (the point reported
+    // by NavSatFix) expressed in GPS-device frame G.  T_B_G maps that point
+    // into the body frame used by the EKF.
+    gps_antenna_position_body_ =
+        gps_translation_body_gps_ +
+        gps_rotation_body_gps_ * gps_antenna_position_gps_;
     const auto read_gps_ins = [&gps_ins](const char* key, double fallback) {
         return gps_ins && gps_ins[key]
             ? gps_ins[key].as<double>()
@@ -424,11 +427,11 @@ bool LocalizationSystem::Init(const std::string& yaml_path,
         !std::isfinite(gps_initialization_sync_tolerance_sec_) ||
         gps_initialization_sync_tolerance_sec_ <= 0.0 ||
         gps_initialization_sample_count_required_ <= 0 ||
-        !gps_output_lever_arm_gps_.allFinite() ||
-        !gps_translation_tracking_gps_.allFinite() ||
-        !gps_rotation_tracking_gps_rpy_.allFinite() ||
-        !gps_rotation_tracking_gps_.allFinite() ||
-        !gps_output_lever_arm_tracking_.allFinite() ||
+        !gps_antenna_position_gps_.allFinite() ||
+        !gps_translation_body_gps_.allFinite() ||
+        !gps_rotation_body_gps_rpy_.allFinite() ||
+        !gps_rotation_body_gps_.allFinite() ||
+        !gps_antenna_position_body_.allFinite() ||
         std::any_of(standard_deviations.begin(), standard_deviations.end(),
                     [](double value) {
                         return !std::isfinite(value) || value <= 0.0;
@@ -469,10 +472,12 @@ bool LocalizationSystem::Init(const std::string& yaml_path,
               << gps_initialization_sync_tolerance_sec_
               << ", gps_initialization_samples="
               << gps_initialization_sample_count_required_
-              << ", gps_output_lever_arm_tracking="
-              << gps_output_lever_arm_tracking_.transpose()
-              << ", gps_extrinsic_tracking_gps_rpy_deg="
-              << (gps_rotation_tracking_gps_rpy_ / kDegToRad).transpose()
+              << ", gps_antenna_position_gps="
+              << gps_antenna_position_gps_.transpose()
+              << ", gps_antenna_position_body="
+              << gps_antenna_position_body_.transpose()
+              << ", gps_extrinsic_body_gps_rpy_deg="
+              << (gps_rotation_body_gps_rpy_ / kDegToRad).transpose()
               << ", gps_velocity=" << UsesGpsVelocity()
               << ", wheel_input_reserved=" << UsesWheelOdometry()
               << ", imu_input_reserved=" << (!imu_topic_.empty())
@@ -785,7 +790,7 @@ void LocalizationSystem::HandleGpsPosition(
 
     double distance = 0.0;
     const bool accepted = ekf_.UpdateGpsPoseEnu(
-        stamp, gps_position_enu, gps_output_lever_arm_tracking_,
+        stamp, gps_position_enu, gps_antenna_position_body_,
         gps_covariance_enu,
         enu_from_map_rotation_, enu_from_map_translation_,
         -1.0, &distance);
@@ -826,7 +831,7 @@ void LocalizationSystem::HandleGpsOrientation(
     const Eigen::Matrix3d measured_rotation_map_body =
         enu_from_map_rotation_.transpose() *
         measured_rotation_enu_gps *
-        gps_rotation_tracking_gps_.transpose();
+        gps_rotation_body_gps_.transpose();
     const Eigen::Vector3d measured_rpy_map_body =
         loc::EKF::RpyFromRotation(measured_rotation_map_body);
     if (!measured_rpy_map_body.allFinite()) {
@@ -1103,13 +1108,14 @@ bool LocalizationSystem::AddGpsInitializationSample(
         return false;
     }
 
-    // T_E_B = T_E_G * inverse(T_B_G)'s rotation. The output point A is first
-    // reduced to the body origin using the precomputed body-frame lever arm.
+    // T_E_B = T_E_G * inverse(T_B_G)'s rotation. NavSatFix gives antenna point
+    // A as p_E_A. Remove that exact point's body-frame coordinate p_B_A to
+    // recover the body origin: p_E_B = p_E_A - R_E_B * p_B_A.
     const Eigen::Matrix3d rotation_enu_body =
-        rotation_enu_gps * gps_rotation_tracking_gps_.transpose();
+        rotation_enu_gps * gps_rotation_body_gps_.transpose();
     const Eigen::Vector3d body_position_enu =
         gps_output_position_enu -
-        rotation_enu_body * gps_output_lever_arm_tracking_;
+        rotation_enu_body * gps_antenna_position_body_;
     Eigen::Quaterniond body_orientation_enu(rotation_enu_body);
     if (!body_position_enu.allFinite() ||
         !body_orientation_enu.coeffs().allFinite() ||
@@ -1492,11 +1498,11 @@ void LocalizationSystem::Reset() {
     enu_from_map_ready_ = false;
     enu_from_map_rotation_.setIdentity();
     enu_from_map_translation_.setZero();
-    gps_output_lever_arm_gps_.setZero();
-    gps_translation_tracking_gps_.setZero();
-    gps_rotation_tracking_gps_rpy_.setZero();
-    gps_rotation_tracking_gps_.setIdentity();
-    gps_output_lever_arm_tracking_.setZero();
+    gps_antenna_position_gps_.setZero();
+    gps_translation_body_gps_.setZero();
+    gps_rotation_body_gps_rpy_.setZero();
+    gps_rotation_body_gps_.setIdentity();
+    gps_antenna_position_body_.setZero();
     gps_initialization_sync_tolerance_sec_ = 0.05;
     gps_initialization_sample_count_required_ = 10;
     initial_position_std_ = 0.5;

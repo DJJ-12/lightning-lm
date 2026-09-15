@@ -124,7 +124,7 @@ localization:
     # independently. These identity values document the GPS-frame geometry.
     gps_output_lever_arm_gps: [0.0, 0.0, 0.0]
     # [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg].
-    gps_extrinsic_tracking_gps: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    gps_extrinsic_body_gps: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     gps_initialization_sync_tolerance_sec: 0.05
     gps_initialization_sample_count: 10
 

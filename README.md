@@ -101,14 +101,15 @@ yaw_enu = wrap(pi / 2 - courseang)
 GPS 与姿态消息，先用静态外参把 GPS 输出点还原为 body 原点：
 
 ```text
-l_B_A = t_B_G + R_B_G * l_G_A
+p_B_A = t_B_G + R_B_G * p_G_A
 R_E_B = R_E_G * R_B_G^T
-p_E_B = p_E_A - R_E_B * l_B_A
+p_E_B = p_E_A - R_E_B * p_B_A
 T_E_M = T_E_B0 * inverse(T_M_B0)
 ```
 
 其中 `A` 是 `NavSatFix` 的实际输出点，`G` 是 GPS 设备坐标系，`B` 是
-`common.base_link_frame`。位置直接取平均，四元数先统一符号再平均归一化，得到
+车体坐标系（其 ROS frame 名由 `common.base_link_frame` 指定）。位置直接取平均，
+四元数先统一符号再平均归一化，得到
 固定的完整三维 `ENU<-MAP`。安装关系全部来自配置，不在算法中硬编码 90°：
 
 ```yaml
@@ -118,18 +119,34 @@ common:
 
 localization:
   gps_ins:
+    # p_G_A: /fdilink/gnss_fix 所表示的天线点 A 在 GPS 设备坐标系 G 下的坐标，单位 m
     gps_output_lever_arm_gps: [0.0, 0.0, 0.0]
     # [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg]
-    gps_extrinsic_tracking_gps: [0.0, 0.0, 0.0, 0.0, 0.0, 90.0]
+    gps_extrinsic_body_gps: [0.0, 0.0, 0.0, 0.0, 0.0, 90.0]
     gps_initialization_sync_tolerance_sec: 0.05
     gps_initialization_sample_count: 10
+```
+
+这里的杆臂不是 body 坐标，也不是 GPS 设备原点在 body 下的位置。它严格定义为
+`NavSatFix` 经纬高所代表的天线点 `A` 在 GPS 设备坐标系 `G` 下的坐标
+`p_G_A`。程序再通过完整外参 `T_B_G` 计算：
+
+```text
+p_B_A = t_B_G + R_B_G * p_G_A
+```
+
+初始化时从天线位置恢复 body 原点，运行时则从 EKF body 位姿预测同一个天线点：
+
+```text
+p_E_B          = p_E_A - R_E_B * p_B_A
+p_E_A(predicted) = R_E_M * (p_M_B + R_M_B * p_B_A) + t_E_M
 ```
 
 初始化完成后，GPS 位置和 INS 姿态按照各自时间戳分别进入 EKF，二者不再互相
 等待。每帧 GPS 位置直接以三维 ENU 输出点观测进入 EKF：
 
 ```text
-h(x) = R_E_M * (p_M_B + R_M_B(rpy) * l_B_A) + t_E_M
+h(x) = R_E_M * (p_M_B + R_M_B(rpy) * p_B_A) + t_E_M
 r    = p_E_A(measured) - h(x)
 ```
 

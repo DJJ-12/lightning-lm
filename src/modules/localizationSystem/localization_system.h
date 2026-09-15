@@ -163,15 +163,15 @@ class LocalizationSystem {
     mutable std::mutex filter_mutex_;
     loc::EKF ekf_;
 
-    // Static GPS geometry:
-    //   p_B_A = t_B_G + R_B_G * p_G_A
-    // where A is the NavSatFix output point, G is the GPS device frame and B
-    // is the localization tracking/body frame.
-    Eigen::Vector3d gps_output_lever_arm_gps_ = Eigen::Vector3d::Zero();
-    Eigen::Vector3d gps_translation_tracking_gps_ = Eigen::Vector3d::Zero();
-    Eigen::Vector3d gps_rotation_tracking_gps_rpy_ = Eigen::Vector3d::Zero();
-    Eigen::Matrix3d gps_rotation_tracking_gps_ = Eigen::Matrix3d::Identity();
-    Eigen::Vector3d gps_output_lever_arm_tracking_ = Eigen::Vector3d::Zero();
+    // Static GPS geometry. A is exactly the antenna point whose WGS84
+    // coordinate is published by NavSatFix. The configured lever arm is its
+    // coordinate in the GPS-device frame: p_G_A. T_B_G then gives:
+    //   p_B_A = t_B_G + R_B_G * p_G_A.
+    Eigen::Vector3d gps_antenna_position_gps_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d gps_translation_body_gps_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d gps_rotation_body_gps_rpy_ = Eigen::Vector3d::Zero();
+    Eigen::Matrix3d gps_rotation_body_gps_ = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d gps_antenna_position_body_ = Eigen::Vector3d::Zero();
     double gps_initialization_sync_tolerance_sec_ = 0.05;
     int gps_initialization_sample_count_required_ = 10;
 
