@@ -160,10 +160,6 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
 }
 
 void Localization::LoadTargetMapForUI(const std::string& global_map_path) {
-    if (!ui_) {
-        return;
-    }
-
     CloudPtr target_map(new PointCloudType());
     namespace fs = std::filesystem;
     std::string map_source = "BlockMap";
@@ -298,11 +294,11 @@ LocalizationFrameOutcome Localization::ProcessLidarMsg(
     frame.timestamp = rclcpp::Time(msg->header.stamp).seconds();
     frame.callback_start_steady_sec = callback_start_steady_sec;
     frame.arrival_dt = arrival_dt;
-    frame.raw_points = frame.cloud ? frame.cloud->size() : 0;
+    frame.raw_points = frame.cloud->size();
     frame.message_points = static_cast<size_t>(msg->width) * static_cast<size_t>(msg->height);
     frame.frame_id = msg->header.frame_id;
     frame.diagnostic = diagnostic;
-    if (!frame.cloud || frame.cloud->empty()) {
+    if (frame.cloud->empty()) {
         ++diagnostic_empty_after_convert_;
         LOG(ERROR) << "[Localization] PointCloud2 convert produced empty cloud"
                    << ", sequence=" << diagnostic.pipeline_sequence
@@ -362,11 +358,11 @@ LocalizationFrameOutcome Localization::ProcessLivoxLidarMsg(
     frame.timestamp = rclcpp::Time(msg->header.stamp).seconds();
     frame.callback_start_steady_sec = callback_start_steady_sec;
     frame.arrival_dt = arrival_dt;
-    frame.raw_points = frame.cloud ? frame.cloud->size() : 0;
+    frame.raw_points = frame.cloud->size();
     frame.message_points = msg->points.size();
     frame.frame_id = msg->header.frame_id;
     frame.diagnostic = diagnostic;
-    if (!frame.cloud || frame.cloud->empty()) {
+    if (frame.cloud->empty()) {
         ++diagnostic_empty_after_convert_;
         LOG(ERROR) << "[Localization] Livox convert produced empty cloud"
                    << ", sequence=" << diagnostic.pipeline_sequence
@@ -389,11 +385,6 @@ LocalizationFrameOutcome Localization::ProcessLivoxLidarMsg(
 }
 
 LocalizationFrameOutcome Localization::HandleCloudFrame(const LocCloudFrame& frame) {
-    if (!frame.cloud || frame.cloud->empty()) {
-        ++diagnostic_empty_after_convert_;
-        return LocalizationFrameOutcome::EMPTY_AFTER_CONVERT;
-    }
-
     {
         std::lock_guard<std::mutex> cloud_lock(current_cloud_mutex_);
         latest_cloud_ = frame.cloud;
@@ -432,20 +423,10 @@ LocalizationFrameOutcome Localization::HandleCloudFrame(const LocCloudFrame& fra
         return LocalizationFrameOutcome::WAITING_INITIAL_POSE;
     }
 
-    if (initializing) {
-        ++diagnostic_initializing_frames_;
-        return LocalizationFrameOutcome::INITIALIZATION_IN_PROGRESS;
-    }
-
     return ProcessLocalizationCloud(frame);
 }
 
 LocalizationFrameOutcome Localization::ProcessLocalizationCloud(const LocCloudFrame& frame) {
-    if (!frame.cloud || frame.cloud->empty()) {
-        ++diagnostic_empty_after_convert_;
-        return LocalizationFrameOutcome::EMPTY_AFTER_CONVERT;
-    }
-
     XYZCloud::Ptr current_cloud(new XYZCloud);
 
     const double voxel_start_steady_sec = SteadySeconds();
@@ -456,7 +437,7 @@ LocalizationFrameOutcome Localization::ProcessLocalizationCloud(const LocCloudFr
     const double voxel_ms = (SteadySeconds() - voxel_start_steady_sec) * 1000.0;
     diagnostic_max_voxel_ms_ = std::max(diagnostic_max_voxel_ms_, voxel_ms);
 
-    if (!current_cloud || current_cloud->empty()) {
+    if (current_cloud->empty()) {
         ++diagnostic_empty_after_voxel_;
         LOG(ERROR) << "[Localization] voxel filter produced empty cloud"
                    << ", sequence=" << frame.diagnostic.pipeline_sequence
@@ -574,9 +555,6 @@ bool Localization::TryInitializeWithCurrentCloud() {
     LocalizationInputDiagnostic diagnostic;
     {
         std::lock_guard<std::mutex> cloud_lock(current_cloud_mutex_);
-        if (!latest_cloud_ || latest_cloud_->empty()) {
-            return false;
-        }
         input_cloud = latest_cloud_;
         timestamp = latest_cloud_timestamp_;
         diagnostic = latest_cloud_diagnostic_;
@@ -659,7 +637,6 @@ void Localization::Finish() {
               << ", empty_after_convert=" << diagnostic_empty_after_convert_
               << ", waiting_initial_pose=" << diagnostic_waiting_initial_pose_
               << ", initialized_frames=" << diagnostic_initialized_frames_
-              << ", initialization_in_progress=" << diagnostic_initializing_frames_
               << ", empty_after_voxel=" << diagnostic_empty_after_voxel_
               << ", state_not_ready=" << diagnostic_state_not_ready_
               << ", ndt_frames=" << diagnostic_ndt_frames_
@@ -750,15 +727,13 @@ void Localization::PublishResult(const LocalizationResult& result) {
         loc_result_ = result;
     }
 
-    const bool pose_is_publishable = result.valid_;
-
     std::string base_link_frame;
     {
         UL lock(global_mutex_);
         base_link_frame = base_link_frame_;
     }
 
-    if (pose_is_publishable && tf_callback_) {
+    if (tf_callback_) {
         auto tf_msg = result.ToGeoMsg();
         tf_msg.child_frame_id = base_link_frame;
         tf_callback_(tf_msg);
@@ -770,19 +745,19 @@ void Localization::PublishResult(const LocalizationResult& result) {
 }
 
 void Localization::UpdateVisualization(const LocalizationResult& result) {
-    if (!ui_ || !result.valid_) return;
+    if (!ui_) return;
     ui_->UpdateNavState(result.ToNavState());
 }
 
 void Localization::UpdategpsObservationVisualization(
     const Eigen::Vector2d& position_map) {
-    if (!ui_ || !position_map.allFinite()) return;
+    if (!ui_) return;
     ui_->UpdategpsPosition(position_map);
 }
 
 void Localization::UpdateNdtObservationVisualization(
     const Eigen::Vector2d& position_map) {
-    if (!ui_ || !position_map.allFinite()) return;
+    if (!ui_) return;
     ui_->UpdateNdtPosition(position_map);
 }
 

@@ -135,7 +135,7 @@ bool MappingSystem::Init(const std::string& yaml_path, const MappingSystemOption
     return true;
 }
 
-bool MappingSystem::Start() {
+void MappingSystem::Start() {
     std::lock_guard<std::mutex> lock(mtx_);
     cur_kf_.reset();
     mapping_update_pending_ = false;
@@ -149,7 +149,6 @@ bool MappingSystem::Start() {
     ringFlag_ = 0;
     deskewFlag_ = 0;
     running_ = true;
-    return true;
 }
 
 void MappingSystem::Stop() {
@@ -194,9 +193,7 @@ void MappingSystem::ProcessIMU(const sensor_msgs::msg::Imu::SharedPtr& imu) {
         return;
     }
     sensor_msgs::msg::Imu converted_imu = *imu;
-    if (!imuConverter(*imu, converted_imu)) {
-        return;
-    }
+    imuConverter(*imu, converted_imu);
     const double timestamp = ToSec(converted_imu.header.stamp);
     if (timestamp < last_timestamp_imu_) {
         LOG(WARNING) << "mapping imu loop back, clear buffer";
@@ -211,15 +208,9 @@ void MappingSystem::ProcessIMU(const sensor_msgs::msg::Imu::SharedPtr& imu) {
 
 void MappingSystem::ResetProjectionState() {
     const size_t cloud_size = static_cast<size_t>(N_SCAN_) * static_cast<size_t>(Horizon_SCAN_);
-    if (rangeMat_.size() != cloud_size) {
-        rangeMat_.resize(cloud_size);
-    }
     std::fill(rangeMat_.begin(), rangeMat_.end(), FLT_MAX);
     std::fill(columnIdnCountVec_.begin(), columnIdnCountVec_.end(), 0);
 
-    if (!fullCloud_) {
-        fullCloud_.reset(new PointCloudType());
-    }
     fullCloud_->clear();
     fullCloud_->points.resize(cloud_size);
 
@@ -436,7 +427,7 @@ bool MappingSystem::deskewInfo() {
     return true;
 }
 
-bool MappingSystem::imuConverter(const sensor_msgs::msg::Imu& imu_in,
+void MappingSystem::imuConverter(const sensor_msgs::msg::Imu& imu_in,
                                sensor_msgs::msg::Imu& imu_out) const {
     // rotate acceleration
     Eigen::Vector3d acc(imu_in.linear_acceleration.x, imu_in.linear_acceleration.y, imu_in.linear_acceleration.z);
@@ -460,15 +451,7 @@ bool MappingSystem::imuConverter(const sensor_msgs::msg::Imu& imu_in,
     imu_out.orientation.y = q_final.y();
     imu_out.orientation.z = q_final.z();
     imu_out.orientation.w = q_final.w();
-
-    if (sqrt(q_final.x()*q_final.x() + q_final.y()*q_final.y() + q_final.z()*q_final.z() + q_final.w()*q_final.w()) < 0.1)
-    {
-        RCLCPP_ERROR(get_logger(), "Invalid quaternion, please use a 9-axis IMU!");
-        throw std::runtime_error("invalid IMU quaternion");
-    }
-
-    return true;
-};
+}
 
 
 void MappingSystem::imuDeskewInfo() {
@@ -708,12 +691,9 @@ void MappingSystem::ProcessCloud(const sensor_msgs::msg::PointCloud2::SharedPtr&
         }
         projectPointCloud();
         cloudExtraction();
-        if (!cloudInfo_->cloud_deskewed ||
-            cloudInfo_->cloud_deskewed->size() < 11) {
+        if (cloudInfo_->cloud_deskewed->size() < 11) {
             LOG(WARNING) << "[MappingSystem] too few deskewed points: "
-                         << (cloudInfo_->cloud_deskewed
-                                 ? cloudInfo_->cloud_deskewed->size()
-                                 : 0);
+                         << cloudInfo_->cloud_deskewed->size();
             return;
         }
         cloud_info = cloudInfo_;
@@ -736,12 +716,9 @@ void MappingSystem::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::Shared
         }
         projectPointCloud();
         cloudExtraction();
-        if (!cloudInfo_->cloud_deskewed ||
-            cloudInfo_->cloud_deskewed->size() < 11) {
+        if (cloudInfo_->cloud_deskewed->size() < 11) {
             LOG(WARNING) << "[MappingSystem] too few deskewed Livox points: "
-                         << (cloudInfo_->cloud_deskewed
-                                 ? cloudInfo_->cloud_deskewed->size()
-                                 : 0);
+                         << cloudInfo_->cloud_deskewed->size();
             return;
         }
         cloud_info = cloudInfo_;
@@ -751,9 +728,6 @@ void MappingSystem::ProcessCloud(const livox_ros_driver2::msg::CustomMsg::Shared
 
 void MappingSystem::RunLioSamFrame(
     const std::shared_ptr<LioSamCloudInfo>& cloud_info) {
-    if (!cloud_info) {
-        return;
-    }
     std::shared_ptr<LioSamMapping> lio_sam;
     {
         std::lock_guard<std::mutex> lock(mtx_);
@@ -781,9 +755,7 @@ void MappingSystem::HandleProcessedKeyframe(const Keyframe::Ptr& kf) {
     cur_kf_ = kf;
     mapping_update_pending_ = true;
     const CloudPtr cloud = kf->GetCloud();
-    if (cloud) {
-        keyframe_cloud_bytes_ += cloud->points.capacity() * sizeof(PointType);
-    }
+    keyframe_cloud_bytes_ += cloud->points.capacity() * sizeof(PointType);
     ++keyframe_count_;
     if (ui_) {
         ui_->UpdateKF(cur_kf_);
@@ -810,11 +782,8 @@ CloudPtr MappingSystem::BuildCurrentMapInBaseFrame() {
     const Eigen::Matrix4f T_base_lidar = T_base_lidar_.matrix().cast<float>();
 
     for (const auto& kf : keyframes) {
-        if (!kf) {
-            continue;
-        }
         CloudPtr cloud = kf->GetCloud();
-        if (!cloud || cloud->empty()) {
+        if (cloud->empty()) {
             continue;
         }
 
@@ -852,10 +821,6 @@ nav_msgs::msg::Path MappingSystem::BuildCurrentPath() {
     path.header.frame_id = "map";
     path.poses.reserve(keyframes.size());
     for (const auto& kf : keyframes) {
-        if (!kf) {
-            continue;
-        }
-
         const SE3 pose = T_base_lidar_ * kf->GetOptPose();
         geometry_msgs::msg::PoseStamped pose_msg;
         pose_msg.header.frame_id = "map";

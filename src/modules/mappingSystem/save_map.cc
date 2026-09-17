@@ -47,7 +47,7 @@ bool SaveMap::Save(const std::string& save_path, const MappingSystemResult& resu
     }
 
     CloudPtr global_map_to_save = BuildMapForSave(result);
-    if (!global_map_to_save || global_map_to_save->empty()) {
+    if (global_map_to_save->empty()) {
         LOG(ERROR) << "SaveMap failed: converted global map is empty";
         return false;
     }
@@ -66,9 +66,6 @@ bool SaveMap::Save(const std::string& save_path, const MappingSystemResult& resu
 }
 
 CloudPtr SaveMap::BuildMapForSave(const MappingSystemResult& result) const {
-    if (!result.global_map || result.global_map->empty()) {
-        return nullptr;
-    }
     if (!result.global_map_is_lidar_frame) {
         return result.global_map;
     }
@@ -88,9 +85,6 @@ CloudPtr SaveMap::BuildMapForSave(const MappingSystemResult& result) const {
 
 bool SaveMap::SaveBlockMap(const std::string& save_path, const CloudPtr& global_map,
                            const SaveMapOptions& options) const {
-    if (!global_map || global_map->empty()) {
-        return false;
-    }
     namespace fs = std::filesystem;
     const std::string block_map_dir = save_path + "/BlockMap";
     const std::string pcd_dir = block_map_dir + "/pointcloud_map";
@@ -131,9 +125,6 @@ bool SaveMap::SaveBlockMap(const std::string& save_path, const CloudPtr& global_
     for (auto& item : segment_clouds) {
         const SegmentIndex& seg = item.first;
         auto& segment_cloud = item.second;
-        if (!segment_cloud || segment_cloud->empty()) {
-            continue;
-        }
         pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZ>());
         if (options.block_voxel_size > 0.0) {
             pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
@@ -143,7 +134,7 @@ bool SaveMap::SaveBlockMap(const std::string& save_path, const CloudPtr& global_
         } else {
             filtered_cloud = segment_cloud;
         }
-        if (!filtered_cloud || filtered_cloud->empty()) {
+        if (filtered_cloud->empty()) {
             continue;
         }
         filtered_cloud->width = filtered_cloud->size();

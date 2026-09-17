@@ -92,13 +92,11 @@ class LocalizationSystem {
 
     void TryHandleGpsInitialization();
     void HandleGpsInitializationPair(
-        const sensor_msgs::msg::NavSatFix::SharedPtr& fix,
-        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr& orientation);
-    void HandleGpsPosition(
-        const sensor_msgs::msg::NavSatFix::SharedPtr& fix);
+        const sensor_msgs::msg::NavSatFix& fix,
+        const geometry_msgs::msg::TwistWithCovarianceStamped& orientation);
+    void HandleGpsPosition(const sensor_msgs::msg::NavSatFix& fix);
     void HandleGpsOrientation(
-        const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr&
-            orientation);
+        const geometry_msgs::msg::TwistWithCovarianceStamped& orientation);
 
     // GPS initialization is the second stage of localization initialization:
     // 1) NDT relocalizes from the user-provided rough MAP<-BODY seed;
@@ -111,16 +109,16 @@ class LocalizationSystem {
         const Eigen::Matrix3d& rotation_enu_gps);
     bool FinishGpsInitialization();
 
-    bool GnssToEnu(const sensor_msgs::msg::NavSatFix& fix,
-                   Eigen::Vector3d* position_enu,
-                   Eigen::Matrix3d* covariance_enu) const;
-    bool VelocityToMap(
+    void GnssToEnu(const sensor_msgs::msg::NavSatFix& fix,
+                   Eigen::Vector3d& position_enu,
+                   Eigen::Matrix3d& covariance_enu) const;
+    void VelocityToMap(
         const geometry_msgs::msg::TwistWithCovarianceStamped& velocity,
-        Eigen::Vector2d* velocity_map,
-        Eigen::Matrix2d* covariance_map) const;
+        Eigen::Vector2d& velocity_map,
+        Eigen::Matrix2d& covariance_map) const;
 
     void InitializeEkfFromNdt(const loc::LocalizationResult& ndt);
-    bool InitializeManualGuess(double stamp);
+    void InitializeManualGuess(double stamp);
     void PublishPredictionIfAdvanced(double stamp,
                                      const std::string& message);
     loc::LocalizationResult BuildEkfResult(double stamp,
@@ -129,7 +127,7 @@ class LocalizationSystem {
     void PublishResult(const loc::LocalizationResult& result);
     void AppendPath(const loc::LocalizationResult& result);
     void AppendDebugPath(
-        nav_msgs::msg::Path* path,
+        nav_msgs::msg::Path& path,
         const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr& publisher,
         double stamp, const Eigen::Vector2d& position, double yaw);
 

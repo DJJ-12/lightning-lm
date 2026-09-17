@@ -194,14 +194,7 @@ bool EKF::UpdateGpsPoseEnu(
     const Eigen::Vector3d& translation_enu_map,
     double gate_chi2,
     double* mahalanobis) {
-    if (!PredictTo(stamp) ||
-        !gps_position_enu.allFinite() ||
-        !antenna_position_body.allFinite() ||
-        !gps_covariance_enu.allFinite() ||
-        !rotation_enu_map.allFinite() ||
-        !translation_enu_map.allFinite()) {
-        return false;
-    }
+    if (!PredictTo(stamp)) return false;
 
     // NavSatFix measures antenna point A in ENU. antenna_position_body is
     // p_B_A: that same physical point expressed in body coordinates.
@@ -242,10 +235,7 @@ bool EKF::UpdateMapOrientation(
     const Eigen::Matrix3d& covariance_map_body,
     double gate_chi2,
     double* mahalanobis) {
-    if (!PredictTo(stamp) || !measured_rpy_map_body.allFinite() ||
-        !covariance_map_body.allFinite()) {
-        return false;
-    }
+    if (!PredictTo(stamp)) return false;
 
     // Both sides are MAP<-BODY Euler angles.  Keep each angular innovation on
     // the shortest branch across the +/-pi boundary.
@@ -270,10 +260,7 @@ bool EKF::UpdateMapVelocity(
     double stamp, const Eigen::Vector2d& velocity_map_xy,
     const Eigen::Matrix2d& covariance, double gate_chi2,
     double* mahalanobis) {
-    if (!PredictTo(stamp) || !velocity_map_xy.allFinite() ||
-        !covariance.allFinite()) {
-        return false;
-    }
+    if (!PredictTo(stamp)) return false;
 
     const Eigen::Vector2d residual =
         velocity_map_xy - state_.velocity_map.head<2>();
@@ -291,11 +278,7 @@ bool EKF::UpdateMapVelocity(
 bool EKF::UpdateNdtPose(double stamp, const SE3& pose_map_body,
                         const Matrix6d& covariance,
                         double gate_chi2, double* mahalanobis) {
-    if (!PredictTo(stamp) || !pose_map_body.translation().allFinite() ||
-        !pose_map_body.unit_quaternion().coeffs().allFinite() ||
-        !covariance.allFinite()) {
-        return false;
-    }
+    if (!PredictTo(stamp)) return false;
     // 把旋转矩阵 \(R\) 转成欧拉角
     const Eigen::Vector3d measured_rpy =
         RpyFromRotation(pose_map_body.rotationMatrix());
@@ -323,15 +306,9 @@ bool EKF::ApplyUpdate(const Eigen::VectorXd& residual,
                       const Eigen::MatrixXd& measurement_covariance,
                       double gate_chi2, double* mahalanobis,
                       bool allow_attitude_update) {
-    if (!initialized_ || residual.size() == 0 || !residual.allFinite() ||
-        measurement_jacobian.cols() != kStateDim ||
-        measurement_jacobian.rows() != residual.size() ||
-        measurement_covariance.rows() != residual.size() ||
-        measurement_covariance.cols() != residual.size() ||
-        !measurement_jacobian.allFinite() ||
-        !measurement_covariance.allFinite()) {
-        return false;
-    }
+    // Observation payloads are validated at the LocalizationSystem input
+    // boundary. This private function only handles failures produced by the
+    // actual EKF calculation.
     // R 观测噪声
     Eigen::MatrixXd noise =
         0.5 * (measurement_covariance + measurement_covariance.transpose());
@@ -356,8 +333,7 @@ bool EKF::ApplyUpdate(const Eigen::VectorXd& residual,
     }
     // 通过解S * y = r  来求解 y= S^-1 * r
     const Eigen::VectorXd solved_residual = decomposition.solve(residual);
-    if (decomposition.info() != Eigen::Success ||
-        !solved_residual.allFinite()) {
+    if (!solved_residual.allFinite()) {
         return false;
     }
    // r^T * y = r^T * S^-1 * r
@@ -372,9 +348,7 @@ bool EKF::ApplyUpdate(const Eigen::VectorXd& residual,
     // （S * y）^T  = (H * P-)^T= P- * H^T
     //y^T= P- * H^T * S^-1 = K
     Eigen::MatrixXd gain = decomposition.solve(right_hand_side).transpose();
-    if (decomposition.info() != Eigen::Success || !gain.allFinite()) {
-        return false;
-    }
+    if (!gain.allFinite()) return false;
     if (!allow_attitude_update) {
         // Map-frame velocity is not an attitude observation. Even if a pose
         // update created cross-covariance, a velocity-only measurement must
@@ -415,9 +389,6 @@ void EKF::SetVector(const StateVector& vector) {
     }
     state_.velocity_map = vector.segment<3>(kVelocityX);
     state_.angular_velocity = vector.segment<3>(kAngularVelocityX);
-    state_.velocity_map.z() = 0.0;
-    state_.angular_velocity.x() = 0.0;
-    state_.angular_velocity.y() = 0.0;
 }
 
 void EKF::StabilizeCovariance() {

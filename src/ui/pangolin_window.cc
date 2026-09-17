@@ -24,15 +24,8 @@ bool PangolinWindow::Init() {
     }
 
     auto impl = std::make_shared<PangolinWindowImpl>();
-    impl->cloud_global_need_update_.store(false);
-    impl->kf_result_need_update_.store(false);
-    impl->lidarloc_need_update_.store(false);
-    impl->current_scan_need_update_.store(false);
 
-    if (!impl->Init()) {
-        LOG(ERROR) << "[UI初始化] PangolinWindowImpl::Init 失败";
-        return false;
-    }
+    impl->Init();
 
     closed_.store(false);
     impl_ = impl;
@@ -137,14 +130,6 @@ void PangolinWindow::UpdatePointCloudDynamic(const std::map<int, CloudPtr>& clou
         impl->cloud_dynamic_map_.emplace(cp.first, c);
     }
 
-    for (auto iter = impl->cloud_dynamic_map_.begin(); iter != impl->cloud_dynamic_map_.end();) {
-        if (cloud.find(iter->first) == cloud.end()) {
-            iter = impl->cloud_dynamic_map_.erase(iter);
-        } else {
-            iter++;
-        }
-    }
-
     impl->cloud_dynamic_need_update_.store(true);
 }
 
@@ -164,7 +149,6 @@ void PangolinWindow::UpdateNavState(const NavState& state) {
 
 void PangolinWindow::UpdategpsPosition(
     const Eigen::Vector2d& position_map) {
-    if (!position_map.allFinite()) return;
     std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
     auto impl = impl_.lock();
     if (!impl) return;
@@ -176,7 +160,6 @@ void PangolinWindow::UpdategpsPosition(
 
 void PangolinWindow::UpdateNdtPosition(
     const Eigen::Vector2d& position_map) {
-    if (!position_map.allFinite()) return;
     std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
     auto impl = impl_.lock();
     if (!impl) return;

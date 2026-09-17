@@ -20,7 +20,7 @@ PangolinWindowImpl::~PangolinWindowImpl() {
                  "随后C++将自动销毁GlText、Plotter、UiCloud和OpenGLRenderState等成员";
 }
 
-bool PangolinWindowImpl::Init() {
+void PangolinWindowImpl::Init() {
     // create a window and bind its context to the main thread
     pangolin::CreateWindowAndBind(win_name_, win_width_, win_height_);
 
@@ -55,7 +55,6 @@ bool PangolinWindowImpl::Init() {
     log_confidence_.SetLabels(std::vector<std::string>{"localization confidence"});
     log_error_.SetLabels(std::vector<std::string>{"err v", "err h", "err eval v", "err eval h"});
 
-    return true;
 }
 
 void PangolinWindowImpl::Reset(const std::vector<Keyframe::Ptr> &keyframes) {
@@ -97,18 +96,9 @@ void PangolinWindowImpl::Reset(const std::vector<Keyframe::Ptr> &keyframes) {
     newest_backend_pose_ = keyframes.back()->GetOptPose();
 }
 
-bool PangolinWindowImpl::DeInit() {
-    LOG(INFO) << "[UI析构诊断][PangolinWindowImpl::DeInit][01] 开始"
-              << ", this=" << this
-              << ", thread_id=" << std::this_thread::get_id();
-    ReleaseBuffer();
-    LOG(INFO) << "[UI析构诊断][PangolinWindowImpl::DeInit][02] ReleaseBuffer 已返回";
-    return true;
-}
-
-bool PangolinWindowImpl::UpdateGlobalMap() {
+void PangolinWindowImpl::UpdateGlobalMap() {
     if (!cloud_global_need_update_.load()) {
-        return false;
+        return;
     }
 
     std::lock_guard<std::mutex> lock(mtx_map_cloud_);
@@ -132,12 +122,11 @@ bool PangolinWindowImpl::UpdateGlobalMap() {
     }
     cloud_global_need_update_.store(false);
 
-    return true;
 }
 
-bool PangolinWindowImpl::UpdateDynamicMap() {
+void PangolinWindowImpl::UpdateDynamicMap() {
     if (!cloud_dynamic_need_update_.load()) {
-        return false;
+        return;
     }
 
     std::lock_guard<std::mutex> lock(mtx_map_cloud_);
@@ -171,12 +160,11 @@ bool PangolinWindowImpl::UpdateDynamicMap() {
     }
 
     cloud_dynamic_need_update_.store(false);
-    return true;
 }
 
-bool PangolinWindowImpl::UpdateCurrentScan() {
+void PangolinWindowImpl::UpdateCurrentScan() {
     UL lock(mtx_current_scan_);
-    if (current_scan_ != nullptr && !current_scan_->empty() && current_scan_need_update_) {
+    if (!current_scan_->empty() && current_scan_need_update_) {
         if (current_scan_ui_) {
             current_scan_ui_->SetRenderColor(ui::UiCloud::UseColor::HEIGHT_COLOR);
             scans_.emplace_back(current_scan_ui_);
@@ -200,12 +188,11 @@ bool PangolinWindowImpl::UpdateCurrentScan() {
         scans_.pop_front();
     }
 
-    return true;
 }
 
-bool PangolinWindowImpl::UpdateState() {
+void PangolinWindowImpl::UpdateState() {
     if (!kf_result_need_update_.load()) {
-        return false;
+        return;
     }
 
     std::deque<NavState> states;
@@ -216,7 +203,7 @@ bool PangolinWindowImpl::UpdateState() {
         // arriving after this point will set the flag again and cannot be lost.
         kf_result_need_update_.store(false);
     }
-    if (states.empty()) return false;
+    if (states.empty()) return;
 
     for (const NavState& state : states) {
         pose_ = state.GetPose();
@@ -241,10 +228,9 @@ bool PangolinWindowImpl::UpdateState() {
        << "]";
     gltext_label_state_ = pangolin::default_font().Text(ss.str());
 
-    return true;
 }
 
-bool PangolinWindowImpl::UpdateObservationVisualization() {
+void PangolinWindowImpl::UpdateObservationVisualization() {
     std::deque<Vec3d> gps_positions;
     std::deque<Vec3d> ndt_positions;
     {
@@ -253,7 +239,7 @@ bool PangolinWindowImpl::UpdateObservationVisualization() {
         ndt_positions.swap(pending_ndt_positions_);
     }
     if (gps_positions.empty() && ndt_positions.empty()) {
-        return false;
+        return;
     }
 
     for (const Vec3d& position : gps_positions) {
@@ -264,7 +250,6 @@ bool PangolinWindowImpl::UpdateObservationVisualization() {
         traj_ndt_observation_->AddPt(
             SE3(Eigen::Quaterniond::Identity(), position));
     }
-    return true;
 }
 
 void PangolinWindowImpl::DrawAll() {
@@ -451,7 +436,6 @@ void PangolinWindowImpl::Render() {
     // display layout
     CreateDisplayLayout();
 
-    exit_flag_.store(false);
     while (!pangolin::ShouldQuit() && !exit_flag_) {
         // Clear entire screen
         glClearColor(20.0 / 255.0, 20.0 / 255.0, 20.0 / 255.0, 1.0);
@@ -511,7 +495,5 @@ void PangolinWindowImpl::AllocateBuffer() {
     gltext_label_global_ = font.Text(global_text);
     gltext_label_state_ = font.Text("ba: [0.0000, 0.0000, 0.0000]");
 }
-
-void PangolinWindowImpl::ReleaseBuffer() {}
 
 }  // namespace lightning::ui

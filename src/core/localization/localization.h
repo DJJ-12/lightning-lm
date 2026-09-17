@@ -138,7 +138,6 @@ class Localization {
     std::uint64_t diagnostic_empty_after_convert_ = 0;
     std::uint64_t diagnostic_waiting_initial_pose_ = 0;
     std::uint64_t diagnostic_initialized_frames_ = 0;
-    std::uint64_t diagnostic_initializing_frames_ = 0;
     std::uint64_t diagnostic_empty_after_voxel_ = 0;
     std::uint64_t diagnostic_state_not_ready_ = 0;
     std::uint64_t diagnostic_ndt_frames_ = 0;

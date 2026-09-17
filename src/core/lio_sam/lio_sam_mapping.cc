@@ -217,20 +217,17 @@ bool LioSamMapping::Run(
             ? std::string("lidar")
             : cloud_info->frame_id;
     scan_undistort_ = cloud_info->cloud_deskewed;
-    if (scan_undistort_) {
-        scan_undistort_->header.stamp = static_cast<std::uint64_t>(std::llround(state_.timestamp_ * 1e9));
-        scan_undistort_->header.frame_id = current_frame_id_;
-        scan_undistort_->height = 1;
-        scan_undistort_->width = scan_undistort_->size();
-        scan_undistort_->is_dense = true;
-    }
+    scan_undistort_->header.stamp =
+        static_cast<std::uint64_t>(std::llround(state_.timestamp_ * 1e9));
+    scan_undistort_->header.frame_id = current_frame_id_;
+    scan_undistort_->height = 1;
+    scan_undistort_->width = scan_undistort_->size();
+    scan_undistort_->is_dense = true;
     recent_cloud_ = scan_undistort_;
 
     if (ui_) {
         ui_->UpdateNavState(state_);
-        if (scan_undistort_) {
-            ui_->UpdateScan(scan_undistort_, state_.GetPose());
-        }
+        ui_->UpdateScan(scan_undistort_, state_.GetPose());
     }
 
     MakeLightningKeyframeIfNeeded();
@@ -238,7 +235,7 @@ bool LioSamMapping::Run(
 }
 
 bool LioSamMapping::MakeLightningKeyframeIfNeeded() {
-    if (!map_optimization_ || !map_optimization_->CreatedNewKeyframe() ||
+    if (!map_optimization_->CreatedNewKeyframe() ||
         map_optimization_->KeyPoseSize() == 0 ||
         map_optimization_->KeyPoseSize() <= map_keyframe_count_) {
         return false;

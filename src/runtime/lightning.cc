@@ -140,10 +140,6 @@ bool Lightning::EnsureLocalizationSystemLocked() {
 }
 
 bool Lightning::SetOfflineLocalizationOriginGuessLocked() {
-    if (mode_ != Mode::OFFLINE_LOCALIZATION || !localization_system_) {
-        return false;
-    }
-
     // The offline localization bag is the same bag that created the map, so
     // its first LiDAR frame is MAP<-BODY = identity by construction.  This is
     // deliberately an offline-only default; online localization still waits
@@ -409,7 +405,7 @@ void Lightning::StartOnlineWorkerLocked() {
     online_worker_ = std::thread([this, mapping]() {
         OnlineWorkerLoop(mapping);
     });
-    if (topic_input_) topic_input_->SetEnabled(true, !mapping);
+    topic_input_->SetEnabled(true, !mapping);
     LOG(INFO) << "[在线输入] 已启动，mode="
               << (mapping ? "mapping" : "localization")
               << ", LiDAR=latest-only"
@@ -550,10 +546,6 @@ void Lightning::OnlineWorkerLoop(bool mapping) {
 }
 
 void Lightning::ProcessMappingInput(const InputMessage& input) {
-    if (!mapping_system_) {
-        return;
-    }
-
     if (input.type == InputType::IMU) {
         mapping_system_->ProcessIMU(input.imu);
         return;
@@ -568,10 +560,6 @@ void Lightning::ProcessMappingInput(const InputMessage& input) {
 }
 
 loc::LocalizationFrameOutcome Lightning::ProcessLocalizationInput(const InputMessage& input) {
-    if (!localization_system_) {
-        return loc::LocalizationFrameOutcome::SYSTEM_NOT_READY;
-    }
-
     loc::LocalizationInputDiagnostic diagnostic;
     diagnostic.pipeline_sequence = input.lidar_sequence;
     diagnostic.topic_sequence = input.topic_lidar_sequence;
@@ -666,11 +654,12 @@ ServiceResult Lightning::StartMapping(const std::string& save_path) {
               << ", MappingSystem=" << mapping_system_.get();
     modules::MappingSystemOptions mapping_options;
     mapping_options.online_input = true;
-    if (!mapping_system_->Init(yaml_path_, mapping_options) || !mapping_system_->Start()) {
+    if (!mapping_system_->Init(yaml_path_, mapping_options)) {
         ClearMappingSystemLocked();
         task_.SetFinished(false, "failed to initialize MappingSystem");
         return {false, "failed to initialize MappingSystem"};
     }
+    mapping_system_->Start();
 
     StartOnlineWorkerLocked();
     task_.Reset(TaskState::RUNNING, "online mapping running");
@@ -729,11 +718,12 @@ ServiceResult Lightning::LoadBag(const std::string& bag_path) {
               << ", MappingSystem=" << mapping_system_.get();
     modules::MappingSystemOptions mapping_options;
     mapping_options.online_input = false;
-    if (!mapping_system_->Init(yaml_path_, mapping_options) || !mapping_system_->Start()) {
+    if (!mapping_system_->Init(yaml_path_, mapping_options)) {
         ClearMappingSystemLocked();
         task_.SetFinished(false, "failed to initialize MappingSystem");
         return {false, "failed to initialize MappingSystem"};
     }
+    mapping_system_->Start();
 
     task_.Reset(TaskState::RUNNING, "offline mapping running");
     StartBagMappingTaskLocked(bag_path);
@@ -787,9 +777,6 @@ void Lightning::StartBagMappingTaskLocked(const std::string& bag_path) {
 }
 
 void Lightning::PublishMappingOutputsLocked(bool force) {
-    if (!mapping_system_) {
-        return;
-    }
     const bool publish_map =
         mapping_map_pub_ && (force || mapping_map_pub_->get_subscription_count() > 0);
     const bool publish_path =
@@ -798,7 +785,7 @@ void Lightning::PublishMappingOutputsLocked(bool force) {
         return;
     }
 
-    const auto stamp = node_ ? node_->now() : rclcpp::Clock().now();
+    const auto stamp = node_->now();
     if (publish_map) {
         CloudPtr map_base = mapping_system_->BuildCurrentMapInBaseFrame();
         if (map_base && !map_base->empty()) {
@@ -825,9 +812,6 @@ void Lightning::PublishMappingOutputsLocked(bool force) {
 }
 
 ServiceResult Lightning::SaveMappingLocked(const std::string& save_path) {
-    if (!mapping_system_) {
-        return {false, "MappingSystem is not running"};
-    }
     task_.SetState(TaskState::SAVING, "saving map");
     const auto result = mapping_system_->GetResult();
     const bool ok = save_map_.Save(save_path, result, save_map_options_);
@@ -894,7 +878,7 @@ ServiceResult Lightning::SetMapPath(const std::string& map_path) {
         return {true, "localization map loaded: " + map_path};
     }
 
-    if (mode_ == Mode::OFFLINE_LOCALIZATION && !offline_bag_path_.empty()) {
+    if (!offline_bag_path_.empty()) {
         if (!SetOfflineLocalizationOriginGuessLocked()) {
             task_.Reset(
                 TaskState::READY,
@@ -1000,7 +984,7 @@ void Lightning::StartBagLocalizationTaskLocked(const std::string& bag_path) {
             },
             [this]() { return task_.CancelRequested(); });
         bool task_ok = bag_ok;
-        if (bag_ok && localization_system_) {
+        if (bag_ok) {
             const loc::LocalizationResult final_result =
                 localization_system_->GetLatestResult();
             if (final_result.valid_) {

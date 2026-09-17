@@ -11,7 +11,6 @@ namespace lightning::runtime {
 namespace {
 
 std::string ReadTopic(const YAML::Node& common, const char* name) {
-    if (!common) return std::string();
     const YAML::Node value = common[name];
     return value && value.IsScalar()
         ? value.as<std::string>()

@@ -36,12 +36,9 @@ class PangolinWindowImpl {
     PangolinWindowImpl &operator=(PangolinWindowImpl &&) = delete;
 
     /// 初始化，创建可用于渲染的点云和轨迹
-    bool Init();
+    void Init();
 
     void Reset(const std::vector<Keyframe::Ptr> &keyframes);
-
-    /// 注销
-    bool DeInit();
 
     /// 渲染所有信息
     void Render();
@@ -62,13 +59,12 @@ class PangolinWindowImpl {
 
     std::mutex mtx_reset_;
 
-    std::atomic<bool> exit_flag_;
+    std::atomic<bool> exit_flag_{false};
 
-    std::atomic<bool> cloud_global_need_update_;   // 全局点云是否需要更新
-    std::atomic<bool> cloud_dynamic_need_update_;  // 动态点云是否需要更新
-    std::atomic<bool> kf_result_need_update_;      // 卡尔曼滤波结果
-    std::atomic<bool> current_scan_need_update_;   // 更新当前扫描
-    std::atomic<bool> lidarloc_need_update_;       // 雷达位置？
+    std::atomic<bool> cloud_global_need_update_{false};   // 全局点云是否需要更新
+    std::atomic<bool> cloud_dynamic_need_update_{false};  // 动态点云是否需要更新
+    std::atomic<bool> kf_result_need_update_{false};      // 卡尔曼滤波结果
+    std::atomic<bool> current_scan_need_update_{false};   // 更新当前扫描
 
     pcl::PointCloud<PointType>::Ptr current_scan_ = nullptr;  // 当前scan
     SE3 newest_frontend_pose_;                                // 最新pose
@@ -100,7 +96,6 @@ class PangolinWindowImpl {
    private:
     /// 创建OpenGL Buffers
     void AllocateBuffer();
-    void ReleaseBuffer();
 
     void CreateDisplayLayout();
 
@@ -108,11 +103,11 @@ class PangolinWindowImpl {
 
     /// 渲染点云，调用各种Update函数
     void RenderClouds();
-    bool UpdateGlobalMap();
-    bool UpdateDynamicMap();
-    bool UpdateState();
-    bool UpdateObservationVisualization();
-    bool UpdateCurrentScan();
+    void UpdateGlobalMap();
+    void UpdateDynamicMap();
+    void UpdateState();
+    void UpdateObservationVisualization();
+    void UpdateCurrentScan();
 
     void RenderLabels();
 

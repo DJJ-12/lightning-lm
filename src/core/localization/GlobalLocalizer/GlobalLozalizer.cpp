@@ -178,28 +178,6 @@ bool Localizer::GetInitPose(
 {
     quality = LocalizationQuality();
 
-    if(!ndt_ptr_ || !ndt_rough_ptr_)
-    {
-        ndt_ptr_ = std::make_shared<NormalDistributionsTransform>();
-        pclomp::NdtParams ndt{};
-        ndt.num_threads = 4;
-        ndt.step_size = 0.1;
-        ndt.trans_epsilon = 0.01;
-        ndt.max_iterations = 30;
-        ndt.resolution = 2.0;
-        ndt_ptr_->setParams(ndt);
-
-        ndt_rough_ptr_ = std::make_shared<NormalDistributionsTransform>();
-        pclomp::NdtParams ndt_rough{};
-        ndt_rough.num_threads = 4;
-        ndt_rough.step_size = 0.1;
-        ndt_rough.trans_epsilon = 0.01;
-        ndt_rough.max_iterations = 30;
-        ndt_rough.resolution = 5.0;
-        ndt_rough_ptr_->setParams(ndt_rough);
-        LOG(INFO) << "Localizer initialized";
-    }
-
     MapManager::DiffMapReqInfo req;
     req.center_x = init_guess(0,3);
     req.center_y = init_guess(1,3);
@@ -294,7 +272,7 @@ bool Localizer::GetInitPose(
 
 bool Localizer::EstimatePoseCovariance(const Eigen::Matrix<double, 6, 6>& hessian, Eigen::Matrix<double, 6, 6>* covariance) const
 {
-    if (!covariance || !hessian.allFinite()) return false;
+    if (!hessian.allFinite()) return false;
     Eigen::Matrix<double, 6, 6> information = -0.5 * (hessian + hessian.transpose());
     information *= std::max(1e-12, covariance_options_.information_scale);
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> solver(information);

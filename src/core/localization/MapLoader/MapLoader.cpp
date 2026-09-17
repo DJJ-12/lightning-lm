@@ -44,10 +44,7 @@ namespace MapManager
             {
                 for (size_t i = 0; i < glob_result.gl_pathc; ++i)
                 {
-                    if (is_pcd_file(glob_result.gl_pathv[i]))
-                    {
-                        pcd_paths.push_back(glob_result.gl_pathv[i]);
-                    }
+                    pcd_paths.push_back(glob_result.gl_pathv[i]);
                 }
             }
             globfree(&glob_result);
@@ -57,10 +54,7 @@ namespace MapManager
             {
                 for (size_t i = 0; i < glob_result.gl_pathc; ++i)
                 {
-                    if (is_pcd_file(glob_result.gl_pathv[i]))
-                    {
-                        pcd_paths.push_back(glob_result.gl_pathv[i]);
-                    }
+                    pcd_paths.push_back(glob_result.gl_pathv[i]);
                 }
             }
             globfree(&glob_result);

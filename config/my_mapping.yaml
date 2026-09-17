@@ -4,7 +4,7 @@ common:
 
   lidar_topic: "/lidar_points_front"
   livox_lidar_topic: ""
-  imu_topic: "/imu"
+  imu_topic: "/imu_data"
 
   base_link_frame: "base_link"
 

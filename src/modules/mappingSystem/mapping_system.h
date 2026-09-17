@@ -53,7 +53,7 @@ class MappingSystem {
     ~MappingSystem();
 
     bool Init(const std::string& yaml_path, const MappingSystemOptions& options);
-    bool Start();
+    void Start();
     void Stop();
     void Reset();
 
@@ -74,7 +74,7 @@ class MappingSystem {
     bool cachePointCloud(const sensor_msgs::msg::PointCloud2::SharedPtr& laserCloudMsg);
     bool cachePointCloud(const livox_ros_driver2::msg::CustomMsg::SharedPtr& laserCloudMsg);
     bool deskewInfo();
-    bool imuConverter(const sensor_msgs::msg::Imu& imu_in, sensor_msgs::msg::Imu& imu_out) const;
+    void imuConverter(const sensor_msgs::msg::Imu& imu_in, sensor_msgs::msg::Imu& imu_out) const;
     void imuDeskewInfo();
     void findRotation(double pointTime, float* rotXCur, float* rotYCur, float* rotZCur);
     void findPosition(double relTime, float* posXCur, float* posYCur, float* posZCur);
