@@ -9,7 +9,8 @@ common:
 
   gps_topic: "/fdilink/gnss_fix"
   # angular.x/y are roll/pitch; angular.z is vendor course. All are radians.
-  # Course is north-zero and clockwise-positive; Lightning converts it to ENU yaw.
+  # Course is the clockwise angle from ENU north to GPS-device +Y.
+  # Lightning converts it to standard ENU yaw with yaw_enu = wrap(-course).
   orientation_topic: "/ins/orientation"
   #gps_topic: "/fdilink/gnss_fix"
   #orientation_topic: "/ins/orientation"
@@ -115,7 +116,7 @@ localization:
     gps_output_lever_arm_gps: [0.0, 0.0, 0.0]
     # T_body_gps: [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg].
     # It maps GPS-device coordinates into the body frame.
-    gps_extrinsic_body_gps: [0.0, 0.0, 0.0, 0.0, 0.0, 20.085828760]
+    gps_extrinsic_body_gps: [0.0, 0.0, 0.0, 0.0, 0.0, -90.0]
     gps_initialization_sync_tolerance_sec: 0.05
 
     gps_initialization_sample_count: 10

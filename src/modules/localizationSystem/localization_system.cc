@@ -37,13 +37,14 @@ Eigen::Vector3d OrientationMessageToEnuRpy(
     const geometry_msgs::msg::TwistWithCovarianceStamped& orientation) {
     // The temporary DataTransfer bag stores the vendor convention unchanged:
     // angular.x/y are roll/pitch and angular.z is course, all in radians.
-    // Course is zero at north and increases clockwise.  Right-handed ENU yaw
-    // is zero at east and increases counter-clockwise.
+    // Course is the clockwise angle from ENU north to the GPS-device +Y axis.
+    // When course is zero, GPS +X points east and GPS +Y points north, so the
+    // GPS frame is aligned with ENU and its standard right-handed yaw is zero.
+    // Consequently ENU yaw is the negated vendor course.
     return Eigen::Vector3d(
         orientation.twist.twist.angular.x,
         orientation.twist.twist.angular.y,
-        loc::EKF::WrapAngle(
-            0.5 * kPi - orientation.twist.twist.angular.z));
+        loc::EKF::WrapAngle(-orientation.twist.twist.angular.z));
 }
 
 loc::EKF::Covariance InitialEkfCovariance(
@@ -708,7 +709,7 @@ void LocalizationSystem::HandleGpsInitializationPair(
     Eigen::Matrix3d gps_covariance_enu;
     GnssToEnu(fix, gps_position_enu, gps_covariance_enu);
 
-    // Convert the vendor north-zero, clockwise-positive course to standard
+    // Convert the clockwise angle from ENU north to GPS +Y into standard
     // right-handed ENU yaw before constructing R_ENU_GPS. This synchronized
     // copy initializes ENU<-MAP; later messages use the exact same conversion
     // before independently updating the EKF.
@@ -803,7 +804,7 @@ void LocalizationSystem::HandleGpsOrientation(
         }
     }
 
-    // yaw_enu = pi/2 - course has derivative -1 with respect to course.
+    // yaw_enu = -course has derivative -1 with respect to course.
     // Transform the complete covariance too, so any future roll/course or
     // pitch/course cross-covariance keeps the correct sign. The current bag
     // converter writes only the diagonal, for which the values are unchanged.
