@@ -94,15 +94,10 @@ class LocalizationSystem {
     void HandleNdtResult(const loc::LocalizationResult& result);
     void UpdateEkfWithNdt(const loc::LocalizationResult& result);
 
-    struct TimedPosition {
-        double stamp = 0.0;
-        Eigen::Vector3d position = Eigen::Vector3d::Zero();
-    };
-
-    void AddGpsCalibrationSample(double stamp,
-                                 const Eigen::Vector3d& position_enu);
-    void AddNdtCalibrationSample(const loc::LocalizationResult& result);
-    bool TryFinishMapEnuCalibration();
+    void TryHandleGpsInitialization();
+    bool SaveMapEnuCalibrationToConfig(
+        const Eigen::Vector3d& translation_map_enu,
+        const Eigen::Vector3d& rotation_map_enu_rpy_deg) const;
     void ResetMapEnuCalibration();
     void HandleGpsPosition(double stamp,
                            const Eigen::Vector3d& position_enu,
@@ -189,18 +184,19 @@ class LocalizationSystem {
     double ndt_orientation_std_ =
         1.0 * 3.14159265358979323846 / 180.0;
 
-    // Calibration estimates p_map = Rz(yaw_map_enu) * p_enu + t_map_enu from
-    // timestamp-matched GPS/NDT positions sampled over the first 50 m. MAP and
-    // ENU are gravity-aligned, so roll_map_enu and pitch_map_enu stay zero.
-    math::JsbsimWgs84Enu enu_projector_;
-    bool map_enu_calibrated_ = false;
-    Eigen::Matrix3d rotation_map_enu_ = Eigen::Matrix3d::Identity();
-    Eigen::Vector3d translation_map_enu_ = Eigen::Vector3d::Zero();
-    std::mutex map_enu_calibration_mutex_;
-    std::vector<TimedPosition> gps_calibration_samples_;
-    std::vector<TimedPosition> ndt_calibration_samples_;
-    double calibration_travel_distance_m_ = 0.0;
-    bool calibration_distance_complete_ = false;
+    // Calibration estimates p_map = R_map_enu * p_enu + t_map_enu from the
+    // original GPS/NDT point-pair sampling procedure.
+    std::mutex gps_init_mutex_;
+    math::JsbsimWgs84Enu WGS84_Model;
+    bool start_EKF_localization_ = false;
+    Eigen::Matrix3d R_MAP_ENU = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d t_MAP_ENU = Eigen::Vector3d::Zero();
+    std::vector<Eigen::Vector3d> fix_postions_{Eigen::Vector3d::Zero()};
+    std::vector<Eigen::Vector3d> fix_positions_{Eigen::Vector3d::Zero()};
+    std::vector<double> fix_timestamps_{0.0};
+    std::vector<Eigen::Vector3d> ndt_positions_;
+    std::vector<double> ndt_timestamps_;
+    int count = 0;
 
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr loc_odom_pub_;

@@ -5,7 +5,10 @@
 #include <cctype>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <map>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -14,7 +17,6 @@
 #include <glog/logging.h>
 #include <pcl/io/pcd_io.h>
 #include <rclcpp/node.hpp>
-#include <sensor_msgs/msg/nav_sat_status.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
 #include "common/point_def.h"
@@ -27,10 +29,6 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kDegToRad = kPi / 180.0;
-constexpr double kCalibrationSampleSpacingM = 1.0;
-constexpr double kCalibrationTravelDistanceM = 50.0;
-constexpr double kCalibrationSyncToleranceSec = 0.05;
-constexpr std::size_t kMinimumCalibrationPairs = 10;
 
 void AppendXYZCloud(const pcl::PointCloud<pcl::PointXYZ>& source,
                     PointCloudType& destination) {
@@ -121,6 +119,17 @@ bool IsUsableCovariance(const loc::EKF::Matrix6d& covariance) {
     Eigen::LDLT<loc::EKF::Matrix6d> decomposition(symmetric);
     return decomposition.info() == Eigen::Success &&
            decomposition.isPositive();
+}
+
+std::size_t YamlIndent(const std::string& line) {
+    return line.find_first_not_of(' ');
+}
+
+std::string TrimYamlLine(const std::string& line) {
+    const std::size_t begin = line.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) return std::string();
+    const std::size_t end = line.find_last_not_of(" \t\r\n");
+    return line.substr(begin, end - begin + 1);
 }
 
 }  // namespace
@@ -312,6 +321,27 @@ bool LocalizationSystem::Init(const std::string& yaml_path,
         ndt_localization_->SetResultCallback(
             [this](const loc::LocalizationResult& result) {
                 HandleNdtResult(result);
+                std::lock_guard<std::mutex> lock(gps_init_mutex_);
+                if (!UsesGpsPosition() || start_EKF_localization_) return;
+
+                const Eigen::Vector3d pos = result.pose_.translation();
+
+                if (ndt_positions_.empty()) {
+                    ndt_positions_.push_back(pos);
+                    ndt_timestamps_.push_back(result.timestamp_);
+                } else {
+                    const double dist_to_last = (pos - ndt_positions_.back()).norm();
+                    const double dist_to_first = (pos - ndt_positions_.front()).norm();
+
+                    if (dist_to_last > 1.0 && dist_to_first < 50.0) {
+                        ndt_positions_.push_back(pos);
+                        ndt_timestamps_.push_back(result.timestamp_);
+                        return;
+                    }
+                    if (dist_to_first >= 50.0) {
+                        TryHandleGpsInitialization();
+                    }
+                }
             });
     }
     if (node) SetupPublishers(node);
@@ -322,12 +352,6 @@ bool LocalizationSystem::Init(const std::string& yaml_path,
               << UsesGpsOrientation()
               << ", gps_rotation_body_gps_rpy_deg="
               << (gps_rotation_body_gps_rpy_ / kDegToRad).transpose()
-              << ", map_enu_sample_spacing_m="
-              << kCalibrationSampleSpacingM
-              << ", map_enu_travel_distance_m="
-              << kCalibrationTravelDistanceM
-              << ", map_enu_sync_tolerance_sec="
-              << kCalibrationSyncToleranceSec
               << ", gps_velocity=" << UsesGpsVelocity()
               << ", wheel_input_reserved=" << UsesWheelOdometry()
               << ", imu_input_reserved=" << (!imu_topic_.empty())
@@ -485,33 +509,51 @@ void LocalizationSystem::ProcessGps(
     const sensor_msgs::msg::NavSatFix::SharedPtr& fix) {
     if (!UsesGpsPosition() || !fix) return;
     const double stamp = rclcpp::Time(fix->header.stamp).seconds();
-    if (fix->status.status == sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX ||
-        !std::isfinite(stamp) || !std::isfinite(fix->latitude) ||
+    if (!std::isfinite(stamp) || !std::isfinite(fix->latitude) ||
         !std::isfinite(fix->longitude) || !std::isfinite(fix->altitude)) {
         return;
     }
 
-    if (!enu_projector_.Initialized()) {
-        if (!enu_projector_.SetOriginDegrees(
-                fix->latitude, fix->longitude, fix->altitude)) {
+    std::lock_guard<std::mutex> lock(gps_init_mutex_);
+
+    if (!start_EKF_localization_) {
+        if (!WGS84_Model.Initialized()) {
+            if (count < 10) {
+                fix_postions_[0] += Eigen::Vector3d(
+                    fix->latitude, fix->longitude, fix->altitude);
+                fix_timestamps_[0] = stamp;
+                ++count;
+                return;
+            }
+
+            fix_postions_[0] /= count;
+            if (!WGS84_Model.SetOriginDegrees(
+                    fix_postions_[0].x(), fix_postions_[0].y(), fix_postions_[0].z())) {
+                return;
+            }
+
+            // 这样做的目的是0点一定要稳：平均前10帧，避免噪声导致零点不稳。
+            fix_positions_[0] = WGS84_Model.ForwardDegrees(
+                fix_postions_[0].x(), fix_postions_[0].y(),
+                fix_postions_[0].z());
+            LOG(INFO) << "[MAP_ENU_CALIBRATION] ENU origin set"
+                      << ", latitude=" << fix_postions_[0].x()
+                      << ", longitude=" << fix_postions_[0].y()
+                      << ", altitude=" << fix_postions_[0].z();
+        }
+
+        // NDT负责每隔约1m采样；GPS连续保存，标定时再按时间找最近点。
+        Eigen::Vector3d position_enu = WGS84_Model.ForwardDegrees(fix->latitude, fix->longitude, fix->altitude);
+        if(stamp-ndt_timestamps_.back() < 0.05){
+            fix_positions_.push_back(position_enu);
+            fix_timestamps_.push_back(stamp);
             return;
         }
-        LOG(INFO) << "[MAP_ENU_CALIBRATION] ENU origin set"
-                  << ", latitude=" << fix->latitude
-                  << ", longitude=" << fix->longitude
-                  << ", altitude=" << fix->altitude;
     }
 
     Eigen::Vector3d position_enu;
     Eigen::Matrix3d covariance_enu;
     GnssToEnu(*fix, position_enu, covariance_enu);
-
-    if (!map_enu_calibrated_) {
-        AddGpsCalibrationSample(stamp, position_enu);
-        TryFinishMapEnuCalibration();
-        if (!map_enu_calibrated_) return;
-    }
-
     HandleGpsPosition(stamp, position_enu, covariance_enu);
 }
 
@@ -525,176 +567,212 @@ void LocalizationSystem::ProcessGpsOrientation(
         return;
     }
 
-    if (!map_enu_calibrated_) return;
+    if (!start_EKF_localization_) return;
 
     HandleGpsOrientation(*orientation);
 }
 
-void LocalizationSystem::AddGpsCalibrationSample(
-    double stamp, const Eigen::Vector3d& position_enu) {
-    std::lock_guard<std::mutex> lock(map_enu_calibration_mutex_);
-    gps_calibration_samples_.push_back({stamp, position_enu});
+void LocalizationSystem::TryHandleGpsInitialization() {
+    if (fix_positions_.size() != fix_timestamps_.size()) return;
+    if (ndt_positions_.size() != ndt_timestamps_.size()) return;
+    if (ndt_positions_.empty() || fix_positions_.size() <= 1) return;
+
+    std::vector<Eigen::Vector3d> GPS_positions(ndt_positions_.size());
+
+    int j = 0;
+    for (int i = 0; i < static_cast<int>(ndt_positions_.size()); ++i) {
+        const double ndt_stamp = ndt_timestamps_[i];
+
+        double min_diff = std::abs(ndt_stamp - fix_timestamps_[j]);
+        int best_j = j;
+
+        while (j + 1 < static_cast<int>(fix_timestamps_.size())) {
+            const double next_diff =
+                std::abs(ndt_stamp - fix_timestamps_[j + 1]);
+            if (next_diff < min_diff) {
+                min_diff = next_diff;
+                best_j = j + 1;
+                ++j;
+            } else {
+                break;
+            }
+        }
+
+        GPS_positions[i] = fix_positions_[best_j];
+        j = best_j;
+    }
+    int N = GPS_positions.size();
+    if (GPS_positions.size() != ndt_positions_.size() || N <= 10) return;
+    Eigen::Matrix3Xd gps_mat(3, N);
+    Eigen::Matrix3Xd ndt_mat(3, N);
+    for (int i = 0; i < N; ++i) {
+        gps_mat.col(i) = GPS_positions[i];
+        ndt_mat.col(i) = ndt_positions_[i];
+    }
+    //计算 ENU-MAP
+    Eigen::Matrix4d T_map_enu = Eigen::umeyama(gps_mat, ndt_mat, false);
+    R_MAP_ENU = T_map_enu.block<3, 3>(0, 0);
+    t_MAP_ENU = T_map_enu.block<3, 1>(0, 3);
+    start_EKF_localization_ = true;
+
+    const Eigen::Vector3d rotation_map_enu_rpy_deg =
+        loc::EKF::RpyFromRotation(R_MAP_ENU) / kDegToRad;
+    const bool config_saved = SaveMapEnuCalibrationToConfig(
+        t_MAP_ENU, rotation_map_enu_rpy_deg);
+    LOG(INFO) << "[MAP_ENU_CALIBRATION] completed"
+              << ", matched_pairs=" << N
+              << ", rotation_map_enu_rpy_deg="
+              << rotation_map_enu_rpy_deg.transpose()
+              << ", translation_map_enu="
+              << t_MAP_ENU.transpose()
+              << ", config_saved=" << config_saved
+              << ", config_path=" << yaml_path_;
 }
 
-void LocalizationSystem::AddNdtCalibrationSample(
-    const loc::LocalizationResult& result) {
-    if (!UsesGpsPosition() || !result.reliable_) return;
-
-    bool distance_complete = false;
-    std::size_t sample_count = 0;
-    double travel_distance = 0.0;
-    {
-        std::lock_guard<std::mutex> lock(map_enu_calibration_mutex_);
-        if (map_enu_calibrated_ || calibration_distance_complete_) return;
-
-        const TimedPosition sample{
-            result.timestamp_, result.pose_.translation()};
-        if (ndt_calibration_samples_.empty()) {
-            ndt_calibration_samples_.push_back(sample);
-            return;
-        }
-
-        const double distance =
-            (sample.position - ndt_calibration_samples_.back().position).norm();
-        if (distance < kCalibrationSampleSpacingM) return;
-
-        calibration_travel_distance_m_ += distance;
-        ndt_calibration_samples_.push_back(sample);
-        calibration_distance_complete_ =
-            calibration_travel_distance_m_ >= kCalibrationTravelDistanceM;
-        distance_complete = calibration_distance_complete_;
-        sample_count = ndt_calibration_samples_.size();
-        travel_distance = calibration_travel_distance_m_;
-    }
-
-    if (distance_complete) {
-        LOG(INFO) << "[MAP_ENU_CALIBRATION] NDT sampling complete"
-                  << ", samples=" << sample_count
-                  << ", travel_distance_m=" << travel_distance;
-        TryFinishMapEnuCalibration();
-    }
-}
-
-bool LocalizationSystem::TryFinishMapEnuCalibration() {
-    std::vector<TimedPosition> gps_samples;
-    std::vector<TimedPosition> ndt_samples;
-    {
-        std::lock_guard<std::mutex> lock(map_enu_calibration_mutex_);
-        if (map_enu_calibrated_) return true;
-        if (!calibration_distance_complete_) return false;
-        gps_samples = gps_calibration_samples_;
-        ndt_samples = ndt_calibration_samples_;
-    }
-
-    std::vector<Eigen::Vector3d> matched_gps_positions;
-    std::vector<Eigen::Vector3d> matched_ndt_positions;
-    matched_gps_positions.reserve(ndt_samples.size());
-    matched_ndt_positions.reserve(ndt_samples.size());
-
-    if (gps_samples.empty()) return false;
-    std::size_t gps_index = 0;
-    for (const TimedPosition& ndt_sample : ndt_samples) {
-        while (gps_index + 1 < gps_samples.size() &&
-               std::abs(gps_samples[gps_index + 1].stamp - ndt_sample.stamp) <
-                   std::abs(gps_samples[gps_index].stamp - ndt_sample.stamp)) {
-            ++gps_index;
-        }
-
-        const TimedPosition& gps_sample = gps_samples[gps_index];
-        if (std::abs(gps_sample.stamp - ndt_sample.stamp) <=
-            kCalibrationSyncToleranceSec) {
-            matched_gps_positions.push_back(gps_sample.position);
-            matched_ndt_positions.push_back(ndt_sample.position);
-        }
-    }
-
-    if (matched_gps_positions.size() < kMinimumCalibrationPairs) {
-        LOG_EVERY_N(WARNING, 20)
-            << "[MAP_ENU_CALIBRATION] waiting for matched pairs"
-            << ", matched=" << matched_gps_positions.size()
-            << ", required=" << kMinimumCalibrationPairs
-            << ", gps_samples=" << gps_samples.size()
-            << ", ndt_samples=" << ndt_samples.size();
+bool LocalizationSystem::SaveMapEnuCalibrationToConfig(
+    const Eigen::Vector3d& translation_map_enu,
+    const Eigen::Vector3d& rotation_map_enu_rpy_deg) const {
+    std::ifstream input(yaml_path_);
+    if (!input.is_open()) {
+        LOG(ERROR) << "[MAP_ENU_CALIBRATION] cannot open config for reading: "
+                   << yaml_path_;
         return false;
     }
 
-    const Eigen::Index pair_count =
-        static_cast<Eigen::Index>(matched_gps_positions.size());
-    Eigen::Matrix3Xd gps_matrix(3, pair_count);
-    Eigen::Matrix3Xd ndt_matrix(3, pair_count);
-    for (Eigen::Index index = 0; index < pair_count; ++index) {
-        gps_matrix.col(index) = matched_gps_positions[index];
-        ndt_matrix.col(index) = matched_ndt_positions[index];
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(input, line)) lines.push_back(line);
+
+    const std::size_t not_found = std::string::npos;
+    std::size_t localization_begin = not_found;
+    std::size_t localization_end = lines.size();
+    for (std::size_t index = 0; index < lines.size(); ++index) {
+        if (YamlIndent(lines[index]) == 0 &&
+            TrimYamlLine(lines[index]) == "localization:") {
+            localization_begin = index;
+            break;
+        }
+    }
+    if (localization_begin == not_found) {
+        LOG(ERROR) << "[MAP_ENU_CALIBRATION] config has no localization "
+                      "section: " << yaml_path_;
+        return false;
     }
 
-    // MAP and ENU are both gravity-aligned fixed frames. Their rotation has
-    // only one degree of freedom: yaw about the common +Z axis. Estimate the
-    // horizontal rigid transform with fixed scale, embed its 2-D rotation in
-    // 3-D, and estimate only a constant vertical translation. A straight
-    // trajectory is sufficient because no roll/pitch rotation is estimated.
-    const Eigen::Matrix3d transform_map_enu_xy = Eigen::umeyama(
-        gps_matrix.topRows<2>(), ndt_matrix.topRows<2>(), false);
-    Eigen::Matrix3d rotation_map_enu = Eigen::Matrix3d::Identity();
-    rotation_map_enu.topLeftCorner<2, 2>() =
-        transform_map_enu_xy.topLeftCorner<2, 2>();
-    Eigen::Vector3d translation_map_enu = Eigen::Vector3d::Zero();
-    translation_map_enu.head<2>() =
-        transform_map_enu_xy.block<2, 1>(0, 2);
-    translation_map_enu.z() =
-        (ndt_matrix.row(2) - gps_matrix.row(2)).mean();
-
-    double squared_error_sum = 0.0;
-    for (Eigen::Index index = 0; index < pair_count; ++index) {
-        const Eigen::Vector3d residual =
-            rotation_map_enu * gps_matrix.col(index) +
-            translation_map_enu - ndt_matrix.col(index);
-        squared_error_sum += residual.squaredNorm();
-    }
-    const double rmse =
-        std::sqrt(squared_error_sum / static_cast<double>(pair_count));
-
-    {
-        std::lock_guard<std::mutex> lock(map_enu_calibration_mutex_);
-        rotation_map_enu_ = rotation_map_enu;
-        translation_map_enu_ = translation_map_enu;
-        map_enu_calibrated_ = true;
-        gps_calibration_samples_.clear();
-        ndt_calibration_samples_.clear();
+    for (std::size_t index = localization_begin + 1;
+         index < lines.size(); ++index) {
+        const std::string trimmed = TrimYamlLine(lines[index]);
+        if (!trimmed.empty() && trimmed.front() != '#' &&
+            YamlIndent(lines[index]) == 0) {
+            localization_end = index;
+            break;
+        }
     }
 
-    const double yaw_map_enu =
-        std::atan2(rotation_map_enu_(1, 0), rotation_map_enu_(0, 0));
-    LOG(INFO) << "[MAP_ENU_CALIBRATION] completed"
-              << ", matched_pairs=" << pair_count
-              << ", rmse_m=" << rmse
-              << ", det_R=" << rotation_map_enu_.determinant()
-              << ", roll_map_enu_deg=0"
-              << ", pitch_map_enu_deg=0"
-              << ", yaw_map_enu_deg=" << yaw_map_enu / kDegToRad
-              << ", translation_map_enu="
-              << translation_map_enu_.transpose();
+    std::ostringstream translation;
+    translation << std::setprecision(15)
+                << "    translation_map_enu: ["
+                << translation_map_enu.x() << ", "
+                << translation_map_enu.y() << ", "
+                << translation_map_enu.z() << "]";
+    std::ostringstream rotation;
+    rotation << std::setprecision(15)
+             << "    rotation_map_enu_rpy_deg: ["
+             << rotation_map_enu_rpy_deg.x() << ", "
+             << rotation_map_enu_rpy_deg.y() << ", "
+             << rotation_map_enu_rpy_deg.z() << "]";
+    const std::vector<std::string> result_block{
+        "  map_enu_calibration:",
+        "    # p_map = R_map_enu * p_enu + translation_map_enu",
+        translation.str(),
+        rotation.str(),
+        ""};
+
+    std::size_t result_begin = not_found;
+    std::size_t result_end = localization_end;
+    for (std::size_t index = localization_begin + 1;
+         index < localization_end; ++index) {
+        if (YamlIndent(lines[index]) == 2 &&
+            TrimYamlLine(lines[index]) == "map_enu_calibration:") {
+            result_begin = index;
+            result_end = index + 1;
+            while (result_end < localization_end) {
+                const std::string trimmed = TrimYamlLine(lines[result_end]);
+                if (!trimmed.empty() && trimmed.front() != '#' &&
+                    YamlIndent(lines[result_end]) <= 2) {
+                    break;
+                }
+                ++result_end;
+            }
+            break;
+        }
+    }
+
+    if (result_begin == not_found) {
+        lines.insert(lines.begin() + localization_end,
+                     result_block.begin(), result_block.end());
+    } else {
+        lines.erase(lines.begin() + result_begin, lines.begin() + result_end);
+        lines.insert(lines.begin() + result_begin,
+                     result_block.begin(), result_block.end());
+    }
+
+    const std::filesystem::path config_path(yaml_path_);
+    const std::filesystem::path temporary_path =
+        config_path.string() + ".map_enu.tmp";
+    std::ofstream output(temporary_path, std::ios::trunc);
+    if (!output.is_open()) {
+        LOG(ERROR) << "[MAP_ENU_CALIBRATION] cannot open temporary config: "
+                   << temporary_path.string();
+        return false;
+    }
+    for (const std::string& output_line : lines) {
+        output << output_line << '\n';
+    }
+    output.close();
+    if (!output) {
+        LOG(ERROR) << "[MAP_ENU_CALIBRATION] failed writing temporary config: "
+                   << temporary_path.string();
+        std::error_code remove_error;
+        std::filesystem::remove(temporary_path, remove_error);
+        return false;
+    }
+
+    std::error_code rename_error;
+    std::filesystem::rename(temporary_path, config_path, rename_error);
+    if (rename_error) {
+        LOG(ERROR) << "[MAP_ENU_CALIBRATION] failed replacing config: "
+                   << rename_error.message();
+        std::error_code remove_error;
+        std::filesystem::remove(temporary_path, remove_error);
+        return false;
+    }
+
+    LOG(INFO) << "[MAP_ENU_CALIBRATION] result saved to " << yaml_path_;
     return true;
 }
 
 void LocalizationSystem::ResetMapEnuCalibration() {
-    std::lock_guard<std::mutex> lock(map_enu_calibration_mutex_);
-    enu_projector_ = math::JsbsimWgs84Enu();
-    map_enu_calibrated_ = false;
-    rotation_map_enu_.setIdentity();
-    translation_map_enu_.setZero();
-    gps_calibration_samples_.clear();
-    ndt_calibration_samples_.clear();
-    calibration_travel_distance_m_ = 0.0;
-    calibration_distance_complete_ = false;
+    std::lock_guard<std::mutex> lock(gps_init_mutex_);
+    WGS84_Model = math::JsbsimWgs84Enu();
+    start_EKF_localization_ = false;
+    R_MAP_ENU.setIdentity();
+    t_MAP_ENU.setZero();
+    fix_postions_.assign(1, Eigen::Vector3d::Zero());
+    fix_positions_.assign(1, Eigen::Vector3d::Zero());
+    fix_timestamps_.assign(1, 0.0);
+    ndt_positions_.clear();
+    ndt_timestamps_.clear();
+    count = 0;
 }
 
 void LocalizationSystem::HandleGpsPosition(
     double stamp, const Eigen::Vector3d& position_enu,
     const Eigen::Matrix3d& covariance_enu) {
     const Eigen::Vector3d position_map =
-        rotation_map_enu_ * position_enu + translation_map_enu_;
+        R_MAP_ENU * position_enu + t_MAP_ENU;
     Eigen::Matrix3d covariance_map =
-        rotation_map_enu_ * covariance_enu * rotation_map_enu_.transpose();
+        R_MAP_ENU * covariance_enu * R_MAP_ENU.transpose();
     covariance_map = 0.5 * (covariance_map + covariance_map.transpose());
 
     std::lock_guard<std::mutex> lock(filter_mutex_);
@@ -749,7 +827,7 @@ void LocalizationSystem::HandleGpsOrientation(
     const Eigen::Matrix3d measured_rotation_enu_gps =
         loc::EKF::RotationFromRpy(measured_rpy_enu_gps);
     const Eigen::Matrix3d measured_rotation_map_body =
-        rotation_map_enu_ * measured_rotation_enu_gps *
+        R_MAP_ENU * measured_rotation_enu_gps *
         gps_rotation_body_gps_.transpose();
     const Eigen::Vector3d measured_rpy_map_body =
         loc::EKF::RpyFromRotation(measured_rotation_map_body);
@@ -836,7 +914,7 @@ void LocalizationSystem::ProcessgpsVelocity(
     const auto& linear = velocity->twist.twist.linear;
     if (!std::isfinite(stamp) || !std::isfinite(linear.x) ||
         !std::isfinite(linear.y) || !std::isfinite(linear.z) ||
-        !map_enu_calibrated_) {
+        !start_EKF_localization_) {
         return;
     }
 
@@ -875,8 +953,6 @@ void LocalizationSystem::ProcessImu(const sensor_msgs::msg::Imu::SharedPtr& imu)
 
 void LocalizationSystem::HandleNdtResult(const loc::LocalizationResult& result) {
     if (!result.valid_) return;
-
-    AddNdtCalibrationSample(result);
 
     const Eigen::Vector2d ndt_position_map =
         result.pose_.translation().head<2>();
@@ -952,7 +1028,7 @@ void LocalizationSystem::GnssToEnu(
     const sensor_msgs::msg::NavSatFix& fix,
     Eigen::Vector3d& position_enu,
     Eigen::Matrix3d& covariance_enu) const {
-    position_enu = enu_projector_.ForwardDegrees(
+    position_enu = WGS84_Model.ForwardDegrees(
         fix.latitude, fix.longitude, fix.altitude);
 
     // This project's GNSS publisher uses a non-standard covariance contract:
@@ -979,7 +1055,7 @@ void LocalizationSystem::GnssToEnu(
     } else {
         covariance_ecef =
             0.5 * (covariance_ecef + covariance_ecef.transpose());
-        covariance_enu = enu_projector_.CovarianceEcefToEnu(
+        covariance_enu = WGS84_Model.CovarianceEcefToEnu(
             covariance_ecef);
         covariance_enu =
             0.5 * (covariance_enu + covariance_enu.transpose());
@@ -1008,7 +1084,7 @@ void LocalizationSystem::VelocityToMap(
         velocity.twist.twist.linear.y,
         velocity.twist.twist.linear.z);
 
-    velocity_map = (rotation_map_enu_ * velocity_enu).head<2>();
+    velocity_map = (R_MAP_ENU * velocity_enu).head<2>();
 
     Eigen::Matrix3d covariance_enu;
     for (int row = 0; row < 3; ++row) {
@@ -1019,8 +1095,8 @@ void LocalizationSystem::VelocityToMap(
     }
     if (IsUsableCovariance(covariance_enu)) {
         const Eigen::Matrix3d covariance_map_3d =
-            rotation_map_enu_ * covariance_enu *
-            rotation_map_enu_.transpose();
+            R_MAP_ENU * covariance_enu *
+            R_MAP_ENU.transpose();
         covariance_map = covariance_map_3d.topLeftCorner<2, 2>();
     } else {
         covariance_map.setZero();
