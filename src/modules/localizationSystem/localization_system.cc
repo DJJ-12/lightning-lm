@@ -322,25 +322,30 @@ bool LocalizationSystem::Init(const std::string& yaml_path,
             [this](const loc::LocalizationResult& result) {
                 HandleNdtResult(result);
                 std::lock_guard<std::mutex> lock(gps_init_mutex_);
-                if (!UsesGpsPosition() || start_EKF_localization_) return;
+                if (!UsesGpsPosition() || start_EKF_localization_ ||
+                    !result.reliable_) {
+                    return;
+                }
 
                 const Eigen::Vector3d pos = result.pose_.translation();
 
                 if (ndt_positions_.empty()) {
                     ndt_positions_.push_back(pos);
                     ndt_timestamps_.push_back(result.timestamp_);
-                } else {
-                    const double dist_to_last = (pos - ndt_positions_.back()).norm();
-                    const double dist_to_first = (pos - ndt_positions_.front()).norm();
+                    return;
+                }
 
-                    if (dist_to_last > 1.0 && dist_to_first < 50.0) {
-                        ndt_positions_.push_back(pos);
-                        ndt_timestamps_.push_back(result.timestamp_);
-                        return;
-                    }
-                    if (dist_to_first >= 50.0) {
-                        TryHandleGpsInitialization();
-                    }
+                const double dist_to_last =
+                    (pos - ndt_positions_.back()).norm();
+                if (dist_to_last <= 1.0) return;
+
+                ndt_positions_.push_back(pos);
+                ndt_timestamps_.push_back(result.timestamp_);
+
+                const double dist_to_first =
+                    (pos - ndt_positions_.front()).norm();
+                if (dist_to_first >= 50.0) {
+                    TryHandleGpsInitialization();
                 }
             });
     }
@@ -542,13 +547,15 @@ void LocalizationSystem::ProcessGps(
                       << ", altitude=" << fix_postions_[0].z();
         }
 
-        // NDT负责每隔约1m采样；GPS连续保存，标定时再按时间找最近点。
-        Eigen::Vector3d position_enu = WGS84_Model.ForwardDegrees(fix->latitude, fix->longitude, fix->altitude);
-        if(stamp-ndt_timestamps_.back() < 0.05){
+        // NDT负责每隔约1m采样；GPS只保存该采样时刻前后50ms内的少量数据。
+        Eigen::Vector3d position_enu = WGS84_Model.ForwardDegrees(
+            fix->latitude, fix->longitude, fix->altitude);
+        if (!ndt_timestamps_.empty() &&
+            std::abs(stamp - ndt_timestamps_.back()) < 0.05) {
             fix_positions_.push_back(position_enu);
             fix_timestamps_.push_back(stamp);
-            return;
         }
+        return;
     }
 
     Eigen::Vector3d position_enu;
@@ -577,7 +584,10 @@ void LocalizationSystem::TryHandleGpsInitialization() {
     if (ndt_positions_.size() != ndt_timestamps_.size()) return;
     if (ndt_positions_.empty() || fix_positions_.size() <= 1) return;
 
-    std::vector<Eigen::Vector3d> GPS_positions(ndt_positions_.size());
+    std::vector<Eigen::Vector3d> GPS_positions;
+    std::vector<Eigen::Vector3d> NDT_positions;
+    GPS_positions.reserve(ndt_positions_.size());
+    NDT_positions.reserve(ndt_positions_.size());
 
     int j = 0;
     for (int i = 0; i < static_cast<int>(ndt_positions_.size()); ++i) {
@@ -598,21 +608,50 @@ void LocalizationSystem::TryHandleGpsInitialization() {
             }
         }
 
-        GPS_positions[i] = fix_positions_[best_j];
-        j = best_j;
+        if (min_diff < 0.05) {
+            GPS_positions.push_back(fix_positions_[best_j]);
+            NDT_positions.push_back(ndt_positions_[i]);
+            j = best_j;
+        }
     }
-    int N = GPS_positions.size();
-    if (GPS_positions.size() != ndt_positions_.size() || N <= 10) return;
-    Eigen::Matrix3Xd gps_mat(3, N);
-    Eigen::Matrix3Xd ndt_mat(3, N);
+
+    const int N = static_cast<int>(GPS_positions.size());
+    if (N <= 10) return;
+
+    const double matched_distance =
+        (NDT_positions.back() - NDT_positions.front()).norm();
+    if (matched_distance < 40.0) return;
+
+    Eigen::Matrix2Xd gps_mat(2, N);
+    Eigen::Matrix2Xd ndt_mat(2, N);
     for (int i = 0; i < N; ++i) {
-        gps_mat.col(i) = GPS_positions[i];
-        ndt_mat.col(i) = ndt_positions_[i];
+        gps_mat.col(i) = GPS_positions[i].head<2>();
+        ndt_mat.col(i) = NDT_positions[i].head<2>();
     }
-    //计算 ENU-MAP
-    Eigen::Matrix4d T_map_enu = Eigen::umeyama(gps_mat, ndt_mat, false);
-    R_MAP_ENU = T_map_enu.block<3, 3>(0, 0);
-    t_MAP_ENU = T_map_enu.block<3, 1>(0, 3);
+
+    // MAP和ENU都是重力对齐的固定坐标系，只估计水平面内的yaw和平移。
+    const Eigen::Matrix3d T_map_enu =
+        Eigen::umeyama(gps_mat, ndt_mat, false);
+    R_MAP_ENU.setIdentity();
+    R_MAP_ENU.topLeftCorner<2, 2>() =
+        T_map_enu.topLeftCorner<2, 2>();
+    t_MAP_ENU.head<2>() = T_map_enu.block<2, 1>(0, 2);
+
+    double z_offset_sum = 0.0;
+    double squared_error_sum = 0.0;
+    for (int i = 0; i < N; ++i) {
+        z_offset_sum += NDT_positions[i].z() - GPS_positions[i].z();
+        const Eigen::Vector2d residual =
+            R_MAP_ENU.topLeftCorner<2, 2>() * GPS_positions[i].head<2>() +
+            t_MAP_ENU.head<2>() - NDT_positions[i].head<2>();
+        squared_error_sum += residual.squaredNorm();
+    }
+    t_MAP_ENU.z() = z_offset_sum / static_cast<double>(N);
+
+    const double rmse =
+        std::sqrt(squared_error_sum / static_cast<double>(N));
+    const double yaw_map_enu =
+        std::atan2(R_MAP_ENU(1, 0), R_MAP_ENU(0, 0));
     start_EKF_localization_ = true;
 
     const Eigen::Vector3d rotation_map_enu_rpy_deg =
@@ -621,6 +660,9 @@ void LocalizationSystem::TryHandleGpsInitialization() {
         t_MAP_ENU, rotation_map_enu_rpy_deg);
     LOG(INFO) << "[MAP_ENU_CALIBRATION] completed"
               << ", matched_pairs=" << N
+              << ", matched_distance_m=" << matched_distance
+              << ", rmse_m=" << rmse
+              << ", yaw_map_enu_deg=" << yaw_map_enu / kDegToRad
               << ", rotation_map_enu_rpy_deg="
               << rotation_map_enu_rpy_deg.transpose()
               << ", translation_map_enu="

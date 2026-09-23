@@ -95,6 +95,13 @@ localization:
   mode: "ndt_gps_ins_ekf"
   output_frame: "map"
 
+  # Automatically overwritten after MAP-ENU calibration succeeds.
+  # p_map = R_map_enu * p_enu + translation_map_enu
+  map_enu_calibration:
+    # p_map = R_map_enu * p_enu + translation_map_enu
+    translation_map_enu: [0.0391116352652858, 0.0511941239238161, 0.874583252258882]
+    rotation_map_enu_rpy_deg: [0, -0, 87.5775022035131]
+
   quality:
     excellent_threshold: 4.0
     good_threshold: 2.5
@@ -111,15 +118,10 @@ localization:
     max_rotation_std_deg: 30.0
 
   gps_ins:
-    # p_G_A [m]: antenna point A in the GPS-device frame G. A is exactly the
-    # point whose latitude/longitude/altitude is published by /fdilink/gnss_fix.
-    gps_output_lever_arm_gps: [0.0, 0.0, 0.0]
-    # T_body_gps: [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg].
-    # It maps GPS-device coordinates into the body frame.
-    gps_extrinsic_body_gps: [0.0, 0.0, 0.0, 0.0, 0.0, -90.0]
-    gps_initialization_sync_tolerance_sec: 0.05
-
-    gps_initialization_sample_count: 10
+    # R_body_gps RPY in degrees. It is used only to convert the optional INS
+    # orientation observation from GPS-device axes to body axes. NavSatFix
+    # already reports the GPS-device origin, so position fusion has no lever arm.
+    gps_rotation_body_gps_rpy_deg: [0.0, 0.0, 90.0]
 
 
   ekf:
@@ -143,7 +145,8 @@ localization:
     # Values named *_deg are converted to radians in code.
     gps_position_std_x: 0.05
     gps_position_std_y: 0.05
-    gps_position_std_z: 0.10
+    # Deliberately distrust GPS altitude so NDT determines map-frame height.
+    gps_position_std_z: 100.0
     gps_orientation_std_floor_roll_deg: 0.2
     gps_orientation_std_floor_pitch_deg: 0.2
     gps_orientation_std_floor_yaw_deg: 0.5

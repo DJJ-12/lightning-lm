@@ -104,6 +104,12 @@ localization:
   mode: "ndt_gps_ins_ekf"
   output_frame: "map"
 
+  # Automatically overwritten after MAP-ENU calibration succeeds.
+  # p_map = R_map_enu * p_enu + translation_map_enu
+  map_enu_calibration:
+    translation_map_enu: [0.0, 0.0, 0.0]
+    rotation_map_enu_rpy_deg: [0.0, 0.0, 0.0]
+
   quality:
     excellent_threshold: 4.0
     good_threshold: 2.5
