@@ -1,8 +1,8 @@
 #pragma once
 
 #include <cstddef>
-#include <mutex>
 #include <functional>
+#include <mutex>
 #include <memory>
 #include <string>
 #include <cstdint>
@@ -15,26 +15,14 @@
 #include "core/localization/GlobalLocalizer/GlobalLocalizer.h"
 #include "core/localization/localization_diagnostic.h"
 #include "core/localization/localization_result.h"
-#include "geometry_msgs/msg/transform_stamped.hpp"
 #include "livox_ros_driver2/msg/custom_msg.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 
-namespace lightning {
-namespace ui {
-class PangolinWindow;
-}
-
-namespace loc {
+namespace lightning::loc {
 
 class Localization {
    public:
-    struct Options {
-        bool with_ui_ = false;
-        SE3 T_base_lidar_ = SE3();
-        bool pub_tf_ = false;
-    };
-
-    explicit Localization(Options options);
+    Localization() = default;
     ~Localization() = default;
 
     bool Init(const std::string& yaml_path, const std::string& global_map_path);
@@ -49,26 +37,10 @@ class Localization {
     bool SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vector3d& t);
     void Finish();
 
-    using TFCallback = std::function<void(const geometry_msgs::msg::TransformStamped& odom)>;
     using ResultCallback = std::function<void(const LocalizationResult& result)>;
     using XYZCloud = pcl::PointCloud<pcl::PointXYZ>;
 
-    void SetTFCallback(TFCallback&& callback);
     void SetResultCallback(ResultCallback&& callback);
-    // The localization system owns the final estimator output. NDT results
-    // reach it through ResultCallback; only the selected final result is sent
-    // back here for visualization.
-    void UpdateVisualization(const LocalizationResult& result);
-    // Draws the pre-filter gps antenna position after WGS84/UTM/ENU -> map
-    // conversion. This is visualization only and never changes localization.
-    void UpdategpsObservationVisualization(
-        const Eigen::Vector2d& position_map);
-    // Draws every valid raw NDT output. This path is independent from EKF
-    // acceptance and remains available in LiDAR-only mode.
-    void UpdateNdtObservationVisualization(
-        const Eigen::Vector2d& position_map);
-    void MarkPoor(const std::string& message);
-    LocalizationResult GetLatestResult() const;
 
    private:
     struct LocCloudFrame {
@@ -94,13 +66,11 @@ class Localization {
         const std::string& base_link_frame) const;
     LocalizationFrameOutcome HandleCloudFrame(const LocCloudFrame& frame);
     LocalizationFrameOutcome ProcessLocalizationCloud(const LocCloudFrame& frame);
-    void PublishResult(const LocalizationResult& result);
-    void LoadTargetMapForUI(const std::string& global_map_path);
+    void EmitResult(const LocalizationResult& result);
     static SE3 Matrix4dToSE3(const Eigen::Matrix4d& pose);
 
     std::mutex global_mutex_;
     std::mutex localizer_mutex_;
-    Options options_;
 
     robot_localizer::Localizer localizer_;
 
@@ -124,12 +94,7 @@ class Localization {
 
     robot_localizer::QualityThresholds quality_thresholds_;
 
-    LocalizationResult loc_result_;
-    mutable std::mutex loc_result_mutex_;
-
-    TFCallback tf_callback_;
     ResultCallback result_callback_;
-    std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
 
     std::string base_link_frame_ = "base_link";
 
@@ -148,5 +113,4 @@ class Localization {
     double diagnostic_max_topic_to_ndt_ms_ = 0.0;
 };
 
-}  // namespace loc
-}  // namespace lightning
+}  // namespace lightning::loc

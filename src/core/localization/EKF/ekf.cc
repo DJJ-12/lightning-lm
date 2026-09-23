@@ -119,7 +119,7 @@ void EKF::PredictStep(double dt) {
     StabilizeCovariance();
     EnforceMotionConstraints();
 }
-
+/*
 Eigen::Matrix<double,3,3> EKF::ComputeLeverArmJacobian(
     const Eigen::Vector3d& lever_arm,
     const Eigen::Vector3d& rpy)
@@ -229,6 +229,27 @@ bool EKF::UpdateGpsPoseEnu(
         mahalanobis, true);
 }
 
+*/
+bool EKF::UpdateGpsPoseMap(
+    double stamp,
+    const Eigen::Vector3d& gps_position_map,
+    const Eigen::Matrix3d& gps_covariance_map,
+    double gate_chi2, double* mahalanobis) {
+    if (!PredictTo(stamp)) return false;
+
+    const Eigen::Vector3d residual =
+        gps_position_map - state_.position_map;
+    Eigen::Matrix<double, 3, kStateDim> jacobian =
+        Eigen::Matrix<double, 3, kStateDim>::Zero();
+
+    jacobian.block<3, 3>(0, kPositionX).setIdentity();
+
+    return ApplyUpdate(
+        residual, jacobian, gps_covariance_map,
+        gate_chi2 > 0.0 ? gate_chi2 : options_.gps_position_gate_chi2,
+        mahalanobis, true);
+}
+
 bool EKF::UpdateMapOrientation(
     double stamp,
     const Eigen::Vector3d& measured_rpy_map_body,
@@ -316,44 +337,40 @@ bool EKF::ApplyUpdate(const Eigen::VectorXd& residual,
         noise(index, index) =
             std::max(noise(index, index), options_.min_covariance);
     }
-    //(P- + H^T*R*H) * δx = H^T*R*r
-    // δx = (P- + H^T*R*H)^-1 * H^T*R*r
-    // δx = P- * H^T *(H * P- * H^T + R)^-1 * r = P- * H^T *S^-1 * r = K*r
-    // K = P- * H^T *S^-1
-    //S= H * P- * H^T + R
+    // Innovation covariance and Kalman gain:
+    //   S = H * P- * H^T + R
+    //   K = P- * H^T * S^-1
+    //   delta_x = K * residual
     const Eigen::MatrixXd innovation_covariance =
         measurement_jacobian * covariance_ *
             measurement_jacobian.transpose() +
         noise;
-    // S = L * D * L^T   3*3 的矩阵
+    // Solve with LDLT instead of explicitly forming S^-1.
     Eigen::LDLT<Eigen::MatrixXd> decomposition(innovation_covariance);
     if (decomposition.info() != Eigen::Success ||
         !decomposition.isPositive()) {
         return false;
     }
-    // 通过解S * y = r  来求解 y= S^-1 * r
     const Eigen::VectorXd solved_residual = decomposition.solve(residual);
     if (!solved_residual.allFinite()) {
         return false;
     }
-   // r^T * y = r^T * S^-1 * r
+    // Squared Mahalanobis distance: residual^T * S^-1 * residual.
     const double distance = residual.dot(solved_residual);
     if (mahalanobis) *mahalanobis = distance;
     if (!std::isfinite(distance) || distance < 0.0 ||
         (gate_chi2 > 0.0 && distance > gate_chi2)) {
         return false;
     }
-    // H * P-
     const Eigen::MatrixXd right_hand_side = measurement_jacobian * covariance_;
-    // （S * y）^T  = (H * P-)^T= P- * H^T
-    //y^T= P- * H^T * S^-1 = K
     Eigen::MatrixXd gain = decomposition.solve(right_hand_side).transpose();
     if (!gain.allFinite()) return false;
     if (!allow_attitude_update) {
         // Map-frame velocity is not an attitude observation. Even if a pose
         // update created cross-covariance, a velocity-only measurement must
-        // not rotate RPY or alter angular velocity. NDT and lever-arm-aware GPS
-        // position updates pass true because their Jacobians can observe RPY.
+        // not rotate RPY or alter angular velocity. NDT observes RPY directly;
+        // a GPS position update may affect it only through existing state
+        // cross-covariance, which is standard EKF behavior.
         gain.block(kRoll, 0, 3, gain.cols()).setZero();
         gain.block(kAngularVelocityX, 0, 3, gain.cols()).setZero();
     }
@@ -361,7 +378,8 @@ bool EKF::ApplyUpdate(const Eigen::VectorXd& residual,
     StateVector vector = ToVector();
     vector += gain * residual;
     SetVector(vector);
-    // P+ = (I - K * H) * P- * H^T + K * R
+    // Joseph form keeps the posterior covariance symmetric and positive:
+    //   P+ = (I-KH)P-(I-KH)^T + KRK^T.
     const Covariance identity = Covariance::Identity();
     const Covariance joseph_left = identity - gain * measurement_jacobian;
     covariance_ =

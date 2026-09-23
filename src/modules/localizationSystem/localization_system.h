@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <Eigen/Geometry>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -28,6 +29,10 @@
 
 namespace lightning::loc {
 class Localization;
+}
+
+namespace lightning::ui {
+class PangolinWindow;
 }
 
 namespace lightning::modules {
@@ -66,7 +71,6 @@ class LocalizationSystem {
         const nav_msgs::msg::Odometry::SharedPtr& odometry);
     void ProcessImu(const sensor_msgs::msg::Imu::SharedPtr& imu);
 
-    void MarkPoor(const std::string& message);
     loc::LocalizationResult GetLatestResult() const;
     void Reset();
 
@@ -76,9 +80,6 @@ class LocalizationSystem {
     }
     bool UsesGpsPosition() const { return !gps_topic_.empty(); }
     bool UsesGpsOrientation() const { return !orientation_topic_.empty(); }
-    bool UsesGpsPose() const {
-        return UsesGpsPosition() && UsesGpsOrientation();
-    }
     bool UsesGpsVelocity() const { return !velocity_topic_.empty(); }
     bool UsesWheelOdometry() const { return !wheel_odometry_topic_.empty(); }
     bool RequiresMap() const { return UsesLidar() || with_ui_; }
@@ -88,26 +89,26 @@ class LocalizationSystem {
 
    private:
     void SetupPublishers(rclcpp::Node::SharedPtr node);
+    bool InitializeVisualization(const std::string& map_path);
+    void LoadMapForVisualization(const std::string& map_path);
     void HandleNdtResult(const loc::LocalizationResult& result);
+    void UpdateEkfWithNdt(const loc::LocalizationResult& result);
 
-    void TryHandleGpsInitialization();
-    void HandleGpsInitializationPair(
-        const sensor_msgs::msg::NavSatFix& fix,
-        const geometry_msgs::msg::TwistWithCovarianceStamped& orientation);
-    void HandleGpsPosition(const sensor_msgs::msg::NavSatFix& fix);
+    struct TimedPosition {
+        double stamp = 0.0;
+        Eigen::Vector3d position = Eigen::Vector3d::Zero();
+    };
+
+    void AddGpsCalibrationSample(double stamp,
+                                 const Eigen::Vector3d& position_enu);
+    void AddNdtCalibrationSample(const loc::LocalizationResult& result);
+    bool TryFinishMapEnuCalibration();
+    void ResetMapEnuCalibration();
+    void HandleGpsPosition(double stamp,
+                           const Eigen::Vector3d& position_enu,
+                           const Eigen::Matrix3d& covariance_enu);
     void HandleGpsOrientation(
         const geometry_msgs::msg::TwistWithCovarianceStamped& orientation);
-
-    // GPS initialization is the second stage of localization initialization:
-    // 1) NDT relocalizes from the user-provided rough MAP<-BODY seed;
-    // 2) while the vehicle stays still, average the first N synchronized GPS
-    //    positions and INS orientations and solve one fixed 3-D ENU<-MAP
-    //    transform. After that, GPS position updates no longer wait for INS.
-    void BeginGpsInitialization(const SE3& initial_map_body_pose);
-    bool AddGpsInitializationSample(
-        const Eigen::Vector3d& gps_output_position_enu,
-        const Eigen::Matrix3d& rotation_enu_gps);
-    bool FinishGpsInitialization();
 
     void GnssToEnu(const sensor_msgs::msg::NavSatFix& fix,
                    Eigen::Vector3d& position_enu,
@@ -117,8 +118,7 @@ class LocalizationSystem {
         Eigen::Vector2d& velocity_map,
         Eigen::Matrix2d& covariance_map) const;
 
-    void InitializeEkfFromNdt(const loc::LocalizationResult& ndt);
-    void InitializeManualGuess(double stamp);
+    bool InitializeEkfFromNdt(const loc::LocalizationResult& ndt);
     void PublishPredictionIfAdvanced(double stamp,
                                      const std::string& message);
     loc::LocalizationResult BuildEkfResult(double stamp,
@@ -154,24 +154,18 @@ class LocalizationSystem {
 
     bool with_ui_ = false;
     bool map_ready_ = false;
-    bool manual_initial_guess_pending_ = false;
-    SE3 manual_initial_pose_;
 
-    std::shared_ptr<loc::Localization> loc_;
+    // NDT only: map registration, initial-pose alignment and raw NDT results.
+    std::shared_ptr<loc::Localization> ndt_localization_;
+    // All localization visualization is owned by this outer coordinator.
+    std::shared_ptr<ui::PangolinWindow> ui_;
     mutable std::mutex filter_mutex_;
     loc::EKF ekf_;
 
-    // Static GPS geometry. A is exactly the antenna point whose WGS84
-    // coordinate is published by NavSatFix. The configured lever arm is its
-    // coordinate in the GPS-device frame: p_G_A. T_B_G then gives:
-    //   p_B_A = t_B_G + R_B_G * p_G_A.
-    Eigen::Vector3d gps_antenna_position_gps_ = Eigen::Vector3d::Zero();
-    Eigen::Vector3d gps_translation_body_gps_ = Eigen::Vector3d::Zero();
+    // Rotation only. NavSatFix already reports the GPS-device origin, which
+    // is treated as the EKF body-position observation; no lever arm is used.
     Eigen::Vector3d gps_rotation_body_gps_rpy_ = Eigen::Vector3d::Zero();
     Eigen::Matrix3d gps_rotation_body_gps_ = Eigen::Matrix3d::Identity();
-    Eigen::Vector3d gps_antenna_position_body_ = Eigen::Vector3d::Zero();
-    double gps_initialization_sync_tolerance_sec_ = 0.05;
-    int gps_initialization_sample_count_required_ = 10;
 
     double initial_position_std_ = 0.5;
     double initial_orientation_std_ =
@@ -195,30 +189,18 @@ class LocalizationSystem {
     double ndt_orientation_std_ =
         1.0 * 3.14159265358979323846 / 180.0;
 
-    // Fixed transform initialized once per localization run from the first
-    // reliable NDT pose + first N stationary GPS/orientation pairs:
-    //   p_enu = R_enu_map * p_map + t_enu_map.
-    bool gps_initial_map_body_ready_ = false;
-    SE3 gps_initial_map_body_pose_;
-    int gps_initialization_sample_count_ = 0;
-    Eigen::Vector3d gps_initial_body_position_enu_sum_ =
-        Eigen::Vector3d::Zero();
-    Eigen::Vector4d gps_initial_body_quaternion_sum_ =
-        Eigen::Vector4d::Zero();
-    Eigen::Quaterniond gps_initial_body_reference_quaternion_ =
-        Eigen::Quaterniond::Identity();
-    bool gps_initial_body_reference_quaternion_ready_ = false;
+    // Calibration estimates p_map = Rz(yaw_map_enu) * p_enu + t_map_enu from
+    // timestamp-matched GPS/NDT positions sampled over the first 50 m. MAP and
+    // ENU are gravity-aligned, so roll_map_enu and pitch_map_enu stay zero.
     math::JsbsimWgs84Enu enu_projector_;
-    bool enu_from_map_ready_ = false;
-    Eigen::Matrix3d enu_from_map_rotation_ = Eigen::Matrix3d::Identity();
-    Eigen::Vector3d enu_from_map_translation_ = Eigen::Vector3d::Zero();
-
-    // Approximate synchronization is initialization-only and keeps one latest
-    // unmatched GPS position and one latest INS orientation message.
-    std::mutex gps_initialization_mutex_;
-    sensor_msgs::msg::NavSatFix::SharedPtr pending_gps_;
-    geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr
-        pending_gps_orientation_;
+    bool map_enu_calibrated_ = false;
+    Eigen::Matrix3d rotation_map_enu_ = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d translation_map_enu_ = Eigen::Vector3d::Zero();
+    std::mutex map_enu_calibration_mutex_;
+    std::vector<TimedPosition> gps_calibration_samples_;
+    std::vector<TimedPosition> ndt_calibration_samples_;
+    double calibration_travel_distance_m_ = 0.0;
+    bool calibration_distance_complete_ = false;
 
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr loc_odom_pub_;

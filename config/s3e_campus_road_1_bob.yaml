@@ -120,13 +120,9 @@ localization:
     max_rotation_std_deg: 30.0
 
   gps_ins:
-    # GPS fusion remains disabled while orientation_topic is empty; NDT works
-    # independently. These identity values document the GPS-frame geometry.
-    gps_output_lever_arm_gps: [0.0, 0.0, 0.0]
-    # [tx_m, ty_m, tz_m, roll_deg, pitch_deg, yaw_deg].
-    gps_extrinsic_body_gps: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    gps_initialization_sync_tolerance_sec: 0.05
-    gps_initialization_sample_count: 10
+    # Used only when orientation_topic is enabled. NavSatFix position itself
+    # is the GPS-device origin and has no lever-arm compensation.
+    gps_rotation_body_gps_rpy_deg: [0.0, 0.0, 0.0]
 
   ekf:
     # Twelve-state 3-D pose + planar-motion model:
@@ -148,7 +144,8 @@ localization:
     # covariance. Values named *_deg are converted to radians in code.
     gps_position_std_x: 0.05
     gps_position_std_y: 0.05
-    gps_position_std_z: 0.10
+    # Deliberately distrust GPS altitude so NDT determines map-frame height.
+    gps_position_std_z: 100.0
     gps_velocity_std_x: 0.10
     gps_velocity_std_y: 0.10
     ndt_position_std_x: 0.10

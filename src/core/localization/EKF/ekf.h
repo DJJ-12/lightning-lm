@@ -55,7 +55,7 @@ class EKF {
         double min_covariance = 1e-10;
         double max_covariance = 1e8;
 
-        double gps_position_gate_chi2 = 16.3;  // 3 antenna-coordinate DoF
+        double gps_position_gate_chi2 = 16.3;  // 3 position DoF
         double gps_orientation_gate_chi2 = 16.3;  // 3 Euler-angle DoF
         double gps_velocity_gate_chi2 = 11.8;  // 2 DoF
         double ndt_pose_gate_chi2 = 22.5;      // 6 DoF
@@ -93,24 +93,14 @@ class EKF {
     //   omega_z     = constant.
     bool PredictTo(double stamp);
 
-    // A single GNSS output point is fused directly in ENU. The fixed ENU<-MAP
-    // transform is initialized once from synchronized GNSS + INS orientation
-    // samples after NDT relocalization. The EKF state remains expressed in MAP:
-    // Let A be the antenna point reported by NavSatFix.  LocalizationSystem
-    // converts its GPS-frame coordinate p_G_A into the body-frame
-    // coordinate p_B_A before calling this function:
-    //   h(x) = R_enu_map * (p_map + R_map_body(rpy) * p_B_A)
-    //          + t_enu_map.
-    // A non-zero antenna position makes this observation sensitive to RPY.
-    // Runtime INS orientation is handled independently below and never uses
-    // this lever-arm Jacobian.
-    bool UpdateGpsPoseEnu(
+    // LocalizationSystem converts the device-origin NavSatFix observation and
+    // its covariance from ENU into MAP before this update. The GPS device
+    // origin is the position observed by the filter, so h(x)=p_map and no
+    // lever-arm or attitude term appears in this measurement model.
+    bool UpdateGpsPoseMap(
         double stamp,
-        const Eigen::Vector3d& gps_position_enu,
-        const Eigen::Vector3d& antenna_position_body,
-        const Eigen::Matrix3d& gps_covariance_enu,
-        const Eigen::Matrix3d& rotation_enu_map,
-        const Eigen::Vector3d& translation_enu_map,
+        const Eigen::Vector3d& gps_position_map,
+        const Eigen::Matrix3d& gps_covariance_map,
         double gate_chi2 = -1.0,
         double* mahalanobis = nullptr);
 
@@ -152,9 +142,6 @@ class EKF {
 
    private:
     void PredictStep(double dt);
-    static Eigen::Matrix3d ComputeLeverArmJacobian(
-        const Eigen::Vector3d& lever_arm,
-        const Eigen::Vector3d& rpy);
     bool ApplyUpdate(const Eigen::VectorXd& residual,
                      const Eigen::MatrixXd& measurement_jacobian,
                      const Eigen::MatrixXd& measurement_covariance,

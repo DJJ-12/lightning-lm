@@ -762,6 +762,8 @@ class JsbsimWgs84Enu {
         const double cos_lat = std::cos(latitude_rad);
         const double sin_lon = std::sin(longitude_rad);
         const double cos_lon = std::cos(longitude_rad);
+        // ECEF to ENU
+        // 旋转矩阵，将ECEF坐标系转换为ENU坐标系
         ecef_to_enu_ << -sin_lon, cos_lon, 0.0, -cos_lon * sin_lat, -sin_lon * sin_lat, cos_lat, cos_lon * cos_lat, sin_lon * cos_lat, sin_lat;
         initialized_ = origin_ecef_.allFinite() && ecef_to_enu_.allFinite();
         return initialized_;
@@ -773,6 +775,11 @@ class JsbsimWgs84Enu {
         if (!initialized_ || !std::isfinite(latitude_deg) || !std::isfinite(longitude_deg) || !std::isfinite(altitude_m)) return Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
         const Eigen::Vector3d ecef = GeodeticToEcefRadians(latitude_deg * M_PI / 180.0, longitude_deg * M_PI / 180.0, altitude_m);
         return ecef_to_enu_ * (ecef - origin_ecef_);
+    }
+
+    Eigen::Matrix3d CovarianceEcefToEnu(
+        const Eigen::Matrix3d& covariance_ecef) const {
+        return ecef_to_enu_ * covariance_ecef * ecef_to_enu_.transpose();
     }
 
     static Eigen::Vector3d GeodeticToEcefDegrees(double latitude_deg, double longitude_deg, double altitude_m) {
